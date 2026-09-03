@@ -1,12 +1,7 @@
 # discogs2ytmusic
 
-Sync your Discogs collection to YouTube Music playlists, one playlist per
-Discogs **style** tag (e.g. "Deep House", "Dub Techno", "Hard Bop").
-
-Runs entirely locally as a CLI. Matches tracks first against YT Music's own
-catalog, and falls back to a plain YouTube search (via `yt-dlp`) so unofficial
-/ small-label / small-channel uploads — common for underground electronic
-records — still get picked up.
+Sync your Discogs collection to YouTube Music playlists.
+Runs entirely locally as a CLI.
 
 ## Setup
 
