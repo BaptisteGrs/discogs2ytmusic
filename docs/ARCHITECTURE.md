@@ -9,12 +9,12 @@ for install/usage instructions see the [README](../README.md).
 
 The tool has two phases, run as two commands:
 
-```
-discogs2ytmusic scan          discogs2ytmusic sync [--apply]
-┌─────────────┐   basic info   ┌──────────────┐   video IDs   ┌──────────────┐
-│   Discogs    │───────────────▶│    SQLite    │───────────────▶│  YT Music    │
-│     API      │   tracklists   │    cache     │   playlists   │     API      │
-└─────────────┘               └──────────────┘               └──────────────┘
+```mermaid
+flowchart LR
+    Discogs["Discogs API"] -- "basic info +\ntracklists" --> scan(["scan"])
+    scan --> Cache[("SQLite cache")]
+    Cache -- "releases +\ntracks" --> sync(["sync [--apply]"])
+    sync -- "video IDs" --> YT["YT Music API\n(playlists)"]
 ```
 
 1. **`scan`** pulls your Discogs collection (every release, with its style/
