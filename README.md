@@ -91,12 +91,9 @@ uv run discogs2ytmusic export --style "Deep House" --output deep_house.csv
 ```
 
 Columns: `style, artist, title, matched, video_id, youtube_url, video_title,
-source, score, searched_at`. Add `--only-missing` to list just the tracks
-that found no confident match (candidates for ripping/uploading yourself):
-
-```bash
-uv run discogs2ytmusic export --only-missing --output no_match.csv
-```
+source, score, searched_at`. Filter/sort on the `matched` column (yes/no) in
+your spreadsheet tool to isolate tracks with no confident match — candidates
+for ripping/uploading yourself.
 
 This only reads the local cache — it never hits YouTube itself, so it's
 cheap to re-run as you narrow things down. There's no interactive browser
