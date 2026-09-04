@@ -14,7 +14,7 @@ from rich.table import Table
 
 from . import matcher, store, ytmusic_client
 from .config import Config
-from .discogs import DiscogsClient, DiscogsError
+from .discogs import DiscogsClient, DiscogsError, release_url
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 auth_app = typer.Typer(no_args_is_help=True, help="Manage credentials.")
@@ -211,9 +211,11 @@ def sync(
 
 
 EXPORT_FIELDNAMES = [
+    "match_id",
     "style",
     "artist",
     "title",
+    "discogs_url",
     "matched",
     "video_id",
     "youtube_url",
@@ -228,9 +230,6 @@ EXPORT_FIELDNAMES = [
 def export(
     output: Path = typer.Option(Path("matches.csv"), "--output", "-o", help="CSV file to write."),
     style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable."),
-    only_missing: bool = typer.Option(
-        False, "--only-missing", help="Only include tracks with no confident YouTube match."
-    ),
 ):
     """Export cached track-to-YouTube matches to a CSV for manual review.
 
@@ -253,16 +252,16 @@ def export(
                 for track_title in track_titles:
                     match = store.get_match(conn, release["artist"], track_title)
                     video_id = match["video_id"] if match else None
-                    if only_missing and video_id:
-                        continue
                     searched_at = ""
                     if match is not None:
                         searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
                     rows.append(
                         {
+                            "match_id": match["id"] if match is not None else "",
                             "style": s,
                             "artist": release["artist"],
                             "title": track_title,
+                            "discogs_url": release_url(release["release_id"]),
                             "matched": "yes" if video_id else "no",
                             "video_id": video_id or "",
                             "youtube_url": f"https://music.youtube.com/watch?v={video_id}" if video_id else "",

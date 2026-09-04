@@ -52,21 +52,23 @@ def test_export_writes_csv_with_expected_columns(isolated_cache, dummy_library, 
     assert all(r["matched"] == "yes" for r in rows)
     assert all(r["video_id"].startswith("vid::") for r in rows)
     assert all(r["youtube_url"].startswith("https://music.youtube.com/watch?v=") for r in rows)
+    assert all(r["discogs_url"].startswith("https://www.discogs.com/release/") for r in rows)
+    assert len({r["match_id"] for r in rows}) == len(rows), "each row should have a distinct match_id"
 
 
-def test_export_only_missing_filters_to_unmatched_tracks(isolated_cache, dummy_library, tmp_path):
+def test_export_tags_unmatched_tracks_in_matched_column(isolated_cache, dummy_library, tmp_path):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         _seed_matches(conn, dummy_library, matched=False)
 
     out = tmp_path / "misses.csv"
-    result = runner.invoke(cli.app, ["export", "--output", str(out), "--only-missing"])
+    result = runner.invoke(cli.app, ["export", "--output", str(out)])
 
     assert result.exit_code == 0, result.output
     with out.open() as f:
         rows = list(csv.DictReader(f))
 
-    assert rows, "expected unmatched rows"
+    assert rows, "expected rows even when nothing matched"
     assert all(r["matched"] == "no" for r in rows)
     assert all(r["video_id"] == "" for r in rows)
 

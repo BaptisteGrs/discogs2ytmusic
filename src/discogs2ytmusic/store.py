@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tracks (
 CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
 
 CREATE TABLE IF NOT EXISTS matches (
-    query_key TEXT PRIMARY KEY,   -- "artist||title"
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_key TEXT NOT NULL UNIQUE,   -- "artist||title"
     video_id TEXT,                -- NULL means "searched, no confident match"
     video_title TEXT,
     source TEXT,                  -- 'ytmusic' | 'ytdlp' | 'none'
@@ -44,10 +45,36 @@ CREATE TABLE IF NOT EXISTS playlists (
 """
 
 
+def _migrate_matches_table(conn: sqlite3.Connection) -> None:
+    """One-time upgrade for caches created before `matches` had a surrogate id column."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(matches)")}
+    if not cols or "id" in cols:
+        return
+    conn.executescript(
+        """
+        ALTER TABLE matches RENAME TO matches_old;
+        CREATE TABLE matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query_key TEXT NOT NULL UNIQUE,
+            video_id TEXT,
+            video_title TEXT,
+            source TEXT,
+            score REAL,
+            searched_at REAL NOT NULL
+        );
+        INSERT INTO matches (query_key, video_id, video_title, source, score, searched_at)
+            SELECT query_key, video_id, video_title, source, score, searched_at FROM matches_old;
+        DROP TABLE matches_old;
+        """
+    )
+    conn.commit()
+
+
 @contextmanager
 def connect():
     ensure_dirs()
     conn = sqlite3.connect(CACHE_DB)
+    _migrate_matches_table(conn)
     conn.executescript(SCHEMA)
     try:
         yield conn
