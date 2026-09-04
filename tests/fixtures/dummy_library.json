@@ -1,0 +1,154 @@
+{
+  "releases": [
+    {
+      "release_id": 534187,
+      "artist": "Aloud",
+      "title": "The 3's Up EP",
+      "styles": ["House"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "A", "title": "Sex & Sun Part III", "duration": "6:42"}
+      ]
+    },
+    {
+      "release_id": 185437,
+      "artist": "Dannii Minogue",
+      "title": "This Is It",
+      "styles": ["House"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B3", "title": "This Is It (Miami Heat Mix)", "duration": null}
+      ]
+    },
+    {
+      "release_id": 27979641,
+      "artist": "Dan Ghenacia",
+      "title": "Spasm",
+      "styles": ["House"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "A", "title": "Sydney 23", "duration": null}
+      ]
+    },
+    {
+      "release_id": 28498240,
+      "artist": "Connor Mikami",
+      "title": "If You Know You Know - Volume 1",
+      "styles": ["Techno"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B1", "title": "Foolish Human", "duration": null}
+      ]
+    },
+    {
+      "release_id": 235222,
+      "artist": "Oliver Huntemann",
+      "title": "Disco Tech",
+      "styles": ["Techno"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B2", "title": "Disco Tech (Original Mix)", "duration": null}
+      ]
+    },
+    {
+      "release_id": 27808089,
+      "artist": "Wedding Acid Group",
+      "title": "Metro-303",
+      "styles": ["Techno"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "C2", "title": "Sunday Circles", "duration": "4:04"}
+      ]
+    },
+    {
+      "release_id": 11107327,
+      "artist": "Furious Frank",
+      "title": "Magic Mountain",
+      "styles": ["Deep House"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B3", "title": "Woorabinda Reserve", "duration": null}
+      ]
+    },
+    {
+      "release_id": 34365844,
+      "artist": "Aline Umber, HOSTOM",
+      "title": "Yoyaku Barcelona 2025",
+      "styles": ["Deep House"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B1", "title": "Oto", "duration": null}
+      ]
+    },
+    {
+      "release_id": 15621935,
+      "artist": "Cesare Muraca, Aymeric",
+      "title": "This Tasty Volume #1",
+      "styles": ["Acid"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "A2", "title": "Initial Commit", "duration": "5:09"}
+      ]
+    },
+    {
+      "release_id": 44335,
+      "artist": "Slamm",
+      "title": "Energize",
+      "styles": ["Acid"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B3", "title": "Energize (Captain's Log Mix)", "duration": "8:00"}
+      ]
+    },
+    {
+      "release_id": 33548868,
+      "artist": "Disco Stup, Swin",
+      "title": "Untitled",
+      "styles": ["Acid"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B2", "title": "Loosing Their Minds", "duration": null}
+      ]
+    },
+    {
+      "release_id": 98703,
+      "artist": "WestBam",
+      "title": "Born To Bang",
+      "styles": ["Breakbeat"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "A1", "title": "Born To Bang (Sharam Remix)", "duration": null}
+      ]
+    },
+    {
+      "release_id": 26101723,
+      "artist": "E.T.I.",
+      "title": "Lookout",
+      "styles": ["Breakbeat"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "A", "title": "Lookout (Tha Luv Bomb Mix)", "duration": null}
+      ]
+    },
+    {
+      "release_id": 216482,
+      "artist": "Stereogen",
+      "title": "Hi-Q",
+      "styles": ["Trance"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "B1", "title": "Hi-Q (House Of Usher / Non Eric Mix)", "duration": "5:22"}
+      ]
+    },
+    {
+      "release_id": 28753282,
+      "artist": "Asphalt DJ",
+      "title": "Eternal Flower",
+      "styles": ["Trance"],
+      "genres": ["Electronic"],
+      "tracklist": [
+        {"position": "A2", "title": "Eternal Flower", "duration": null}
+      ]
+    }
+  ]
+}
