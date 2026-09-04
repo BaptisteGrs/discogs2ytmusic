@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import typer
 from rich.console import Console
@@ -82,6 +83,13 @@ def auth_ytmusic(
 ):
     """Link your YT Music account (two values copied from a browser DevTools request)."""
     ytmusic_client.run_setup(from_file=from_file)
+
+
+def _effective_track_queries(release, tracks) -> list[tuple[Optional[int], str, str]]:
+    """(track_id, artist, title) triples to search for a release, honoring any per-track search_artist override."""
+    if not tracks:
+        return [(None, release["artist"], release["title"])]  # no tracklist on file — fall back to the release itself
+    return [(t["id"], t["search_artist"] or release["artist"], t["title"]) for t in tracks]
 
 
 def _load_discogs_client() -> tuple[DiscogsClient, str]:
@@ -193,10 +201,9 @@ def sync(
                 styles = [s for s in styles if s in style]
             if not styles:
                 continue
-            track_titles = [t["title"] for t in tracks] or [release["title"]]  # fall back to release title if no tracklist
             for s in styles:
-                for track_title in track_titles:
-                    by_style[s].append((release["artist"], track_title))
+                for _track_id, artist, track_title in _effective_track_queries(release, tracks):
+                    by_style[s].append((artist, track_title))
 
         if not by_style:
             console.print("[yellow]No releases found for the given style filter. Run `scan` first?[/yellow]")
@@ -261,6 +268,7 @@ def sync(
 
 EXPORT_FIELDNAMES = [
     "match_id",
+    "track_id",
     "style",
     "artist",
     "title",
@@ -296,10 +304,9 @@ def export(
                 styles = [s for s in styles if s in style]
             if not styles:
                 continue
-            track_titles = [t["title"] for t in tracks] or [release["title"]]  # fall back to release title if no tracklist
             for s in styles:
-                for track_title in track_titles:
-                    match = store.get_match(conn, release["artist"], track_title)
+                for track_id, artist, track_title in _effective_track_queries(release, tracks):
+                    match = store.get_match(conn, artist, track_title)
                     video_id = match["video_id"] if match else None
                     searched_at = ""
                     if match is not None:
@@ -307,8 +314,9 @@ def export(
                     rows.append(
                         {
                             "match_id": match["id"] if match is not None else "",
+                            "track_id": track_id if track_id is not None else "",
                             "style": s,
-                            "artist": release["artist"],
+                            "artist": artist,
                             "title": track_title,
                             "discogs_url": release_url(release["release_id"]),
                             "matched": "yes" if video_id else "no",
@@ -334,6 +342,104 @@ def export(
 
     unmatched = sum(1 for r in rows if r["matched"] == "no")
     console.print(f"[green]Wrote {len(rows)} rows to {output}[/green] ({unmatched} unmatched)")
+
+
+def _parse_video_id(value: str) -> str:
+    """Accept either a bare YouTube video id or a full watch URL (youtube.com, music.youtube.com, youtu.be)."""
+    value = value.strip()
+    if not value.startswith("http://") and not value.startswith("https://"):
+        return value
+    parsed = urlparse(value)
+    if parsed.hostname and "youtu.be" in parsed.hostname:
+        return parsed.path.strip("/")
+    video_id = parse_qs(parsed.query).get("v", [None])[0]
+    if not video_id:
+        console.print(f"[red]Could not find a video id in URL:[/red] {value}")
+        raise typer.Exit(1)
+    return video_id
+
+
+@app.command()
+def correct(
+    match_id: int = typer.Argument(..., help="The match_id shown by `export`."),
+    video_id: Optional[str] = typer.Option(
+        None, "--video-id", help="The correct video id, or a full YouTube/YT Music URL, to use for this match."
+    ),
+    reject: bool = typer.Option(
+        False, "--reject", help="Mark explicitly as no-match — won't be auto-searched again, shown as unmatched."
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Forget this cached result so the next `sync` searches it again from scratch."
+    ),
+):
+    """Manually fix one cached YouTube match, addressed by the match_id from `export`.
+
+    Pass exactly one of --video-id, --reject, or --clear.
+    """
+    modes_given = sum([video_id is not None, reject, clear])
+    if modes_given != 1:
+        console.print("[red]Pass exactly one of --video-id, --reject, or --clear.[/red]")
+        raise typer.Exit(1)
+
+    with store.connect() as conn:
+        row = store.get_match_by_id(conn, match_id)
+        if row is None:
+            console.print(f"[red]No cached match with id {match_id}.[/red] Run `export` to see valid ids.")
+            raise typer.Exit(1)
+
+        if clear:
+            store.delete_match(conn, match_id)
+            console.print(f"[green]Cleared match {match_id} ('{row['query_key']}') — it will be searched again on the next sync.[/green]")
+            return
+
+        if reject:
+            store.update_match(conn, match_id, video_id=None, video_title=None, source="manual")
+            console.print(f"[green]Marked match {match_id} ('{row['query_key']}') as no-match.[/green]")
+            return
+
+        resolved_id = _parse_video_id(video_id)
+        store.update_match(conn, match_id, video_id=resolved_id, video_title=None, source="manual")
+        console.print(f"[green]Corrected match {match_id} ('{row['query_key']}') → {resolved_id}[/green]")
+
+
+@app.command(name="fix-artist")
+def fix_artist(
+    track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
+    artist: Optional[str] = typer.Option(
+        None,
+        "--artist",
+        help="Artist name to search YouTube with for this track, instead of the release's (possibly multi-credit) artist string.",
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove the override and fall back to the release's artist again."),
+):
+    """Override the artist name used to build the YouTube search query for one track.
+
+    Useful when a release is credited to multiple artists (Discogs joins them with
+    commas) but a given track is really just one of them — the combined string can
+    dilute the fuzzy match enough to miss or pick the wrong video. Pass exactly one
+    of --artist or --clear. Takes effect on the next `sync` (it searches under the
+    new artist/title pair, which won't be cached yet); it doesn't touch any existing
+    cached match for this track — `correct --clear` that separately if needed.
+
+    Note: this override lives on the track row, so it's lost if that release's
+    tracklist is later replaced (`scan --refresh`).
+    """
+    if (artist is not None) == clear:
+        console.print("[red]Pass exactly one of --artist or --clear.[/red]")
+        raise typer.Exit(1)
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        if track is None:
+            console.print(f"[red]No track with id {track_id}.[/red] Run `export` to see valid ids.")
+            raise typer.Exit(1)
+
+        store.set_track_search_artist(conn, track_id, artist)
+
+    if clear:
+        console.print(f"[green]Cleared artist override for track {track_id} ('{track['title']}').[/green]")
+    else:
+        console.print(f"[green]Track {track_id} ('{track['title']}') will now be searched as '{artist}'.[/green]")
 
 
 def main() -> None:
