@@ -93,6 +93,7 @@ def scan(
                 store.replace_tracks(
                     conn, release_id, [(t.position, t.title, t.duration) for t in tracks]
                 )
+            conn.commit()  # commit per-release so a crash/interrupt doesn't lose earlier progress
             progress.advance(task2)
 
     _print_style_breakdown()
@@ -170,6 +171,7 @@ def sync(
                     else:
                         result = matcher.find_match(yt, artist, title)
                         store.save_match(conn, artist, title, result.video_id, result.video_title, result.source, result.score)
+                        conn.commit()  # commit per-track so a crash/interrupt doesn't lose earlier matches
                         video_id = result.video_id
                     if video_id:
                         video_ids.append(video_id)
@@ -201,6 +203,7 @@ def sync(
                     yt, playlist_name, description=f"Auto-generated from Discogs collection (style: {s})"
                 )
                 store.save_playlist_id(conn, s, playlist_id)
+                conn.commit()
             ytmusic_client.add_tracks(yt, playlist_id, video_ids)
             console.print(f"[green]Synced '{playlist_name}': {len(video_ids)} tracks.[/green]")
 
