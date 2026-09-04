@@ -10,8 +10,8 @@ from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
 
-from . import matcher, store, ytmusic_client
-from .config import Config
+from . import matcher, report, store, ytmusic_client
+from .config import Config, MISSING_TRACKS_FILE
 from .discogs import DiscogsClient, DiscogsError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -155,9 +155,11 @@ def sync(
         with Progress(console=console) as progress:
             task = progress.add_task("Matching tracks on YouTube...", total=total_tracks)
             style_video_ids: dict[str, list[str]] = {}
+            missing_tracks: dict[str, list[tuple[str, str]]] = {}
 
             for s, track_list in by_style.items():
                 video_ids: list[str] = []
+                missing: list[tuple[str, str]] = []
                 seen = set()
                 for artist, title in track_list:
                     if (artist, title) in seen:
@@ -175,8 +177,18 @@ def sync(
                         video_id = result.video_id
                     if video_id:
                         video_ids.append(video_id)
+                    else:
+                        missing.append((artist, title))
                     progress.advance(task)
                 style_video_ids[s] = video_ids
+                missing_tracks[s] = missing
+
+        report.write_missing_tracks(missing_tracks, MISSING_TRACKS_FILE)
+        total_missing = sum(len(tracks) for tracks in missing_tracks.values())
+        if total_missing:
+            console.print(
+                f"[yellow]{total_missing} track(s) had no confident match — see {MISSING_TRACKS_FILE}[/yellow]"
+            )
 
         table = Table(title="Sync preview" if dry_run else "Sync result")
         table.add_column("Style")

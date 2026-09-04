@@ -14,6 +14,7 @@ CACHE_DIR = Path(user_cache_dir(APP_NAME))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 YTMUSIC_AUTH_FILE = CONFIG_DIR / "ytmusic_auth.json"
 CACHE_DB = CACHE_DIR / "cache.sqlite3"
+MISSING_TRACKS_FILE = CACHE_DIR / "missing_tracks.md"
 
 
 @dataclass

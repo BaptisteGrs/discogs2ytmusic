@@ -89,6 +89,15 @@ Playlists are named `Discogs - <style>` and are safe to re-run: existing
 playlists are reused (not duplicated), and matched tracks are cached so
 re-syncing only searches for new tracks.
 
+### Tracks that couldn't be found
+
+Any track with no confident match on YT Music or YouTube (search comes up
+empty, or nothing clears the fuzzy-match threshold) is listed, grouped by
+style, in a `missing_tracks.md` report written next to the local cache. Its
+path is printed at the end of `sync` when there's anything to show. The
+report is regenerated on every `sync` run, so an entry disappears once a
+later run finds a match for it (e.g. after a retitled upload appears).
+
 ## Testing
 
 Tests run entirely offline against a small dummy library instead of your real
@@ -123,8 +132,9 @@ equivalent cache path on your OS).
 
 ## Notes
 
-- All state (credentials, collection cache, search-match cache) lives outside
-  the project in your OS's standard config/cache directories, not in this repo.
+- All state (credentials, collection cache, search-match cache, the missing-
+  tracks report) lives outside the project in your OS's standard config/cache
+  directories, not in this repo.
 - Track matching quality varies for very obscure records — check the `sync`
   preview table before running `--apply`, and consider narrowing with
   `--style` to review results in smaller batches first.

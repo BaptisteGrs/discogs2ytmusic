@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from discogs2ytmusic import cli as cli_module
 from discogs2ytmusic import store as store_module
 from discogs2ytmusic.discogs import Track
 
@@ -62,3 +63,11 @@ def isolated_cache(tmp_path, monkeypatch):
     cache_db = tmp_path / "cache.sqlite3"
     monkeypatch.setattr(store_module, "CACHE_DB", cache_db)
     return cache_db
+
+
+@pytest.fixture
+def isolated_missing_tracks_file(tmp_path, monkeypatch):
+    """Redirect the missing-tracks report to a temp file so tests never touch the real one."""
+    report_path = tmp_path / "missing_tracks.md"
+    monkeypatch.setattr(cli_module, "MISSING_TRACKS_FILE", report_path)
+    return report_path
