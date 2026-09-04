@@ -1,7 +1,18 @@
 # discogs2ytmusic
 
-Sync your Discogs collection to YouTube Music playlists.
-Runs entirely locally as a CLI.
+## To do 
+
+- [ ] Add `YT Channel` column. Filter by group of YT channels (possible to mark favorites).
+- [ ] Wantlist tab
+- [ ] To review filter for low confidence matches
+- [ ] If Untitled in a release, use side tags (A2,...) to search for the song
+- [ ] Use the song links already in Discogs if they are already present. Check the confidence on these links if possible. 
+
+
+Wrapper for your Discogs collection. 
+Map YT Music links automatically.
+Create playlists easily and push them on your YT account. 
+Dig people's collection or label catalogue. 
 
 ## Setup
 
