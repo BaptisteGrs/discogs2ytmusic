@@ -18,13 +18,14 @@ CREATE TABLE IF NOT EXISTS releases (
 );
 
 CREATE TABLE IF NOT EXISTS tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     release_id INTEGER NOT NULL,
     position TEXT NOT NULL,
     title TEXT NOT NULL,
     duration TEXT,
-    PRIMARY KEY (release_id, position),
     FOREIGN KEY (release_id) REFERENCES releases(release_id)
 );
+CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
 
 CREATE TABLE IF NOT EXISTS matches (
     query_key TEXT PRIMARY KEY,   -- "artist||title"
@@ -120,6 +121,6 @@ def iter_releases_with_tracks(conn):
     releases = conn.execute("SELECT * FROM releases").fetchall()
     for r in releases:
         tracks = conn.execute(
-            "SELECT * FROM tracks WHERE release_id = ? ORDER BY position", (r["release_id"],)
+            "SELECT * FROM tracks WHERE release_id = ? ORDER BY id", (r["release_id"],)
         ).fetchall()
         yield r, tracks
