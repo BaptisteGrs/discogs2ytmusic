@@ -23,12 +23,14 @@ CREATE TABLE IF NOT EXISTS tracks (
     position TEXT NOT NULL,
     title TEXT NOT NULL,
     duration TEXT,
+    search_artist TEXT,   -- optional override for the artist used to search YouTube; NULL falls back to releases.artist
     FOREIGN KEY (release_id) REFERENCES releases(release_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
 
 CREATE TABLE IF NOT EXISTS matches (
-    query_key TEXT PRIMARY KEY,   -- "artist||title"
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_key TEXT NOT NULL UNIQUE,   -- "artist||title"
     video_id TEXT,                -- NULL means "searched, no confident match"
     video_title TEXT,
     source TEXT,                  -- 'ytmusic' | 'ytdlp' | 'none'
@@ -44,10 +46,45 @@ CREATE TABLE IF NOT EXISTS playlists (
 """
 
 
+def _migrate_matches_table(conn: sqlite3.Connection) -> None:
+    """One-time upgrade for caches created before `matches` had a surrogate id column."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(matches)")}
+    if not cols or "id" in cols:
+        return
+    conn.executescript(
+        """
+        ALTER TABLE matches RENAME TO matches_old;
+        CREATE TABLE matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query_key TEXT NOT NULL UNIQUE,
+            video_id TEXT,
+            video_title TEXT,
+            source TEXT,
+            score REAL,
+            searched_at REAL NOT NULL
+        );
+        INSERT INTO matches (query_key, video_id, video_title, source, score, searched_at)
+            SELECT query_key, video_id, video_title, source, score, searched_at FROM matches_old;
+        DROP TABLE matches_old;
+        """
+    )
+    conn.commit()
+
+
+def _migrate_tracks_table(conn: sqlite3.Connection) -> None:
+    """One-time upgrade for caches created before `tracks` had a search_artist override column."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}
+    if cols and "search_artist" not in cols:
+        conn.execute("ALTER TABLE tracks ADD COLUMN search_artist TEXT")
+        conn.commit()
+
+
 @contextmanager
 def connect():
     ensure_dirs()
     conn = sqlite3.connect(CACHE_DB)
+    _migrate_matches_table(conn)
+    _migrate_tracks_table(conn)
     conn.executescript(SCHEMA)
     try:
         yield conn
@@ -100,6 +137,32 @@ def save_match(conn, artist: str, title: str, video_id: str | None, video_title:
              source=excluded.source, score=excluded.score, searched_at=excluded.searched_at""",
         (match_key(artist, title), video_id, video_title, source, score, time.time()),
     )
+
+
+def get_match_by_id(conn, match_id: int) -> sqlite3.Row | None:
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
+
+
+def update_match(conn, match_id: int, video_id: str | None, video_title: str | None, source: str) -> None:
+    """Overwrite a match with a manually-supplied result. Score is cleared — a human pick has no fuzzy score."""
+    conn.execute(
+        "UPDATE matches SET video_id = ?, video_title = ?, source = ?, score = NULL, searched_at = ? WHERE id = ?",
+        (video_id, video_title, source, time.time(), match_id),
+    )
+
+
+def delete_match(conn, match_id: int) -> None:
+    conn.execute("DELETE FROM matches WHERE id = ?", (match_id,))
+
+
+def get_track(conn, track_id: int) -> sqlite3.Row | None:
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+
+
+def set_track_search_artist(conn, track_id: int, artist: str | None) -> None:
+    conn.execute("UPDATE tracks SET search_artist = ? WHERE id = ?", (artist, track_id))
 
 
 def get_playlist_id(conn, style: str) -> str | None:

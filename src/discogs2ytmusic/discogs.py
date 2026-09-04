@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import requests
 
 API_BASE = "https://api.discogs.com"
+WEB_BASE = "https://www.discogs.com"
 USER_AGENT = "discogs2ytmusic/0.1 +local-cli"
 
 # Discogs allows 60 req/min for authenticated requests. Stay comfortably under that.
@@ -31,6 +32,10 @@ class Release:
 
 class DiscogsError(RuntimeError):
     pass
+
+
+def release_url(release_id: int) -> str:
+    return f"{WEB_BASE}/release/{release_id}"
 
 
 class DiscogsClient:
