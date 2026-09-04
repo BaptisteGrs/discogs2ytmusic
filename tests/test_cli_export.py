@@ -52,6 +52,8 @@ def test_export_writes_csv_with_expected_columns(isolated_cache, dummy_library, 
     assert all(r["matched"] == "yes" for r in rows)
     assert all(r["video_id"].startswith("vid::") for r in rows)
     assert all(r["youtube_url"].startswith("https://music.youtube.com/watch?v=") for r in rows)
+    assert all(r["discogs_url"].startswith("https://www.discogs.com/release/") for r in rows)
+    assert len({r["match_id"] for r in rows}) == len(rows), "each row should have a distinct match_id"
 
 
 def test_export_tags_unmatched_tracks_in_matched_column(isolated_cache, dummy_library, tmp_path):

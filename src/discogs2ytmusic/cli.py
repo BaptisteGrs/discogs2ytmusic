@@ -14,7 +14,7 @@ from rich.table import Table
 
 from . import matcher, store, ytmusic_client
 from .config import Config
-from .discogs import DiscogsClient, DiscogsError
+from .discogs import DiscogsClient, DiscogsError, release_url
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 auth_app = typer.Typer(no_args_is_help=True, help="Manage credentials.")
@@ -211,9 +211,11 @@ def sync(
 
 
 EXPORT_FIELDNAMES = [
+    "match_id",
     "style",
     "artist",
     "title",
+    "discogs_url",
     "matched",
     "video_id",
     "youtube_url",
@@ -255,9 +257,11 @@ def export(
                         searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
                     rows.append(
                         {
+                            "match_id": match["id"] if match is not None else "",
                             "style": s,
                             "artist": release["artist"],
                             "title": track_title,
+                            "discogs_url": release_url(release["release_id"]),
                             "matched": "yes" if video_id else "no",
                             "video_id": video_id or "",
                             "youtube_url": f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
