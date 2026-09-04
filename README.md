@@ -96,3 +96,11 @@ re-syncing only searches for new tracks.
 - Track matching quality varies for very obscure records — check the `sync`
   preview table before running `--apply`, and consider narrowing with
   `--style` to review results in smaller batches first.
+
+## Documentation
+
+- [CLI reference](docs/CLI.md) — every command and option, with defaults and
+  behavior notes.
+- [Architecture](docs/ARCHITECTURE.md) — how the scan/sync pipeline works,
+  the SQLite cache schema, the matching algorithm, and where state is stored
+  on disk.
