@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -206,6 +208,84 @@ def sync(
                 conn.commit()
             ytmusic_client.add_tracks(yt, playlist_id, video_ids)
             console.print(f"[green]Synced '{playlist_name}': {len(video_ids)} tracks.[/green]")
+
+
+EXPORT_FIELDNAMES = [
+    "style",
+    "artist",
+    "title",
+    "matched",
+    "video_id",
+    "youtube_url",
+    "video_title",
+    "source",
+    "score",
+    "searched_at",
+]
+
+
+@app.command()
+def export(
+    output: Path = typer.Option(Path("matches.csv"), "--output", "-o", help="CSV file to write."),
+    style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable."),
+    only_missing: bool = typer.Option(
+        False, "--only-missing", help="Only include tracks with no confident YouTube match."
+    ),
+):
+    """Export cached track-to-YouTube matches to a CSV for manual review.
+
+    Reads whatever is already in the local cache — run `sync` (dry-run is
+    fine, it doesn't touch your YT Music account) first to populate it. This
+    command never searches YouTube itself.
+    """
+    import json as _json
+
+    with store.connect() as conn:
+        rows = []
+        for release, tracks in store.iter_releases_with_tracks(conn):
+            styles = _json.loads(release["styles"]) or []
+            if style:
+                styles = [s for s in styles if s in style]
+            if not styles:
+                continue
+            track_titles = [t["title"] for t in tracks] or [release["title"]]  # fall back to release title if no tracklist
+            for s in styles:
+                for track_title in track_titles:
+                    match = store.get_match(conn, release["artist"], track_title)
+                    video_id = match["video_id"] if match else None
+                    if only_missing and video_id:
+                        continue
+                    searched_at = ""
+                    if match is not None:
+                        searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
+                    rows.append(
+                        {
+                            "style": s,
+                            "artist": release["artist"],
+                            "title": track_title,
+                            "matched": "yes" if video_id else "no",
+                            "video_id": video_id or "",
+                            "youtube_url": f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
+                            "video_title": (match["video_title"] if match else None) or "",
+                            "source": (match["source"] if match else None) or "",
+                            "score": match["score"] if match is not None else "",
+                            "searched_at": searched_at,
+                        }
+                    )
+
+    if not rows:
+        console.print("[yellow]Nothing to export. Run `scan` and `sync` first.[/yellow]")
+        raise typer.Exit(0)
+
+    rows.sort(key=lambda r: (r["style"], r["artist"], r["title"]))
+
+    with output.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=EXPORT_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    unmatched = sum(1 for r in rows if r["matched"] == "no")
+    console.print(f"[green]Wrote {len(rows)} rows to {output}[/green] ({unmatched} unmatched)")
 
 
 def main() -> None:
