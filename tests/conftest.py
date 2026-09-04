@@ -31,6 +31,8 @@ class FakeDiscogsClient:
                     "title": r["title"],
                     "styles": r["styles"],
                     "genres": r["genres"],
+                    "year": r.get("year"),
+                    "labels": [{"name": name} for name in r.get("labels", [])],
                 }
             }
 

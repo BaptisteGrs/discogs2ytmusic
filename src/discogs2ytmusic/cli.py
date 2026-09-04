@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import csv
 import enum
+import json
 import re
+import subprocess
+import sys
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
 
 import typer
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
 
-from . import dummy_library, matcher, store, ytmusic_client
+from . import dummy_library, matcher, store, views, ytmusic_client
 from .config import Config
-from .discogs import DiscogsClient, DiscogsError, release_url
+from .discogs import DiscogsClient, DiscogsError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 auth_app = typer.Typer(no_args_is_help=True, help="Manage credentials.")
@@ -85,13 +86,6 @@ def auth_ytmusic(
     ytmusic_client.run_setup(from_file=from_file)
 
 
-def _effective_track_queries(release, tracks) -> list[tuple[Optional[int], str, str]]:
-    """(track_id, artist, title) triples to search for a release, honoring any per-track search_artist override."""
-    if not tracks:
-        return [(None, release["artist"], release["title"])]  # no tracklist on file — fall back to the release itself
-    return [(t["id"], t["search_artist"] or release["artist"], t["title"]) for t in tracks]
-
-
 def _load_discogs_client() -> tuple[DiscogsClient, str]:
     cfg = Config.load()
     if not cfg.discogs_token or not cfg.discogs_username:
@@ -109,7 +103,10 @@ def _scan_dummy() -> None:
 
     with store.connect() as conn:
         for r in releases:
-            store.upsert_release(conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"])
+            store.upsert_release(
+                conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"],
+                year=r.get("year"), labels=r.get("labels", []),
+            )
             store.replace_tracks(
                 conn, r["release_id"], [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]]
             )
@@ -145,7 +142,9 @@ def scan(
             title = info.get("title", "")
             styles = info.get("styles", []) or []
             genres = info.get("genres", []) or []
-            store.upsert_release(conn, release_id, artist, title, styles, genres)
+            year = info.get("year") or None
+            labels = [l["name"] for l in info.get("labels", []) or [] if l.get("name")]
+            store.upsert_release(conn, release_id, artist, title, styles, genres, year=year, labels=labels)
 
             if refresh or not store.has_tracks(conn, release_id):
                 tracks = client.get_release_tracklist(release_id)
@@ -162,9 +161,7 @@ def _print_style_breakdown() -> None:
     with store.connect() as conn:
         style_counts: dict[str, int] = defaultdict(int)
         for release, tracks in store.iter_releases_with_tracks(conn):
-            import json as _json
-
-            for style in _json.loads(release["styles"]) or ["(no style tag)"]:
+            for style in json.loads(release["styles"]) or ["(no style tag)"]:
                 style_counts[style] += max(len(tracks), 1)
 
     table = Table(title="Releases by style (track count)")
@@ -193,16 +190,15 @@ def sync(
 
     with store.connect() as conn:
         by_style: dict[str, list[tuple[str, str]]] = defaultdict(list)  # style -> [(artist, title)]
-        import json as _json
 
         for release, tracks in store.iter_releases_with_tracks(conn):
-            styles = _json.loads(release["styles"]) or []
+            styles = json.loads(release["styles"]) or []
             if style:
                 styles = [s for s in styles if s in style]
             if not styles:
                 continue
             for s in styles:
-                for _track_id, artist, track_title in _effective_track_queries(release, tracks):
+                for _track_id, artist, track_title in store.effective_track_queries(release, tracks):
                     by_style[s].append((artist, track_title))
 
         if not by_style:
@@ -253,14 +249,22 @@ def sync(
             if not video_ids:
                 continue
             playlist_name = f"Discogs - {s}"
-            existing_id = store.get_playlist_id(conn, s)
+            playlist_def = store.get_playlist_def_by_name(conn, playlist_name)
+            if playlist_def is None:
+                def_id = store.upsert_playlist_def(conn, playlist_name, json.dumps({"tags": [s]}))
+                conn.commit()
+                existing_id = None
+            else:
+                def_id = playlist_def["id"]
+                existing_id = playlist_def["ytmusic_playlist_id"]
+
             if existing_id:
                 playlist_id = existing_id
             else:
                 playlist_id = ytmusic_client.get_or_create_playlist(
                     yt, playlist_name, description=f"Auto-generated from Discogs collection (style: {s})"
                 )
-                store.save_playlist_id(conn, s, playlist_id)
+                store.set_playlist_def_ytmusic_id(conn, def_id, playlist_id)
                 conn.commit()
             ytmusic_client.add_tracks(yt, playlist_id, video_ids)
             console.print(f"[green]Synced '{playlist_name}': {len(video_ids)} tracks.[/green]")
@@ -294,46 +298,31 @@ def export(
     fine, it doesn't touch your YT Music account) first to populate it. This
     command never searches YouTube itself.
     """
-    import json as _json
-
     with store.connect() as conn:
-        rows = []
-        for release, tracks in store.iter_releases_with_tracks(conn):
-            styles = _json.loads(release["styles"]) or []
-            if style:
-                styles = [s for s in styles if s in style]
-            if not styles:
-                continue
-            for s in styles:
-                for track_id, artist, track_title in _effective_track_queries(release, tracks):
-                    match = store.get_match(conn, artist, track_title)
-                    video_id = match["video_id"] if match else None
-                    searched_at = ""
-                    if match is not None:
-                        searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
-                    rows.append(
-                        {
-                            "match_id": match["id"] if match is not None else "",
-                            "track_id": track_id if track_id is not None else "",
-                            "style": s,
-                            "artist": artist,
-                            "title": track_title,
-                            "discogs_url": release_url(release["release_id"]),
-                            "matched": "yes" if video_id else "no",
-                            "video_id": video_id or "",
-                            "youtube_url": f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
-                            "video_title": (match["video_title"] if match else None) or "",
-                            "source": (match["source"] if match else None) or "",
-                            "score": match["score"] if match is not None else "",
-                            "searched_at": searched_at,
-                        }
-                    )
+        match_rows = views.build_match_rows(conn, styles=style)
 
-    if not rows:
+    if not match_rows:
         console.print("[yellow]Nothing to export. Run `scan` and `sync` first.[/yellow]")
         raise typer.Exit(0)
 
-    rows.sort(key=lambda r: (r["style"], r["artist"], r["title"]))
+    rows = [
+        {
+            "match_id": r.match_id if r.match_id is not None else "",
+            "track_id": r.track_id if r.track_id is not None else "",
+            "style": r.style,
+            "artist": r.artist,
+            "title": r.title,
+            "discogs_url": r.discogs_url,
+            "matched": "yes" if r.matched else "no",
+            "video_id": r.video_id or "",
+            "youtube_url": r.youtube_url,
+            "video_title": r.video_title,
+            "source": r.source,
+            "score": r.score if r.score is not None else "",
+            "searched_at": r.searched_at or "",
+        }
+        for r in match_rows
+    ]
 
     with output.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=EXPORT_FIELDNAMES)
@@ -345,18 +334,11 @@ def export(
 
 
 def _parse_video_id(value: str) -> str:
-    """Accept either a bare YouTube video id or a full watch URL (youtube.com, music.youtube.com, youtu.be)."""
-    value = value.strip()
-    if not value.startswith("http://") and not value.startswith("https://"):
-        return value
-    parsed = urlparse(value)
-    if parsed.hostname and "youtu.be" in parsed.hostname:
-        return parsed.path.strip("/")
-    video_id = parse_qs(parsed.query).get("v", [None])[0]
-    if not video_id:
-        console.print(f"[red]Could not find a video id in URL:[/red] {value}")
+    try:
+        return ytmusic_client.parse_video_id(value)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-    return video_id
 
 
 @app.command()
@@ -440,6 +422,13 @@ def fix_artist(
         console.print(f"[green]Cleared artist override for track {track_id} ('{track['title']}').[/green]")
     else:
         console.print(f"[green]Track {track_id} ('{track['title']}') will now be searched as '{artist}'.[/green]")
+
+
+@app.command()
+def ui() -> None:
+    """Launch the browsable/editable web UI (Streamlit)."""
+    app_path = Path(__file__).parent / "app.py"
+    subprocess.run([sys.executable, "-m", "streamlit", "run", str(app_path)])
 
 
 def main() -> None:
