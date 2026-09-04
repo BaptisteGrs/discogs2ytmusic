@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import enum
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -12,7 +13,7 @@ from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
 
-from . import matcher, store, ytmusic_client
+from . import dummy_library, matcher, store, ytmusic_client
 from .config import Config
 from .discogs import DiscogsClient, DiscogsError, release_url
 
@@ -21,6 +22,33 @@ auth_app = typer.Typer(no_args_is_help=True, help="Manage credentials.")
 app.add_typer(auth_app, name="auth")
 
 console = Console()
+
+
+class Library(str, enum.Enum):
+    real = "real"
+    dummy = "dummy"
+
+
+_active_library = Library.real  # set by the --library app callback below
+
+
+@app.callback()
+def cli_options(
+    library: Library = typer.Option(
+        Library.real,
+        "--library",
+        help="'real' uses your Discogs collection (default). 'dummy' uses a small bundled "
+        "15-track test collection in a separate cache — no Discogs auth needed for `scan`, "
+        "and it never touches your real cache. Only works from a full repo checkout.",
+    ),
+):
+    """Sync your Discogs collection to YouTube Music playlists."""
+    global _active_library
+    _active_library = library
+    if library == Library.dummy:
+        # Keep it a sibling of whatever cache file is active, so this also respects a
+        # cache location overridden for tests rather than always pointing at the real one.
+        store.CACHE_DB = store.CACHE_DB.parent / "dummy_cache.sqlite3"
 
 
 @auth_app.command("discogs")
@@ -64,11 +92,32 @@ def _load_discogs_client() -> tuple[DiscogsClient, str]:
     return DiscogsClient(cfg.discogs_token), cfg.discogs_username
 
 
+def _scan_dummy() -> None:
+    try:
+        releases = dummy_library.load_releases()
+    except dummy_library.DummyLibraryUnavailable as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    with store.connect() as conn:
+        for r in releases:
+            store.upsert_release(conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"])
+            store.replace_tracks(
+                conn, r["release_id"], [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]]
+            )
+    console.print(f"[green]Loaded dummy library ({len(releases)} releases) into {store.CACHE_DB}[/green]")
+
+
 @app.command()
 def scan(
     refresh: bool = typer.Option(False, "--refresh", help="Re-fetch collection and tracklists from Discogs instead of using the cache"),
 ):
     """Fetch your Discogs collection (with styles + tracklists) into the local cache and show a breakdown by style."""
+    if _active_library == Library.dummy:
+        _scan_dummy()
+        _print_style_breakdown()
+        return
+
     client, username = _load_discogs_client()
 
     with store.connect() as conn, Progress(console=console) as progress:

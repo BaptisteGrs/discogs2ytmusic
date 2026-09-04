@@ -112,6 +112,25 @@ Playlists are named `Discogs - <style>` and are safe to re-run: existing
 playlists are reused (not duplicated), and matched tracks are cached so
 re-syncing only searches for new tracks.
 
+### Try any command against a small test collection instead of your own
+
+Every command accepts a `--library dummy` flag (before the subcommand) that
+points the cache at a separate file (`dummy_cache.sqlite3`, never your real
+`cache.sqlite3`) and, for `scan`, seeds it straight from the bundled test
+fixture instead of calling the Discogs API — no Discogs token needed:
+
+```bash
+uv run discogs2ytmusic --library dummy scan
+uv run discogs2ytmusic --library dummy sync            # still needs YT Music reachable for real searches
+uv run discogs2ytmusic --library dummy export -o dummy_matches.csv
+```
+
+Handy for sanity-checking a change to the matcher/export logic, or just
+seeing the whole `scan` → `sync` → `export` flow end-to-end in seconds. This
+only works from a full repo checkout (it reads `tests/fixtures/dummy_library.json`
+directly, it isn't packaged) — omit the flag, or pass `--library real`
+(the default), to use your actual collection.
+
 ## Testing
 
 Tests run entirely offline against a small dummy library instead of your real
@@ -123,9 +142,10 @@ uv run pytest
 
 `tests/fixtures/dummy_library.json` holds 15 tracks across 6 sub-genres
 (House, Techno, Deep House, Acid, Breakbeat, Trance), sampled from a real
-scanned collection so the data shapes match what Discogs actually returns.
-`tests/conftest.py` exposes it as the `dummy_library` fixture and wires up
-two test doubles used throughout the suite:
+scanned collection so the data shapes match what Discogs actually returns —
+it's the same file `--library dummy` (above) reads. `tests/conftest.py`
+exposes it as the `dummy_library` fixture and wires up two test doubles used
+throughout the suite:
 
 - `FakeDiscogsClient` — implements the same `iter_collection_basic` /
   `get_release_tracklist` interface as `DiscogsClient`, backed by the fixture,
