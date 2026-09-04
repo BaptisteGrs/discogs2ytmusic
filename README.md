@@ -79,6 +79,29 @@ Limit to specific styles:
 uv run discogs2ytmusic sync --style "Deep House" --style "Dub Techno"
 ```
 
+### Review matches before creating anything
+
+`sync` (even in dry-run mode) caches every YouTube match it finds, hit or
+miss. Export that cache to a CSV to sanity-check match quality on a subset
+before trusting `--apply`, or to find tracks with no YouTube match at all:
+
+```bash
+uv run discogs2ytmusic sync --style "Deep House"     # populate the cache, no changes made
+uv run discogs2ytmusic export --style "Deep House" --output deep_house.csv
+```
+
+Columns: `style, artist, title, matched, video_id, youtube_url, video_title,
+source, score, searched_at`. Add `--only-missing` to list just the tracks
+that found no confident match (candidates for ripping/uploading yourself):
+
+```bash
+uv run discogs2ytmusic export --only-missing --output no_match.csv
+```
+
+This only reads the local cache — it never hits YouTube itself, so it's
+cheap to re-run as you narrow things down. There's no interactive browser
+for the cache yet, just CSV export for now.
+
 ### Actually create/update the playlists
 
 ```bash
