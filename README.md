@@ -89,6 +89,38 @@ Playlists are named `Discogs - <style>` and are safe to re-run: existing
 playlists are reused (not duplicated), and matched tracks are cached so
 re-syncing only searches for new tracks.
 
+## Testing
+
+Tests run entirely offline against a small dummy library instead of your real
+Discogs/YT Music accounts.
+
+```bash
+uv run pytest
+```
+
+`tests/fixtures/dummy_library.json` holds 15 tracks across 6 sub-genres
+(House, Techno, Deep House, Acid, Breakbeat, Trance), sampled from a real
+scanned collection so the data shapes match what Discogs actually returns.
+`tests/conftest.py` exposes it as the `dummy_library` fixture and wires up
+two test doubles used throughout the suite:
+
+- `FakeDiscogsClient` — implements the same `iter_collection_basic` /
+  `get_release_tracklist` interface as `DiscogsClient`, backed by the fixture,
+  so `scan` can be exercised end-to-end (via Typer's `CliRunner`) without a
+  token or network access.
+- `isolated_cache` — redirects the sqlite cache to a temp file per test, so
+  test runs never touch your real local cache.
+
+`sync` tests monkeypatch `matcher.find_match` to return deterministic
+matches instead of calling YT Music/yt-dlp, so match-rate and style-grouping
+logic can be verified without live search results.
+
+To sample a fresh (or larger) dummy library from your own real cache, adapt
+the pattern in `tests/fixtures/dummy_library.json`: pick a `release_id`,
+`artist`, `title`, `styles`, `genres`, and one or more `tracklist` entries per
+release, drawn from `~/Library/Caches/discogs2ytmusic/cache.sqlite3` (or the
+equivalent cache path on your OS).
+
 ## Notes
 
 - All state (credentials, collection cache, search-match cache) lives outside
