@@ -20,18 +20,36 @@ uv run discogs2ytmusic auth discogs --token YOUR_TOKEN
 
 ### 2. Connect YouTube Music
 
-No Google Cloud project needed — this uses browser-copied request headers:
+No Google Cloud project needed — this reuses your logged-in browser session
+by pulling two values out of a request YT Music's own web app already makes:
 
 1. Open https://music.youtube.com in your browser and make sure you're logged in.
-2. Open DevTools → Network tab.
-3. Click any request to `music.youtube.com` (e.g. search for anything, then
-   click the `search` or `browse` request in the Network panel).
-4. Right-click it → Copy → Copy request headers.
-5. Run the command below and paste when prompted:
+2. Open DevTools → **Network** tab.
+3. Click any request to `music.youtube.com` in the list (e.g. reload the page,
+   then click the request named `browse`).
+4. In its **Headers** panel, scroll to **Request Headers** and find the rows
+   for `cookie` (a long string of `name=value;` pairs) and `x-goog-authuser`
+   (usually just `0`).
+5. Run the command below and paste each value when prompted:
 
 ```bash
 uv run discogs2ytmusic auth ytmusic
 ```
+
+Pasting a long cookie value into a terminal prompt can be fiddly. Instead you
+can save the two values to a text file and point the command at it:
+
+```
+cookie: SID=...; HSID=...; ...
+x-goog-authuser: 0
+```
+
+```bash
+uv run discogs2ytmusic auth ytmusic --from-file /path/to/that/file.txt
+```
+
+The file is only read once during setup — delete it afterwards (the tool
+will remind you to).
 
 ## Usage
 

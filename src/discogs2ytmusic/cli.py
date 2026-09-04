@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -39,9 +40,18 @@ def auth_discogs(
 
 
 @auth_app.command("ytmusic")
-def auth_ytmusic():
-    """Interactively link your YT Music account (paste browser request headers)."""
-    ytmusic_client.run_setup()
+def auth_ytmusic(
+    from_file: Optional[Path] = typer.Option(
+        None,
+        "--from-file",
+        exists=True,
+        dir_okay=False,
+        help="Read 'cookie' and 'x-goog-authuser' from a text file instead of an interactive prompt "
+        "(a file with lines like 'cookie: ...' and 'x-goog-authuser: 0').",
+    ),
+):
+    """Link your YT Music account (two values copied from a browser DevTools request)."""
+    ytmusic_client.run_setup(from_file=from_file)
 
 
 def _load_discogs_client() -> tuple[DiscogsClient, str]:
