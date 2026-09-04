@@ -93,7 +93,10 @@
       "year": 2025,
       "labels": ["Yoyaku"],
       "tracklist": [
-        {"position": "B1", "title": "Oto", "duration": null}
+        {"position": "A1", "title": "It's a Dream", "duration": null, "discogs_artist": "HOSTOM"},
+        {"position": "A2", "title": "Tree House", "duration": null, "discogs_artist": "HOSTOM"},
+        {"position": "B1", "title": "Oto", "duration": null, "discogs_artist": "Aline Umber"},
+        {"position": "B2", "title": "Till it Stop", "duration": null, "discogs_artist": "Aline Umber"}
       ]
     },
     {

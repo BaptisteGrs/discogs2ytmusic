@@ -86,8 +86,11 @@ class TrackRow:
 
     track_id: int | None
     release_id: int
-    artist: str
-    title: str
+    track_artist: str
+    release_artist: str
+    track_title: str  # clean title used for YouTube search / match lookup — never prefix this
+    position: str | None  # vinyl side/position tag (e.g. "A1"); display-only, None for the no-tracklist fallback row
+    release_title: str
     styles: list[str]
     genres: list[str]
     labels: list[str]
@@ -100,6 +103,7 @@ class TrackRow:
     video_title: str
     source: str
     score: float | None
+    channel: str | None
     searched_at: str | None
 
 
@@ -112,6 +116,9 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
     for release, tracks in store.iter_releases_with_tracks(conn):
         if filt is not None and not release_matches(release, filt):
             continue
+        release_artist = store.effective_release_artist(release)
+        release_title = store.effective_release_title(release)
+        positions = {t["id"]: t["position"] for t in tracks}
         for track_id, artist, title in store.effective_track_queries(release, tracks):
             match = store.get_match(conn, artist, title)
             video_id = match["video_id"] if match else None
@@ -124,8 +131,11 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
                 TrackRow(
                     track_id=track_id,
                     release_id=release["release_id"],
-                    artist=artist,
-                    title=title,
+                    track_artist=artist,
+                    release_artist=release_artist,
+                    track_title=title,
+                    position=positions.get(track_id) if track_id is not None else None,
+                    release_title=release_title,
                     styles=json.loads(release["styles"]) or [],
                     genres=json.loads(release["genres"]) or [],
                     labels=json.loads(release["labels"]) or [],
@@ -138,8 +148,9 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
                     video_title=(match["video_title"] if match else None) or "",
                     source=(match["source"] if match else None) or "",
                     score=match["score"] if match is not None else None,
+                    channel=(match["channel"] if match is not None else None) or "",
                     searched_at=searched_at,
                 )
             )
-    rows.sort(key=lambda r: (r.artist, r.title))
+    rows.sort(key=lambda r: (r.track_artist, r.track_title))
     return rows

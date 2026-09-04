@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from discogs2ytmusic import store as store_module
-from discogs2ytmusic.discogs import Track
+from discogs2ytmusic.discogs import DiscogsVideo, ReleaseDetail, Track
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -36,19 +36,27 @@ class FakeDiscogsClient:
                 }
             }
 
-    def get_release_tracklist(self, release_id: int) -> list[Track]:
+    def get_release_detail(self, release_id: int) -> ReleaseDetail:
         for r in self._releases:
             if r["release_id"] == release_id:
-                return [
-                    Track(position=t["position"], title=t["title"], duration=t["duration"])
+                tracklist = [
+                    Track(
+                        position=t["position"], title=t["title"], duration=t["duration"],
+                        artists=[t["discogs_artist"]] if t.get("discogs_artist") else [],
+                    )
                     for t in r["tracklist"]
                 ]
-        return []
+                videos = [
+                    DiscogsVideo(uri=v["uri"], title=v["title"], duration=v.get("duration"))
+                    for v in r.get("videos", [])
+                ]
+                return ReleaseDetail(tracklist=tracklist, videos=videos)
+        return ReleaseDetail(tracklist=[], videos=[])
 
 
 @pytest.fixture
 def dummy_library() -> list[dict]:
-    """15 tracks across 6 sub-genres (styles), sampled from a real Discogs collection."""
+    """18 tracks across 6 sub-genres (styles), sampled from a real Discogs collection."""
     data = json.loads((FIXTURES_DIR / "dummy_library.json").read_text())
     return data["releases"]
 

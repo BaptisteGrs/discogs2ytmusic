@@ -10,16 +10,17 @@ def _int_or_none(value) -> int | None:
 
 
 def apply_artist_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -> int:
-    """Diff the `artist` column and persist changes as artist overrides.
+    """Diff the `track_artist` column and persist changes as artist overrides.
 
     A track-backed row gets a per-track `search_artist` override; a release
     with no tracklist on file (track_id is None) falls back to the
     release-level override instead. Clearing the cell reverts to the
-    Discogs-sourced artist. Returns the number of rows updated.
+    Discogs-sourced (or heuristically-split) artist. Returns the number of
+    rows updated.
     """
     count = 0
     for idx in original.index:
-        old_val, new_val = original.at[idx, "artist"], edited.at[idx, "artist"]
+        old_val, new_val = original.at[idx, "track_artist"], edited.at[idx, "track_artist"]
         if new_val == old_val:
             continue
         override = new_val.strip() or None
@@ -63,7 +64,7 @@ def apply_video_link_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -
         if match_id is not None:
             store.update_match(conn, match_id, video_id=video_id, video_title=None, source="manual")
         else:
-            artist, title = edited.at[idx, "artist"], edited.at[idx, "title"]
+            artist, title = edited.at[idx, "track_artist"], edited.at[idx, "track_title"]
             store.save_match(conn, artist, title, video_id, None, "manual", None)
         count += 1
     return count, errors

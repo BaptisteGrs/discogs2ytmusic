@@ -10,8 +10,8 @@ from discogs2ytmusic.filters import PlaylistFilter, TrackRow, resolve_rows
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
 COLLECTION_COLUMNS = [
-    "artist", "title", "styles", "genres", "labels", "year", "matched", "confidence",
-    "youtube_url", "video_title", "discogs_url",
+    "release_title", "track_artist", "position", "track_title", "labels", "year", "matched", "discogs_url", "youtube_url",
+    "channel", "release_artist", "styles", "genres", "confidence", "video_title",
 ]
 
 
@@ -49,8 +49,11 @@ def _rows_to_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
                 "track_id": r.track_id,
                 "match_id": r.match_id,
                 "release_id": r.release_id,
-                "artist": r.artist,
-                "title": r.title,
+                "track_artist": r.track_artist,
+                "release_artist": r.release_artist,
+                "position": r.position,
+                "track_title": r.track_title,
+                "release_title": r.release_title,
                 "styles": ", ".join(r.styles),
                 "genres": ", ".join(r.genres),
                 "labels": ", ".join(r.labels),
@@ -59,6 +62,7 @@ def _rows_to_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
                 "confidence": r.score,
                 "youtube_url": r.youtube_url,
                 "video_title": r.video_title,
+                "channel": r.channel,
                 "discogs_url": r.discogs_url,
             }
             for r in rows
@@ -84,9 +88,13 @@ def render_collection_tab() -> None:
     with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
     with col3:
-        year_range = st.slider(
-            "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key="collection_year"
-        )
+        if year_lo < year_hi:
+            year_range = st.slider(
+                "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key="collection_year"
+            )
+        else:
+            st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
+            year_range = (year_lo, year_hi)
     with col4:
         st.write("")  # vertical alignment with the widgets above
         matched_only = st.checkbox("Matched only", key="collection_matched_only")
@@ -116,16 +124,28 @@ def render_collection_tab() -> None:
         hide_index=True,
         width="stretch",
         column_order=COLLECTION_COLUMNS,
-        disabled=["title", "styles", "genres", "labels", "year", "matched", "confidence", "video_title", "discogs_url"],
+        disabled=[
+            "release_artist", "position", "track_title", "release_title", "discogs_url",
+            "styles", "genres", "labels", "year", "matched", "confidence", "video_title", "channel",
+        ],
         column_config={
-            "artist": st.column_config.TextColumn(
-                "Artist", help="Edit to override the artist used for this track's YouTube search"
+            "track_artist": st.column_config.TextColumn(
+                "Track Artist", help="Edit to override the artist used for this track's YouTube search"
             ),
-            "youtube_url": st.column_config.TextColumn(
-                "YouTube link", help="Paste a YouTube/YT Music URL, or clear it to reject the current match"
+            "release_artist": st.column_config.TextColumn("Release Artist(s)"),
+            "position": st.column_config.TextColumn("Position", help="Vinyl side/track position, e.g. A1"),
+            "track_title": st.column_config.TextColumn("Track Title"),
+            "release_title": st.column_config.TextColumn("Release Title"),
+            "youtube_url": st.column_config.LinkColumn(
+                "YouTube link",
+                help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
+                display_text="Open",
             ),
             "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
             "matched": st.column_config.CheckboxColumn("Matched"),
+            "channel": st.column_config.TextColumn(
+                "Channel", help="Uploader/channel of the matched YouTube video"
+            ),
             "confidence": st.column_config.ProgressColumn(
                 "Confidence",
                 help="Fuzzy-match score between the Discogs track and the YouTube result. Blank for manually-corrected links.",

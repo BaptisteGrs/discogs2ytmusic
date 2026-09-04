@@ -14,7 +14,7 @@ def _seed(conn, dummy_library):
         store.replace_tracks(
             conn,
             r["release_id"],
-            [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]],
+            [(t["position"], t["title"], t["duration"], t.get("discogs_artist")) for t in r["tracklist"]],
         )
 
 

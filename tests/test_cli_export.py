@@ -15,28 +15,33 @@ def _seed(conn, dummy_library):
         store.replace_tracks(
             conn,
             r["release_id"],
-            [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]],
+            [(t["position"], t["title"], t["duration"], t.get("discogs_artist")) for t in r["tracklist"]],
         )
 
 
-def _seed_matches(conn, dummy_library, *, matched: bool):
-    """Populate the matches cache as if `sync` had already run."""
-    for r in dummy_library:
-        for t in r["tracklist"]:
+def _seed_matches(conn, *, matched: bool):
+    """Populate the matches cache as if `sync` had already run.
+
+    Keys matches on the *effective* (artist, title) — same resolution
+    `sync`/`export` use — not the raw release artist, so tracks with their own
+    Discogs-sourced or VA-split artist still come back as matched.
+    """
+    for release, tracks in store.iter_releases_with_tracks(conn):
+        for _track_id, artist, title in store.effective_track_queries(release, tracks):
             if matched:
                 store.save_match(
-                    conn, r["artist"], t["title"],
-                    video_id=f"vid::{r['artist']}::{t['title']}",
-                    video_title=t["title"], source="ytmusic", score=90.0,
+                    conn, artist, title,
+                    video_id=f"vid::{artist}::{title}",
+                    video_title=title, source="ytmusic", score=90.0,
                 )
             else:
-                store.save_match(conn, r["artist"], t["title"], video_id=None, video_title=None, source="none", score=0.0)
+                store.save_match(conn, artist, title, video_id=None, video_title=None, source="none", score=0.0)
 
 
 def test_export_writes_csv_with_expected_columns(isolated_cache, dummy_library, tmp_path):
     with store.connect() as conn:
         _seed(conn, dummy_library)
-        _seed_matches(conn, dummy_library, matched=True)
+        _seed_matches(conn, matched=True)
 
     out = tmp_path / "matches.csv"
     result = runner.invoke(cli.app, ["export", "--output", str(out)])
@@ -59,7 +64,7 @@ def test_export_writes_csv_with_expected_columns(isolated_cache, dummy_library, 
 def test_export_tags_unmatched_tracks_in_matched_column(isolated_cache, dummy_library, tmp_path):
     with store.connect() as conn:
         _seed(conn, dummy_library)
-        _seed_matches(conn, dummy_library, matched=False)
+        _seed_matches(conn, matched=False)
 
     out = tmp_path / "misses.csv"
     result = runner.invoke(cli.app, ["export", "--output", str(out)])
@@ -76,7 +81,7 @@ def test_export_tags_unmatched_tracks_in_matched_column(isolated_cache, dummy_li
 def test_export_style_filter_narrows_output(isolated_cache, dummy_library, tmp_path):
     with store.connect() as conn:
         _seed(conn, dummy_library)
-        _seed_matches(conn, dummy_library, matched=True)
+        _seed_matches(conn, matched=True)
 
     out = tmp_path / "acid.csv"
     result = runner.invoke(cli.app, ["export", "--output", str(out), "--style", "Acid"])

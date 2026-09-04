@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS releases (
     labels TEXT NOT NULL DEFAULT '[]',   -- json list
     artist_override TEXT,   -- manual correction; NULL falls back to `artist`
     title_override TEXT,    -- manual correction; NULL falls back to `title`
+    videos TEXT NOT NULL DEFAULT '[]',   -- json list of {"uri", "title", "duration"} — Discogs' own embedded YouTube links
     fetched_at REAL NOT NULL
 );
 
@@ -27,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     position TEXT NOT NULL,
     title TEXT NOT NULL,
     duration TEXT,
-    search_artist TEXT,   -- optional override for the artist used to search YouTube; NULL falls back to releases.artist
+    search_artist TEXT,   -- manual override for the artist used to search YouTube; NULL falls back to discogs_artist/releases.artist
+    discogs_artist TEXT,  -- Discogs' own per-track artist credit (compilations/VA releases only; NULL when it's just the release artist)
     FOREIGN KEY (release_id) REFERENCES releases(release_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
@@ -37,8 +39,9 @@ CREATE TABLE IF NOT EXISTS matches (
     query_key TEXT NOT NULL UNIQUE,   -- "artist||title"
     video_id TEXT,                -- NULL means "searched, no confident match"
     video_title TEXT,
-    source TEXT,                  -- 'ytmusic' | 'ytdlp' | 'none'
+    source TEXT,                  -- 'ytmusic' | 'ytdlp' | 'discogs' | 'manual' | 'none'
     score REAL,
+    channel TEXT,                 -- uploader/channel name of the matched video, when known
     searched_at REAL NOT NULL
 );
 
@@ -54,40 +57,50 @@ CREATE TABLE IF NOT EXISTS playlist_defs (
 
 
 def _migrate_matches_table(conn: sqlite3.Connection) -> None:
-    """One-time upgrade for caches created before `matches` had a surrogate id column."""
+    """One-time upgrades for caches created before `matches` had a surrogate id
+    column, and/or before it had a `channel` column."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(matches)")}
-    if not cols or "id" in cols:
+    if not cols:
         return
-    conn.executescript(
-        """
-        ALTER TABLE matches RENAME TO matches_old;
-        CREATE TABLE matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query_key TEXT NOT NULL UNIQUE,
-            video_id TEXT,
-            video_title TEXT,
-            source TEXT,
-            score REAL,
-            searched_at REAL NOT NULL
-        );
-        INSERT INTO matches (query_key, video_id, video_title, source, score, searched_at)
-            SELECT query_key, video_id, video_title, source, score, searched_at FROM matches_old;
-        DROP TABLE matches_old;
-        """
-    )
+    if "id" not in cols:
+        conn.executescript(
+            """
+            ALTER TABLE matches RENAME TO matches_old;
+            CREATE TABLE matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_key TEXT NOT NULL UNIQUE,
+                video_id TEXT,
+                video_title TEXT,
+                source TEXT,
+                score REAL,
+                channel TEXT,
+                searched_at REAL NOT NULL
+            );
+            INSERT INTO matches (query_key, video_id, video_title, source, score, searched_at)
+                SELECT query_key, video_id, video_title, source, score, searched_at FROM matches_old;
+            DROP TABLE matches_old;
+            """
+        )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(matches)")}
+    if "channel" not in cols:
+        conn.execute("ALTER TABLE matches ADD COLUMN channel TEXT")
     conn.commit()
 
 
 def _migrate_tracks_table(conn: sqlite3.Connection) -> None:
-    """One-time upgrade for caches created before `tracks` had a search_artist override column."""
+    """One-time upgrade for caches created before `tracks` had search_artist/discogs_artist columns."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}
-    if cols and "search_artist" not in cols:
+    if not cols:
+        return
+    if "search_artist" not in cols:
         conn.execute("ALTER TABLE tracks ADD COLUMN search_artist TEXT")
-        conn.commit()
+    if "discogs_artist" not in cols:
+        conn.execute("ALTER TABLE tracks ADD COLUMN discogs_artist TEXT")
+    conn.commit()
 
 
 def _migrate_releases_table(conn: sqlite3.Connection) -> None:
-    """One-time upgrade for caches created before `releases` had year/labels/overrides columns."""
+    """One-time upgrade for caches created before `releases` had year/labels/overrides/videos columns."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(releases)")}
     if not cols:
         return
@@ -99,6 +112,8 @@ def _migrate_releases_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE releases ADD COLUMN artist_override TEXT")
     if "title_override" not in cols:
         conn.execute("ALTER TABLE releases ADD COLUMN title_override TEXT")
+    if "videos" not in cols:
+        conn.execute("ALTER TABLE releases ADD COLUMN videos TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
 
 
@@ -153,21 +168,35 @@ def upsert_release(
     genres: list[str],
     year: int | None = None,
     labels: list[str] | None = None,
+    videos: list[dict] | None = None,
 ) -> None:
     """Insert or refresh a release's Discogs-sourced fields.
+
+    `videos` is Discogs' own embedded YouTube links for the release (each a
+    dict with "uri"/"title"/"duration"), used by the sync matcher before it
+    falls back to searching YouTube itself. Pass `None` (the default) to leave
+    whatever's already cached untouched — `scan`'s basic-collection pass calls
+    this for every release on every run, but only the (rarer) full tracklist
+    fetch actually has fresh video data to offer.
 
     Deliberately does not touch artist_override/title_override — a re-scan
     (e.g. `scan --refresh`) must not wipe out manual corrections made via the
     browsable UI.
     """
+    videos_json = json.dumps(videos) if videos is not None else None
     conn.execute(
-        """INSERT INTO releases (release_id, artist, title, styles, genres, year, labels, fetched_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO releases (release_id, artist, title, styles, genres, year, labels, videos, fetched_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(release_id) DO UPDATE SET
              artist=excluded.artist, title=excluded.title,
              styles=excluded.styles, genres=excluded.genres,
-             year=excluded.year, labels=excluded.labels, fetched_at=excluded.fetched_at""",
-        (release_id, artist, title, json.dumps(styles), json.dumps(genres), year, json.dumps(labels or []), time.time()),
+             year=excluded.year, labels=excluded.labels,
+             videos=COALESCE(?, videos), fetched_at=excluded.fetched_at""",
+        (
+            release_id, artist, title, json.dumps(styles), json.dumps(genres),
+            year, json.dumps(labels or []), videos_json if videos_json is not None else "[]", time.time(),
+            videos_json,
+        ),
     )
 
 
@@ -187,11 +216,13 @@ def effective_release_title(release) -> str:
     return release["title_override"] or release["title"]
 
 
-def replace_tracks(conn, release_id: int, tracks: list[tuple[str, str, str | None]]) -> None:
+def replace_tracks(conn, release_id: int, tracks: list[tuple[str, str, str | None, str | None]]) -> None:
+    """`tracks` is (position, title, duration, discogs_artist) — the last is Discogs' own
+    per-track artist credit (see the `tracks.discogs_artist` column comment), or None."""
     conn.execute("DELETE FROM tracks WHERE release_id = ?", (release_id,))
     conn.executemany(
-        "INSERT INTO tracks (release_id, position, title, duration) VALUES (?, ?, ?, ?)",
-        [(release_id, pos, title, dur) for pos, title, dur in tracks],
+        "INSERT INTO tracks (release_id, position, title, duration, discogs_artist) VALUES (?, ?, ?, ?, ?)",
+        [(release_id, pos, title, dur, discogs_artist) for pos, title, dur, discogs_artist in tracks],
     )
 
 
@@ -207,14 +238,18 @@ def get_match(conn, artist: str, title: str) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def save_match(conn, artist: str, title: str, video_id: str | None, video_title: str | None, source: str, score: float) -> None:
+def save_match(
+    conn, artist: str, title: str, video_id: str | None, video_title: str | None,
+    source: str, score: float | None, channel: str | None = None,
+) -> None:
     conn.execute(
-        """INSERT INTO matches (query_key, video_id, video_title, source, score, searched_at)
-           VALUES (?, ?, ?, ?, ?, ?)
+        """INSERT INTO matches (query_key, video_id, video_title, source, score, channel, searched_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(query_key) DO UPDATE SET
              video_id=excluded.video_id, video_title=excluded.video_title,
-             source=excluded.source, score=excluded.score, searched_at=excluded.searched_at""",
-        (match_key(artist, title), video_id, video_title, source, score, time.time()),
+             source=excluded.source, score=excluded.score, channel=excluded.channel,
+             searched_at=excluded.searched_at""",
+        (match_key(artist, title), video_id, video_title, source, score, channel, time.time()),
     )
 
 
@@ -224,15 +259,29 @@ def get_match_by_id(conn, match_id: int) -> sqlite3.Row | None:
 
 
 def update_match(conn, match_id: int, video_id: str | None, video_title: str | None, source: str) -> None:
-    """Overwrite a match with a manually-supplied result. Score is cleared — a human pick has no fuzzy score."""
+    """Overwrite a match with a manually-supplied result. Score and channel are cleared —
+    a human pick has no fuzzy score, and we don't look up the channel for a manual entry."""
     conn.execute(
-        "UPDATE matches SET video_id = ?, video_title = ?, source = ?, score = NULL, searched_at = ? WHERE id = ?",
+        "UPDATE matches SET video_id = ?, video_title = ?, source = ?, score = NULL, channel = NULL, searched_at = ? WHERE id = ?",
         (video_id, video_title, source, time.time(), match_id),
     )
 
 
 def delete_match(conn, match_id: int) -> None:
     conn.execute("DELETE FROM matches WHERE id = ?", (match_id,))
+
+
+def count_matches(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
+
+def clear_all_matches(conn) -> int:
+    """Forget every cached match so the next sync searches (and re-matches) everything
+    from scratch. Used to backfill fields added to a match after it was already cached
+    (e.g. `channel`), since a normal sync skips anything already in the cache."""
+    n = count_matches(conn)
+    conn.execute("DELETE FROM matches")
+    return n
 
 
 def get_track(conn, track_id: int) -> sqlite3.Row | None:
@@ -282,16 +331,68 @@ def delete_playlist_def(conn, def_id: int) -> None:
     conn.execute("DELETE FROM playlist_defs WHERE id = ?", (def_id,))
 
 
+def _split_va_track_title(release_artist: str, raw_title: str) -> tuple[str, str] | None:
+    """Guess a per-track (artist, title) split for a various-artists release.
+
+    Discogs sometimes credits a release to several artists (joined with commas
+    in `release_artist`) without breaking out which artist owns which track —
+    instead the track's own title is written as "Artist - Title". When that
+    pattern shows up, split on it. Only used as a fallback when there's no
+    explicit per-track override.
+    """
+    if "," not in release_artist or " - " not in raw_title:
+        return None
+    artist, _, title = raw_title.partition(" - ")
+    artist, title = artist.strip(), title.strip()
+    return (artist, title) if artist and title else None
+
+
+def _is_untitled(title: str) -> bool:
+    """True for Discogs' own "no title given" placeholder — exact match only (case-insensitive),
+    so a real song that happens to be called e.g. "Untitled (How Does It Feel)" isn't caught."""
+    return title.strip().lower() == "untitled"
+
+
+def _resolve_untitled(release, position: str, title: str) -> str:
+    """An "Untitled" track has nothing useful to search on — fall back to the release
+    title plus the track's own vinyl position (e.g. "Yoyaku Barcelona 2025 A2"), which is
+    closer to how such tracks tend to actually get uploaded/labeled on YouTube."""
+    if not _is_untitled(title):
+        return title
+    return f"{effective_release_title(release)} {position}".strip()
+
+
 def effective_track_queries(release, tracks) -> list[tuple[int | None, str, str]]:
     """(track_id, artist, title) triples to search/display for a release.
 
-    Honors a per-track `search_artist` override (see `set_track_search_artist`)
-    over the release's own (possibly overridden, possibly multi-credit) artist string.
+    Resolves the artist per track, in priority order:
+    1. a manual `search_artist` override (see `set_track_search_artist`) — always wins
+    2. `discogs_artist` — Discogs' own structured per-track credit, when the API
+       provided one (compilations/VA releases where a track is credited to a
+       specific one of the release's several artists)
+    3. `_split_va_track_title`'s guess, for releases where Discogs *didn't* give
+       a structured per-track credit but the title text still embeds "Artist - Title"
+    4. the release's own (possibly overridden, possibly multi-credit) artist string
+
+    Whatever title results is then passed through `_resolve_untitled`, which only
+    changes anything when Discogs' own title actually is the "Untitled" placeholder.
     """
     base_artist = effective_release_artist(release)
     if not tracks:
         return [(None, base_artist, effective_release_title(release))]  # no tracklist on file — fall back to the release itself
-    return [(t["id"], t["search_artist"] or base_artist, t["title"]) for t in tracks]
+
+    triples = []
+    for t in tracks:
+        if t["search_artist"]:
+            artist, title = t["search_artist"], t["title"]
+        elif t["discogs_artist"]:
+            artist, title = t["discogs_artist"], t["title"]
+        else:
+            guess = _split_va_track_title(base_artist, t["title"])
+            artist, title = guess if guess else (base_artist, t["title"])
+        title = _resolve_untitled(release, t["position"], title)
+        triples.append((t["id"], artist, title))
+    return triples
 
 
 def iter_releases_with_tracks(conn):

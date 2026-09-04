@@ -16,11 +16,11 @@ def _seed(conn, dummy_library):
         store.replace_tracks(
             conn,
             r["release_id"],
-            [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]],
+            [(t["position"], t["title"], t["duration"], t.get("discogs_artist")) for t in r["tracklist"]],
         )
 
 
-def test_seeded_library_has_15_tracks_across_6_styles(isolated_cache, dummy_library):
+def test_seeded_library_has_18_tracks_across_6_styles(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
@@ -30,7 +30,7 @@ def test_seeded_library_has_15_tracks_across_6_styles(isolated_cache, dummy_libr
     total_tracks = sum(len(tracks) for _release, tracks in releases)
     styles = {s for release, _tracks in releases for s in json.loads(release["styles"])}
 
-    assert total_tracks == 15
+    assert total_tracks == 18
     assert len(styles) == 6
 
 
@@ -49,7 +49,7 @@ def test_style_breakdown_matches_fixture_counts(isolated_cache, dummy_library):
     assert counts == {
         "House": 3,
         "Techno": 3,
-        "Deep House": 2,
+        "Deep House": 5,
         "Acid": 3,
         "Breakbeat": 2,
         "Trance": 2,
@@ -184,3 +184,147 @@ def test_scan_captures_year_and_labels(isolated_cache, dummy_library):
     first = dummy_library[0]
     assert by_id[first["release_id"]]["year"] == first["year"]
     assert json.loads(by_id[first["release_id"]]["labels"]) == first["labels"]
+
+
+# --- various-artists track title splitting ---
+
+
+def test_split_va_track_title_splits_on_dash_when_release_has_multiple_artists():
+    assert store._split_va_track_title("Aline Umber, HOSTOM", "HOSTOM - Oto") == ("HOSTOM", "Oto")
+
+
+def test_split_va_track_title_requires_a_comma_in_the_release_artist():
+    assert store._split_va_track_title("Solo Artist", "Some Artist - Some Track") is None
+
+
+def test_split_va_track_title_requires_a_dash_in_the_track_title():
+    assert store._split_va_track_title("A, B", "No dash here") is None
+
+
+def test_split_va_track_title_rejects_an_empty_side():
+    assert store._split_va_track_title("A, B", " - Track") is None
+    assert store._split_va_track_title("A, B", "Artist - ") is None
+
+
+def test_effective_track_queries_applies_the_va_split_when_unambiguous():
+    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    tracks = [
+        {"id": 1, "search_artist": None, "discogs_artist": None, "title": "HOSTOM - Oto", "position": "A1"},
+        {"id": 2, "search_artist": None, "discogs_artist": None, "title": "No Dash Here", "position": "A2"},
+    ]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "HOSTOM", "Oto"), (2, "Aline Umber, HOSTOM", "No Dash Here")]
+
+
+def test_effective_track_queries_manual_override_wins_over_the_va_split():
+    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    tracks = [{"id": 1, "search_artist": "Manually Corrected", "discogs_artist": None, "title": "HOSTOM - Oto", "position": "A1"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "Manually Corrected", "HOSTOM - Oto")]
+
+
+def test_effective_track_queries_does_not_split_single_artist_releases():
+    release = {"artist": "Solo Artist", "artist_override": None, "title": "Some EP", "title_override": None}
+    tracks = [{"id": 1, "search_artist": None, "discogs_artist": None, "title": "Some Artist - Some Track", "position": "A1"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "Solo Artist", "Some Artist - Some Track")]
+
+
+# --- discogs_artist: Discogs' own structured per-track credit ---
+
+
+def test_effective_track_queries_prefers_discogs_artist_over_the_va_split_guess():
+    """Even though the title *also* matches the dash-split pattern, a structured
+    discogs_artist credit (the real fix for this release shape) must win — the
+    dash-split is only a fallback for releases where Discogs gave no such credit."""
+    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    tracks = [{"id": 1, "search_artist": None, "discogs_artist": "HOSTOM", "title": "HOSTOM - Oto", "position": "A1"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "HOSTOM", "HOSTOM - Oto")]  # title is left as-is; only the artist comes from discogs_artist
+
+
+def test_effective_track_queries_uses_discogs_artist_for_a_clean_title_with_no_dash():
+    """The actual real-world case: Discogs' tracklist API gives a per-track artist credit
+    without ever embedding it into the title text (e.g. title is just "Tree House")."""
+    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    tracks = [{"id": 1, "search_artist": None, "discogs_artist": "HOSTOM", "title": "Tree House", "position": "A2"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "HOSTOM", "Tree House")]
+
+
+def test_effective_track_queries_manual_override_wins_over_discogs_artist():
+    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    tracks = [{"id": 1, "search_artist": "Manually Corrected", "discogs_artist": "HOSTOM", "title": "Tree House", "position": "A2"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "Manually Corrected", "Tree House")]
+
+
+def test_real_va_release_regression_hostom_tree_house(isolated_cache, dummy_library):
+    """Regression test for the exact reported bug: on the 'Aline Umber, HOSTOM' release,
+    the track 'Tree House' must resolve to artist 'HOSTOM' (from Discogs' own per-track
+    credit), not the full comma-joined release artist."""
+    release_fixture = next(r for r in dummy_library if r["release_id"] == 34365844)
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    with store.connect() as conn:
+        release, tracks = next(
+            (r, t) for r, t in store.iter_releases_with_tracks(conn) if r["release_id"] == 34365844
+        )
+        queries = store.effective_track_queries(release, tracks)
+
+    by_title = {title: artist for _tid, artist, title in queries}
+    assert by_title["Tree House"] == "HOSTOM"
+    assert by_title["Oto"] == "Aline Umber"
+    assert release_fixture["artist"] == "Aline Umber, HOSTOM"  # sanity: the release-level artist stays the full credit
+
+
+# --- "Untitled" tracks fall back to release title + position ---
+
+
+def test_is_untitled_matches_only_the_exact_placeholder():
+    assert store._is_untitled("Untitled")
+    assert store._is_untitled("  untitled  ")
+    assert not store._is_untitled("Untitled (How Does It Feel)")  # a real song title — must not be caught
+    assert not store._is_untitled("Some Track")
+
+
+def test_effective_track_queries_resolves_untitled_to_release_title_plus_position():
+    release = {"artist": "Solo Artist", "artist_override": None, "title": "Some EP", "title_override": None}
+    tracks = [{"id": 1, "search_artist": None, "discogs_artist": None, "title": "Untitled", "position": "A2"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "Solo Artist", "Some EP A2")]
+
+
+def test_effective_track_queries_untitled_fallback_applies_after_discogs_artist_resolution():
+    """The untitled fallback is a title-only normalization — it must not disturb whichever
+    tier (override/discogs_artist/VA-split/release artist) already resolved the artist."""
+    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    tracks = [{"id": 1, "search_artist": None, "discogs_artist": "HOSTOM", "title": "Untitled", "position": "B3"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "HOSTOM", "Yoyaku Barcelona 2025 B3")]
+
+
+def test_effective_track_queries_leaves_real_titles_untouched():
+    release = {"artist": "Solo Artist", "artist_override": None, "title": "Some EP", "title_override": None}
+    tracks = [{"id": 1, "search_artist": None, "discogs_artist": None, "title": "A Real Song", "position": "A1"}]
+
+    result = store.effective_track_queries(release, tracks)
+
+    assert result == [(1, "Solo Artist", "A Real Song")]

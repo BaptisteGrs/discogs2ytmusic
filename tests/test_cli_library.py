@@ -4,7 +4,7 @@ import sqlite3
 
 from typer.testing import CliRunner
 
-from discogs2ytmusic import cli, store
+from discogs2ytmusic import cli, matcher, store
 from discogs2ytmusic.matcher import MatchResult
 
 runner = CliRunner()
@@ -51,12 +51,12 @@ def test_library_dummy_sync_and_export_round_trip(isolated_cache, tmp_path, monk
     scan_result = runner.invoke(cli.app, ["--library", "dummy", "scan"])
     assert scan_result.exit_code == 0, scan_result.output
 
-    monkeypatch.setattr(cli.matcher, "find_match", _always_matches)
+    monkeypatch.setattr(matcher, "find_match", _always_matches)
     monkeypatch.setattr(cli.ytmusic_client, "get_client", lambda authenticated=True: object())
 
     sync_result = runner.invoke(cli.app, ["--library", "dummy", "sync"])
     assert sync_result.exit_code == 0, sync_result.output
-    assert "Dry run only" in sync_result.output
+    assert "Match preview" in sync_result.output
 
     out = tmp_path / "dummy_matches.csv"
     export_result = runner.invoke(cli.app, ["--library", "dummy", "export", "--output", str(out)])
@@ -66,7 +66,7 @@ def test_library_dummy_sync_and_export_round_trip(isolated_cache, tmp_path, monk
 
     with out.open() as f:
         rows = list(csv.DictReader(f))
-    assert len(rows) == 15
+    assert len(rows) == 18
     assert all(r["matched"] == "yes" for r in rows)
 
 

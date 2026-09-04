@@ -14,7 +14,7 @@ def _seed(conn, dummy_library):
         store.replace_tracks(
             conn,
             r["release_id"],
-            [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]],
+            [(t["position"], t["title"], t["duration"], t.get("discogs_artist")) for t in r["tracklist"]],
         )
 
 
@@ -33,8 +33,8 @@ def test_apply_artist_edits_sets_track_override(isolated_cache, dummy_library):
             "SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)
         ).fetchone()[0]
 
-    original = _df([{"track_id": track_id, "release_id": release["release_id"], "artist": release["artist"]}])
-    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "artist": "Corrected Artist"}])
+    original = _df([{"track_id": track_id, "release_id": release["release_id"], "track_artist": release["artist"]}])
+    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "track_artist": "Corrected Artist"}])
 
     with store.connect() as conn:
         count = collection_edits.apply_artist_edits(conn, original, edited)
@@ -54,8 +54,8 @@ def test_apply_artist_edits_clearing_reverts_to_release_artist(isolated_cache, d
         ).fetchone()[0]
         store.set_track_search_artist(conn, track_id, "Temporary Override")
 
-    original = _df([{"track_id": track_id, "release_id": release["release_id"], "artist": "Temporary Override"}])
-    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "artist": "  "}])
+    original = _df([{"track_id": track_id, "release_id": release["release_id"], "track_artist": "Temporary Override"}])
+    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "track_artist": "  "}])
 
     with store.connect() as conn:
         collection_edits.apply_artist_edits(conn, original, edited)
@@ -70,8 +70,8 @@ def test_apply_artist_edits_falls_back_to_release_override_with_no_track_id(isol
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
-    original = _df([{"track_id": None, "release_id": release["release_id"], "artist": release["artist"]}])
-    edited = _df([{"track_id": None, "release_id": release["release_id"], "artist": "Corrected Release Artist"}])
+    original = _df([{"track_id": None, "release_id": release["release_id"], "track_artist": release["artist"]}])
+    edited = _df([{"track_id": None, "release_id": release["release_id"], "track_artist": "Corrected Release Artist"}])
 
     with store.connect() as conn:
         count = collection_edits.apply_artist_edits(conn, original, edited)
@@ -92,7 +92,7 @@ def test_apply_artist_edits_unchanged_rows_are_noop(isolated_cache, dummy_librar
             "SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)
         ).fetchone()[0]
 
-    df = _df([{"track_id": track_id, "release_id": release["release_id"], "artist": release["artist"]}])
+    df = _df([{"track_id": track_id, "release_id": release["release_id"], "track_artist": release["artist"]}])
 
     with store.connect() as conn:
         count = collection_edits.apply_artist_edits(conn, df, df.copy())
@@ -107,9 +107,9 @@ def test_apply_video_link_edits_creates_new_match(isolated_cache, dummy_library)
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
-    original = _df([{"match_id": None, "artist": "Some Artist", "title": "Some Title", "youtube_url": ""}])
+    original = _df([{"match_id": None, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": ""}])
     edited = _df(
-        [{"match_id": None, "artist": "Some Artist", "title": "Some Title", "youtube_url": "https://music.youtube.com/watch?v=abc123XYZ"}]
+        [{"match_id": None, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": "https://music.youtube.com/watch?v=abc123XYZ"}]
     )
 
     with store.connect() as conn:
@@ -129,9 +129,9 @@ def test_apply_video_link_edits_uses_edited_artist_for_a_simultaneous_correction
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
-    original = _df([{"match_id": None, "artist": "Old Artist", "title": "Some Title", "youtube_url": ""}])
+    original = _df([{"match_id": None, "track_artist": "Old Artist", "track_title": "Some Title", "youtube_url": ""}])
     edited = _df(
-        [{"match_id": None, "artist": "New Artist", "title": "Some Title", "youtube_url": "abc123XYZ"}]
+        [{"match_id": None, "track_artist": "New Artist", "track_title": "Some Title", "youtube_url": "abc123XYZ"}]
     )
 
     with store.connect() as conn:
@@ -147,8 +147,8 @@ def test_apply_video_link_edits_updates_existing_match(isolated_cache, dummy_lib
         match_id = store.get_match(conn, "Some Artist", "Some Title")["id"]
 
     old_url = "https://music.youtube.com/watch?v=wrong-id"
-    original = _df([{"match_id": match_id, "artist": "Some Artist", "title": "Some Title", "youtube_url": old_url}])
-    edited = _df([{"match_id": match_id, "artist": "Some Artist", "title": "Some Title", "youtube_url": "right-id"}])
+    original = _df([{"match_id": match_id, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": old_url}])
+    edited = _df([{"match_id": match_id, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": "right-id"}])
 
     with store.connect() as conn:
         count, errors = collection_edits.apply_video_link_edits(conn, original, edited)
@@ -167,8 +167,8 @@ def test_apply_video_link_edits_clearing_rejects_existing_match(isolated_cache, 
         match_id = store.get_match(conn, "Some Artist", "Some Title")["id"]
 
     old_url = "https://music.youtube.com/watch?v=some-id"
-    original = _df([{"match_id": match_id, "artist": "Some Artist", "title": "Some Title", "youtube_url": old_url}])
-    edited = _df([{"match_id": match_id, "artist": "Some Artist", "title": "Some Title", "youtube_url": ""}])
+    original = _df([{"match_id": match_id, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": old_url}])
+    edited = _df([{"match_id": match_id, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": ""}])
 
     with store.connect() as conn:
         count, errors = collection_edits.apply_video_link_edits(conn, original, edited)
@@ -184,9 +184,9 @@ def test_apply_video_link_edits_invalid_url_reports_error_and_skips(isolated_cac
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
-    original = _df([{"match_id": None, "artist": "Some Artist", "title": "Some Title", "youtube_url": ""}])
+    original = _df([{"match_id": None, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": ""}])
     edited = _df(
-        [{"match_id": None, "artist": "Some Artist", "title": "Some Title", "youtube_url": "https://example.com/no-video-id-here"}]
+        [{"match_id": None, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": "https://example.com/no-video-id-here"}]
     )
 
     with store.connect() as conn:
