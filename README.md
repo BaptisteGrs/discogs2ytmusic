@@ -90,17 +90,54 @@ uv run discogs2ytmusic sync --style "Deep House"     # populate the cache, no ch
 uv run discogs2ytmusic export --style "Deep House" --output deep_house.csv
 ```
 
-Columns: `match_id, style, artist, title, discogs_url, matched, video_id,
-youtube_url, video_title, source, score, searched_at`. Filter/sort on the
-`matched` column (yes/no) in your spreadsheet tool to isolate tracks with no
-confident match — candidates for ripping/uploading yourself. `match_id` is a
-stable numeric id for the cached match row (useful once there's a way to
-manually correct individual matches); `discogs_url` links back to the
-release on Discogs.
+Columns: `match_id, track_id, style, artist, title, discogs_url, matched,
+video_id, youtube_url, video_title, source, score, searched_at`. Filter/sort
+on the `matched` column (yes/no) in your spreadsheet tool to isolate tracks
+with no confident match — candidates for ripping/uploading yourself.
+`discogs_url` links back to the release on Discogs. `match_id`/`track_id` are
+the ids to pass to `correct`/`fix-artist` below (see "artist" note there:
+this column shows the artist actually used for the search, which may already
+reflect a `fix-artist` override).
 
 This only reads the local cache — it never hits YouTube itself, so it's
 cheap to re-run as you narrow things down. There's no interactive browser
 for the cache yet, just CSV export for now.
+
+### Fix a wrong match or a bad search query by hand
+
+Two commands, addressed by the ids from `export`, for the two different
+things that can go wrong:
+
+**`correct <match_id>`** — the search picked the wrong video (or none), but
+the query itself was fine. Give it the right video yourself, mark it as
+genuinely having no match, or throw the cached result away so `sync` tries
+again:
+
+```bash
+uv run discogs2ytmusic correct 42 --video-id https://music.youtube.com/watch?v=XXXXXXXXXXX
+uv run discogs2ytmusic correct 42 --reject   # confirmed no match exists — won't be re-searched
+uv run discogs2ytmusic correct 42 --clear    # forget it, re-search on next sync
+```
+
+**`fix-artist <track_id>`** — the query itself was the problem. Discogs
+credits a release to every artist on it joined with commas (e.g. `"Cesare
+Muraca, Aymeric"`), and that full string is used to search *every* track on
+the release even when a given track is really just one of them. The extra
+name(s) dilute the fuzzy match — sometimes enough to miss entirely.
+`fix-artist` overrides the artist used for one track's search:
+
+```bash
+uv run discogs2ytmusic fix-artist 9 --artist "Aymeric"
+uv run discogs2ytmusic sync --style Acid   # re-searches under the corrected query
+uv run discogs2ytmusic fix-artist 9 --clear   # revert to the release's artist
+```
+
+The override lives on the track row, so it survives normal re-runs of
+`sync`/`export` — but is lost if that release's tracklist is later replaced
+via `scan --refresh` (tracks are fully deleted and re-inserted). Re-apply it
+if that happens.
+
+Neither command touches YouTube — both just edit the local cache.
 
 ### Actually create/update the playlists
 
