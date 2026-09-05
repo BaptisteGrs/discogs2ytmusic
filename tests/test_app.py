@@ -116,3 +116,16 @@ def test_app_shows_the_matched_video_channel(isolated_cache, dummy_library):
 
     assert not at.exception
     assert df.loc[first["artist"], "channel"] == "Yoyaku Record Store"
+
+
+def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "manual", None)
+
+    at = AppTest.from_file(APP_PATH).run()
+    df = at.get_by_key("collection_editor").value.set_index("track_artist")
+
+    assert not at.exception
+    assert bool(df.loc[first["artist"], "locked"]) is True

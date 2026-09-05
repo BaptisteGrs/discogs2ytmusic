@@ -105,6 +105,7 @@ class TrackRow:
     score: float | None
     channel: str | None
     searched_at: str | None
+    locked: bool  # a manual correction (artist override and/or picked video) protects this row from scan/sync overwrites
 
 
 def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -> list[TrackRow]:
@@ -119,6 +120,7 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
         release_artist = store.effective_release_artist(release)
         release_title = store.effective_release_title(release)
         positions = {t["id"]: t["position"] for t in tracks}
+        artist_overridden = {t["id"]: bool(t["search_artist"]) for t in tracks}
         for track_id, artist, title in store.effective_track_queries(release, tracks):
             match = store.get_match(conn, artist, title)
             video_id = match["video_id"] if match else None
@@ -127,6 +129,8 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
             searched_at = None
             if match is not None:
                 searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
+            source = (match["source"] if match else None) or ""
+            locked = artist_overridden.get(track_id, False) or source == "manual"
             rows.append(
                 TrackRow(
                     track_id=track_id,
@@ -146,10 +150,11 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
                     video_id=video_id,
                     youtube_url=f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
                     video_title=(match["video_title"] if match else None) or "",
-                    source=(match["source"] if match else None) or "",
+                    source=source,
                     score=match["score"] if match is not None else None,
                     channel=(match["channel"] if match is not None else None) or "",
                     searched_at=searched_at,
+                    locked=locked,
                 )
             )
     rows.sort(key=lambda r: (r.track_artist, r.track_title))

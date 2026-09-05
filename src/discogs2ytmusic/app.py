@@ -11,7 +11,7 @@ st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
 COLLECTION_COLUMNS = [
     "release_title", "track_artist", "position", "track_title", "labels", "year", "matched", "discogs_url", "youtube_url",
-    "channel", "release_artist", "styles", "genres", "confidence", "video_title",
+    "channel", "locked", "release_artist", "styles", "genres", "confidence", "video_title",
 ]
 
 
@@ -63,6 +63,7 @@ def _rows_to_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
                 "youtube_url": r.youtube_url,
                 "video_title": r.video_title,
                 "channel": r.channel,
+                "locked": r.locked,
                 "discogs_url": r.discogs_url,
             }
             for r in rows
@@ -126,7 +127,7 @@ def render_collection_tab() -> None:
         column_order=COLLECTION_COLUMNS,
         disabled=[
             "release_artist", "position", "track_title", "release_title", "discogs_url",
-            "styles", "genres", "labels", "year", "matched", "confidence", "video_title", "channel",
+            "styles", "genres", "labels", "year", "matched", "confidence", "video_title", "channel", "locked",
         ],
         column_config={
             "track_artist": st.column_config.TextColumn(
@@ -145,6 +146,14 @@ def render_collection_tab() -> None:
             "matched": st.column_config.CheckboxColumn("Matched"),
             "channel": st.column_config.TextColumn(
                 "Channel", help="Uploader/channel of the matched YouTube video"
+            ),
+            "locked": st.column_config.CheckboxColumn(
+                "Locked",
+                help=(
+                    "A manual correction (artist or YouTube link) protects this row from being "
+                    "overwritten by `scan --refresh` or `rematch`. Clear the correction "
+                    "(`fix-artist --clear` / `correct --clear`) to unlock it."
+                ),
             ),
             "confidence": st.column_config.ProgressColumn(
                 "Confidence",
