@@ -345,32 +345,44 @@ def push_style_playlists(
 @app.command()
 def rematch(
     style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."),
+    include_manual: bool = typer.Option(
+        False, "--include-manual", help="Also clear manually-corrected matches (normally preserved)."
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (for scripting)."),
 ):
-    """Clear all cached YouTube matches and re-match everything from scratch.
+    """Clear cached YouTube matches and re-match everything from scratch.
 
     Use this to backfill fields added to the match cache after tracks were already matched
     (e.g. Channel) — a normal `sync` skips anything already cached, so it never picks those up
     on its own. Also re-fetches the Discogs collection first (like `scan --refresh`), so
     Discogs-embedded videos are picked up too. Does not touch your real YT Music account —
     no playlists are created or modified.
+
+    Manually-corrected matches (via `correct`) are preserved by default — pass --include-manual
+    to clear those too.
     """
     with store.connect() as conn:
         n_matches = store.count_matches(conn)
+        n_manual = store.count_manual_matches(conn)
+    n_to_clear = n_matches if include_manual else n_matches - n_manual
 
-    console.print(
-        f"[bold yellow]Warning:[/bold yellow] this will delete all {n_matches} cached match(es) and "
+    warning = (
+        f"[bold yellow]Warning:[/bold yellow] this will delete {n_to_clear} cached match(es) and "
         "re-search every track from scratch, re-fetching your Discogs collection first. This can take "
         "a while and makes a lot of YouTube/YT Music requests. It will NOT touch your real YT Music account."
     )
+    if not include_manual and n_manual:
+        warning += f" {n_manual} manually-corrected match(es) will be kept untouched."
+    console.print(warning)
     if not yes and not typer.confirm("Continue?"):
         console.print("Aborted.")
         raise typer.Exit(0)
 
     with store.connect() as conn:
-        n_cleared = store.clear_all_matches(conn)
+        n_cleared = store.clear_all_matches(conn, include_manual=include_manual)
         conn.commit()
-    console.print(f"[green]Cleared {n_cleared} cached match(es).[/green]")
+    kept_note = "" if include_manual else f" ({n_manual} manual correction(s) kept)"
+    console.print(f"[green]Cleared {n_cleared} cached match(es){kept_note}.[/green]")
 
     scan(refresh=True)
     sync(style=style, refresh_collection=False)

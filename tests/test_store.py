@@ -328,3 +328,95 @@ def test_effective_track_queries_leaves_real_titles_untouched():
     result = store.effective_track_queries(release, tracks)
 
     assert result == [(1, "Solo Artist", "A Real Song")]
+
+
+# --- replace_tracks preserves manual corrections across a rescan ---
+
+
+def test_replace_tracks_preserves_a_manual_search_artist_override_for_an_unchanged_track(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Various", "Comp EP", ["House"], ["Electronic"])
+        store.replace_tracks(conn, 1, [("A1", "Some Track", None, None)])
+        track = conn.execute("SELECT id FROM tracks WHERE release_id = 1").fetchone()
+        store.set_track_search_artist(conn, track[0], "Real Artist")
+
+        # Re-scan with the exact same tracklist (as a real `scan --refresh` would do)
+        store.replace_tracks(conn, 1, [("A1", "Some Track", None, None)])
+
+        refreshed = store.get_track(conn, track[0])
+
+    assert refreshed["search_artist"] == "Real Artist"
+
+
+def test_replace_tracks_drops_the_override_only_for_a_track_that_actually_disappeared(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Various", "Comp EP", ["House"], ["Electronic"])
+        store.replace_tracks(conn, 1, [("A1", "Track One", None, None), ("A2", "Track Two", None, None)])
+        rows = {r["position"]: r["id"] for r in conn.execute("SELECT id, position FROM tracks WHERE release_id = 1")}
+        store.set_track_search_artist(conn, rows["A1"], "Real Artist")
+        store.set_track_search_artist(conn, rows["A2"], "Other Artist")
+
+        # A2 renamed on Discogs (position no longer matches) — its override can't carry over,
+        # but A1's must survive untouched.
+        store.replace_tracks(conn, 1, [("A1", "Track One", None, None), ("A2", "Renamed Track", None, None)])
+
+        remaining = {r["position"]: r for r in conn.execute("SELECT * FROM tracks WHERE release_id = 1")}
+
+    assert remaining["A1"]["search_artist"] == "Real Artist"
+    assert remaining["A2"]["title"] == "Renamed Track"
+    assert remaining["A2"]["search_artist"] is None
+
+
+def test_replace_tracks_updates_duration_and_discogs_artist_for_an_unchanged_track(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Various", "Comp EP", ["House"], ["Electronic"])
+        store.replace_tracks(conn, 1, [("A1", "Some Track", None, None)])
+
+        store.replace_tracks(conn, 1, [("A1", "Some Track", "3:45", "HOSTOM")])
+
+        track = conn.execute("SELECT * FROM tracks WHERE release_id = 1").fetchone()
+
+    assert track["duration"] == "3:45"
+    assert track["discogs_artist"] == "HOSTOM"
+
+
+def test_replace_tracks_handles_duplicate_position_and_title_on_the_same_release(isolated_cache):
+    """Seen in real Discogs data: two distinct tracks sharing the exact same (position, title)."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Various", "Comp EP", ["House"], ["Electronic"])
+        store.replace_tracks(conn, 1, [("A", "Hot Legs", None, None), ("A", "Hot Legs", None, None)])
+
+        store.replace_tracks(conn, 1, [("A", "Hot Legs", None, None), ("A", "Hot Legs", None, None)])
+
+        count = conn.execute("SELECT COUNT(*) FROM tracks WHERE release_id = 1").fetchone()[0]
+
+    assert count == 2
+
+
+# --- clear_all_matches preserves manual corrections by default ---
+
+
+def test_clear_all_matches_preserves_manual_matches_by_default(isolated_cache):
+    with store.connect() as conn:
+        store.save_match(conn, "Artist A", "Track A", "auto-vid", "Video", "ytmusic", 90.0)
+        store.save_match(conn, "Artist B", "Track B", "manual-vid", "Video", "manual", None)
+
+        n_cleared = store.clear_all_matches(conn)
+
+        remaining = conn.execute("SELECT query_key FROM matches").fetchall()
+
+    assert n_cleared == 1
+    assert [r[0] for r in remaining] == [store.match_key("Artist B", "Track B")]
+
+
+def test_clear_all_matches_include_manual_clears_everything(isolated_cache):
+    with store.connect() as conn:
+        store.save_match(conn, "Artist A", "Track A", "auto-vid", "Video", "ytmusic", 90.0)
+        store.save_match(conn, "Artist B", "Track B", "manual-vid", "Video", "manual", None)
+
+        n_cleared = store.clear_all_matches(conn, include_manual=True)
+
+        remaining = store.count_matches(conn)
+
+    assert n_cleared == 2
+    assert remaining == 0

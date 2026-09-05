@@ -70,3 +70,45 @@ def test_rematch_prompts_with_current_match_count(isolated_cache, monkeypatch):
     result = runner.invoke(cli.app, ["--library", "dummy", "rematch"], input="n\n")
 
     assert f"{n}" in result.output
+
+
+def test_rematch_preserves_a_manual_correction_by_default(isolated_cache, monkeypatch):
+    runner.invoke(cli.app, ["--library", "dummy", "scan"])
+    monkeypatch.setattr(matcher, "find_match", _always_matches)
+    monkeypatch.setattr(cli.ytmusic_client, "get_client", lambda authenticated=True: object())
+    runner.invoke(cli.app, ["--library", "dummy", "sync"])
+
+    artist, title = _first_track_query()
+    with store.connect() as conn:
+        match = store.get_match(conn, artist, title)
+        store.update_match(conn, match["id"], video_id="manually-picked", video_title="Manual pick", source="manual")
+        conn.commit()
+
+    result = runner.invoke(cli.app, ["--library", "dummy", "rematch", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "manual correction" in result.output
+    with store.connect() as conn:
+        match = store.get_match(conn, artist, title)
+    assert match["video_id"] == "manually-picked"
+    assert match["source"] == "manual"
+
+
+def test_rematch_include_manual_clears_manual_corrections_too(isolated_cache, monkeypatch):
+    runner.invoke(cli.app, ["--library", "dummy", "scan"])
+    monkeypatch.setattr(matcher, "find_match", _always_matches)
+    monkeypatch.setattr(cli.ytmusic_client, "get_client", lambda authenticated=True: object())
+    runner.invoke(cli.app, ["--library", "dummy", "sync"])
+
+    artist, title = _first_track_query()
+    with store.connect() as conn:
+        match = store.get_match(conn, artist, title)
+        store.update_match(conn, match["id"], video_id="manually-picked", video_title="Manual pick", source="manual")
+        conn.commit()
+
+    result = runner.invoke(cli.app, ["--library", "dummy", "rematch", "--yes", "--include-manual"])
+
+    assert result.exit_code == 0, result.output
+    with store.connect() as conn:
+        match = store.get_match(conn, artist, title)
+    assert match["video_id"] != "manually-picked"

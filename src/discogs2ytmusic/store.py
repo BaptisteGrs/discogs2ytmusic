@@ -218,12 +218,43 @@ def effective_release_title(release) -> str:
 
 def replace_tracks(conn, release_id: int, tracks: list[tuple[str, str, str | None, str | None]]) -> None:
     """`tracks` is (position, title, duration, discogs_artist) — the last is Discogs' own
-    per-track artist credit (see the `tracks.discogs_artist` column comment), or None."""
-    conn.execute("DELETE FROM tracks WHERE release_id = ?", (release_id,))
-    conn.executemany(
-        "INSERT INTO tracks (release_id, position, title, duration, discogs_artist) VALUES (?, ?, ?, ?, ?)",
-        [(release_id, pos, title, dur, discogs_artist) for pos, title, dur, discogs_artist in tracks],
-    )
+    per-track artist credit (see the `tracks.discogs_artist` column comment), or None.
+
+    Upserts by matching each new (position, title) pair against an existing track rather
+    than deleting and reinserting everything, so `search_artist` — a manual per-track
+    correction — survives a `scan --refresh` instead of being silently wiped. A track whose
+    (position, title) no longer appears in the new tracklist is removed; a genuinely new one
+    is inserted. Ties among duplicate (position, title) pairs on the same release (rare, but
+    seen in real Discogs data) are broken by original order.
+    """
+    conn.row_factory = sqlite3.Row
+    existing = conn.execute(
+        "SELECT id, position, title FROM tracks WHERE release_id = ? ORDER BY id", (release_id,)
+    ).fetchall()
+    remaining_by_key: dict[tuple[str, str], list[int]] = {}
+    for row in existing:
+        remaining_by_key.setdefault((row["position"], row["title"]), []).append(row["id"])
+
+    keep_ids: set[int] = set()
+    for pos, title, duration, discogs_artist in tracks:
+        candidates = remaining_by_key.get((pos, title))
+        if candidates:
+            track_id = candidates.pop(0)
+            conn.execute(
+                "UPDATE tracks SET duration = ?, discogs_artist = ? WHERE id = ?",
+                (duration, discogs_artist, track_id),
+            )
+            keep_ids.add(track_id)
+        else:
+            cur = conn.execute(
+                "INSERT INTO tracks (release_id, position, title, duration, discogs_artist) VALUES (?, ?, ?, ?, ?)",
+                (release_id, pos, title, duration, discogs_artist),
+            )
+            keep_ids.add(cur.lastrowid)
+
+    stale_ids = [row["id"] for row in existing if row["id"] not in keep_ids]
+    if stale_ids:
+        conn.executemany("DELETE FROM tracks WHERE id = ?", [(i,) for i in stale_ids])
 
 
 def has_tracks(conn, release_id: int) -> bool:
@@ -275,12 +306,25 @@ def count_matches(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
 
 
-def clear_all_matches(conn) -> int:
-    """Forget every cached match so the next sync searches (and re-matches) everything
-    from scratch. Used to backfill fields added to a match after it was already cached
-    (e.g. `channel`), since a normal sync skips anything already in the cache."""
-    n = count_matches(conn)
-    conn.execute("DELETE FROM matches")
+def count_manual_matches(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM matches WHERE source = 'manual'").fetchone()[0]
+
+
+def clear_all_matches(conn, include_manual: bool = False) -> int:
+    """Forget cached matches so the next sync searches (and re-matches) them from scratch.
+    Used to backfill fields added to a match after it was already cached (e.g. `channel`),
+    since a normal sync skips anything already in the cache.
+
+    Manually-corrected matches (`source == 'manual'`) are preserved by default — a human
+    already resolved those, and a bulk resync shouldn't silently discard that. Pass
+    `include_manual=True` to clear those too.
+    """
+    if include_manual:
+        n = count_matches(conn)
+        conn.execute("DELETE FROM matches")
+        return n
+    n = conn.execute("SELECT COUNT(*) FROM matches WHERE source != 'manual'").fetchone()[0]
+    conn.execute("DELETE FROM matches WHERE source != 'manual'")
     return n
 
 

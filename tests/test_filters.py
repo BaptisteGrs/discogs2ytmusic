@@ -142,6 +142,50 @@ def test_resolve_rows_matched_only_excludes_unmatched_tracks(isolated_cache, dum
     assert rows[0].video_id == "vid1"
 
 
+# --- resolve_rows: locked flag ---
+
+
+def test_resolve_rows_flags_a_manually_overridden_artist_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track = conn.execute(
+            "SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)
+        ).fetchone()
+        store.set_track_search_artist(conn, track[0], "Corrected Artist")
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    corrected = next(r for r in rows if r.track_id == track[0])
+    assert corrected.locked is True
+    others = [r for r in rows if r.track_id != track[0]]
+    assert all(not r.locked for r in others)
+
+
+def test_resolve_rows_flags_a_manual_match_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "manual-vid", "Manual pick", "manual", None)
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    manual_row = next(r for r in rows if r.video_id == "manual-vid")
+    assert manual_row.locked is True
+
+
+def test_resolve_rows_unmatched_untouched_track_is_not_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    assert all(not r.locked for r in rows)
+
+
 def test_resolve_rows_combines_criteria_with_and(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
