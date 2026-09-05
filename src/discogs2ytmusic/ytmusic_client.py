@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from ytmusicapi import YTMusic, setup
 from ytmusicapi.exceptions import YTMusicUserError
@@ -79,6 +80,20 @@ def _parse_headers_file(text: str) -> tuple[str, str]:
         elif key == "x-goog-authuser":
             authuser = value
     return cookie, authuser
+
+
+def parse_video_id(value: str) -> str:
+    """Accept either a bare YouTube video id or a full watch URL (youtube.com, music.youtube.com, youtu.be)."""
+    value = value.strip()
+    if not value.startswith("http://") and not value.startswith("https://"):
+        return value
+    parsed = urlparse(value)
+    if parsed.hostname and "youtu.be" in parsed.hostname:
+        return parsed.path.strip("/")
+    video_id = parse_qs(parsed.query).get("v", [None])[0]
+    if not video_id:
+        raise ValueError(f"Could not find a video id in URL: {value}")
+    return video_id
 
 
 def get_client(authenticated: bool = True) -> YTMusic:

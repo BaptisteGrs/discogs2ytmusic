@@ -18,16 +18,20 @@ class Track:
     position: str
     title: str
     duration: str | None
+    artists: list[str] = field(default_factory=list)  # per-track credit, only present when it differs from the release artist
 
 
 @dataclass
-class Release:
-    release_id: int
-    artist: str
+class DiscogsVideo:
+    uri: str  # YouTube watch URL
     title: str
-    styles: list[str]
-    genres: list[str]
-    tracklist: list[Track] = field(default_factory=list)
+    duration: int | None = None
+
+
+@dataclass
+class ReleaseDetail:
+    tracklist: list[Track]
+    videos: list[DiscogsVideo]
 
 
 class DiscogsError(RuntimeError):
@@ -80,7 +84,8 @@ class DiscogsClient:
                 return
             page += 1
 
-    def get_release_tracklist(self, release_id: int) -> list[Track]:
+    def get_release_detail(self, release_id: int) -> ReleaseDetail:
+        """Tracklist + Discogs' own embedded YouTube links, from a single `/releases/{id}` call."""
         data = self._get(f"/releases/{release_id}")
         tracks = []
         for t in data.get("tracklist", []):
@@ -91,6 +96,12 @@ class DiscogsClient:
                     position=t.get("position", ""),
                     title=t.get("title", "").strip(),
                     duration=t.get("duration") or None,
+                    artists=[a["name"] for a in t.get("artists", []) or [] if a.get("name")],
                 )
             )
-        return tracks
+        videos = [
+            DiscogsVideo(uri=v["uri"], title=v.get("title", ""), duration=v.get("duration"))
+            for v in data.get("videos", []) or []
+            if v.get("uri")
+        ]
+        return ReleaseDetail(tracklist=tracks, videos=videos)

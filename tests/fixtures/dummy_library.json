@@ -6,6 +6,8 @@
       "title": "The 3's Up EP",
       "styles": ["House"],
       "genres": ["Electronic"],
+      "year": 1999,
+      "labels": ["Distance"],
       "tracklist": [
         {"position": "A", "title": "Sex & Sun Part III", "duration": "6:42"}
       ]
@@ -16,6 +18,8 @@
       "title": "This Is It",
       "styles": ["House"],
       "genres": ["Electronic"],
+      "year": 1998,
+      "labels": ["Eternal"],
       "tracklist": [
         {"position": "B3", "title": "This Is It (Miami Heat Mix)", "duration": null}
       ]
@@ -26,6 +30,8 @@
       "title": "Spasm",
       "styles": ["House"],
       "genres": ["Electronic"],
+      "year": 2021,
+      "labels": ["Freak n Chic"],
       "tracklist": [
         {"position": "A", "title": "Sydney 23", "duration": null}
       ]
@@ -36,6 +42,8 @@
       "title": "If You Know You Know - Volume 1",
       "styles": ["Techno"],
       "genres": ["Electronic"],
+      "year": 2023,
+      "labels": ["Self-released"],
       "tracklist": [
         {"position": "B1", "title": "Foolish Human", "duration": null}
       ]
@@ -46,6 +54,8 @@
       "title": "Disco Tech",
       "styles": ["Techno"],
       "genres": ["Electronic"],
+      "year": 2011,
+      "labels": ["Senso Sounds"],
       "tracklist": [
         {"position": "B2", "title": "Disco Tech (Original Mix)", "duration": null}
       ]
@@ -56,6 +66,8 @@
       "title": "Metro-303",
       "styles": ["Techno"],
       "genres": ["Electronic"],
+      "year": 2020,
+      "labels": ["Correspondant"],
       "tracklist": [
         {"position": "C2", "title": "Sunday Circles", "duration": "4:04"}
       ]
@@ -66,6 +78,8 @@
       "title": "Magic Mountain",
       "styles": ["Deep House"],
       "genres": ["Electronic"],
+      "year": 2022,
+      "labels": ["Toy Tonics"],
       "tracklist": [
         {"position": "B3", "title": "Woorabinda Reserve", "duration": null}
       ]
@@ -76,8 +90,13 @@
       "title": "Yoyaku Barcelona 2025",
       "styles": ["Deep House"],
       "genres": ["Electronic"],
+      "year": 2025,
+      "labels": ["Yoyaku"],
       "tracklist": [
-        {"position": "B1", "title": "Oto", "duration": null}
+        {"position": "A1", "title": "It's a Dream", "duration": null, "discogs_artist": "HOSTOM"},
+        {"position": "A2", "title": "Tree House", "duration": null, "discogs_artist": "HOSTOM"},
+        {"position": "B1", "title": "Oto", "duration": null, "discogs_artist": "Aline Umber"},
+        {"position": "B2", "title": "Till it Stop", "duration": null, "discogs_artist": "Aline Umber"}
       ]
     },
     {
@@ -86,6 +105,8 @@
       "title": "This Tasty Volume #1",
       "styles": ["Acid"],
       "genres": ["Electronic"],
+      "year": 2019,
+      "labels": ["Tasty Recordings"],
       "tracklist": [
         {"position": "A2", "title": "Initial Commit", "duration": "5:09"}
       ]
@@ -96,6 +117,8 @@
       "title": "Energize",
       "styles": ["Acid"],
       "genres": ["Electronic"],
+      "year": 1993,
+      "labels": ["Djax-Up-Beats"],
       "tracklist": [
         {"position": "B3", "title": "Energize (Captain's Log Mix)", "duration": "8:00"}
       ]
@@ -106,6 +129,8 @@
       "title": "Untitled",
       "styles": ["Acid"],
       "genres": ["Electronic"],
+      "year": 2021,
+      "labels": ["Skryption"],
       "tracklist": [
         {"position": "B2", "title": "Loosing Their Minds", "duration": null}
       ]
@@ -116,6 +141,8 @@
       "title": "Born To Bang",
       "styles": ["Breakbeat"],
       "genres": ["Electronic"],
+      "year": 1993,
+      "labels": ["Low Spirit"],
       "tracklist": [
         {"position": "A1", "title": "Born To Bang (Sharam Remix)", "duration": null}
       ]
@@ -126,6 +153,8 @@
       "title": "Lookout",
       "styles": ["Breakbeat"],
       "genres": ["Electronic"],
+      "year": 2020,
+      "labels": ["Emotional Response"],
       "tracklist": [
         {"position": "A", "title": "Lookout (Tha Luv Bomb Mix)", "duration": null}
       ]
@@ -136,6 +165,8 @@
       "title": "Hi-Q",
       "styles": ["Trance"],
       "genres": ["Electronic"],
+      "year": 1998,
+      "labels": ["Platipus"],
       "tracklist": [
         {"position": "B1", "title": "Hi-Q (House Of Usher / Non Eric Mix)", "duration": "5:22"}
       ]
@@ -146,6 +177,8 @@
       "title": "Eternal Flower",
       "styles": ["Trance"],
       "genres": ["Electronic"],
+      "year": 2021,
+      "labels": ["Involve Records"],
       "tracklist": [
         {"position": "A2", "title": "Eternal Flower", "duration": null}
       ]

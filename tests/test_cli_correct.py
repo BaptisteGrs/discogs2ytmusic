@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typer.testing import CliRunner
 
-from discogs2ytmusic import cli, store
+from discogs2ytmusic import cli, matcher, store
 
 runner = CliRunner()
 
@@ -13,7 +13,7 @@ def _seed(conn, dummy_library):
         store.replace_tracks(
             conn,
             r["release_id"],
-            [(t["position"], t["title"], t["duration"]) for t in r["tracklist"]],
+            [(t["position"], t["title"], t["duration"], t.get("discogs_artist")) for t in r["tracklist"]],
         )
 
 
@@ -126,7 +126,7 @@ def test_fix_artist_overrides_search_query_used_by_sync_and_export(isolated_cach
 
         return MatchResult(video_id="vid", video_title=title, source="ytmusic", score=100.0)
 
-    monkeypatch.setattr(cli.matcher, "find_match", _record)
+    monkeypatch.setattr(matcher, "find_match", _record)
     monkeypatch.setattr(cli.ytmusic_client, "get_client", lambda authenticated=True: object())
 
     sync_result = runner.invoke(cli.app, ["sync", "--style", release["styles"][0]])
