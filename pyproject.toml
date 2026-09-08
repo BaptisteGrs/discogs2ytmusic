@@ -21,6 +21,11 @@ discogs2ytmusic = "discogs2ytmusic.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+    "pandas-stubs>=3.0.5.260730",
 ]
 
 [build-system]
@@ -29,3 +34,42 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/discogs2ytmusic"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# D101/102/103/107: require docstrings on public classes/functions/methods only —
+# leading-underscore names are "private" to pydocstyle and already exempt.
+select = ["E", "F", "I", "UP", "B", "SIM", "D101", "D102", "D103", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names double as their own spec ("test_x_does_y_when_z") — often past the
+# line-length limit and not worth a redundant docstring on top.
+"tests/*" = ["D101", "D102", "D103", "D107", "E501"]
+# Typer's documented pattern is `param: T = typer.Option(...)` — the "function
+# call in a default argument" B008 warning doesn't apply to its design.
+"src/discogs2ytmusic/cli.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["rapidfuzz.*", "ytmusicapi.*", "yt_dlp.*", "streamlit.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "--cov=discogs2ytmusic --cov-report=term-missing"
