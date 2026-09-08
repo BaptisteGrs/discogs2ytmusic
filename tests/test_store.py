@@ -4,6 +4,8 @@ import json
 import sqlite3
 from collections import defaultdict
 
+import pytest
+
 from discogs2ytmusic import store
 
 
@@ -489,3 +491,106 @@ def test_clear_all_matches_include_manual_clears_everything(isolated_cache):
 
     assert n_cleared == 2
     assert remaining == 0
+
+
+# --- curated playlists ---
+
+
+def _seed_two_tracks(conn):
+    store.upsert_release(conn, 1, "Solo Artist", "Some EP", ["House"], ["Electronic"])
+    store.replace_tracks(conn, 1, [("A1", "Track One", None, None), ("A2", "Track Two", None, None)])
+    rows = {r["position"]: r["id"] for r in conn.execute("SELECT id, position FROM tracks WHERE release_id = 1")}
+    return rows["A1"], rows["A2"]
+
+
+def test_create_playlist_starts_empty(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        playlists = store.list_playlists(conn)
+
+    assert len(playlists) == 1
+    assert playlists[0]["id"] == playlist_id
+    assert playlists[0]["name"] == "My Playlist"
+    assert playlists[0]["track_count"] == 0
+    assert playlists[0]["ytmusic_playlist_id"] is None
+
+
+def test_create_playlist_rejects_duplicate_names(isolated_cache):
+    with store.connect() as conn:
+        store.create_playlist(conn, "My Playlist")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.create_playlist(conn, "My Playlist")
+
+
+def test_add_tracks_to_playlist_appends_in_order_and_dedupes(isolated_cache):
+    with store.connect() as conn:
+        t1, t2 = _seed_two_tracks(conn)
+        playlist_id = store.create_playlist(conn, "My Playlist")
+
+        added_first = store.add_tracks_to_playlist(conn, playlist_id, [t1, t2])
+        added_again = store.add_tracks_to_playlist(conn, playlist_id, [t1])  # already present
+
+        ordered_ids = store.list_playlist_track_ids(conn, playlist_id)
+
+    assert added_first == 2
+    assert added_again == 0
+    assert ordered_ids == [t1, t2]
+
+
+def test_add_tracks_to_playlist_appends_after_existing_tracks(isolated_cache):
+    with store.connect() as conn:
+        t1, t2 = _seed_two_tracks(conn)
+        playlist_id = store.create_playlist(conn, "My Playlist")
+
+        store.add_tracks_to_playlist(conn, playlist_id, [t1])
+        store.add_tracks_to_playlist(conn, playlist_id, [t2])
+
+        ordered_ids = store.list_playlist_track_ids(conn, playlist_id)
+
+    assert ordered_ids == [t1, t2]
+
+
+def test_remove_tracks_from_playlist(isolated_cache):
+    with store.connect() as conn:
+        t1, t2 = _seed_two_tracks(conn)
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.add_tracks_to_playlist(conn, playlist_id, [t1, t2])
+
+        store.remove_tracks_from_playlist(conn, playlist_id, [t1])
+
+        ordered_ids = store.list_playlist_track_ids(conn, playlist_id)
+
+    assert ordered_ids == [t2]
+
+
+def test_list_playlists_reflects_track_count(isolated_cache):
+    with store.connect() as conn:
+        t1, t2 = _seed_two_tracks(conn)
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.add_tracks_to_playlist(conn, playlist_id, [t1, t2])
+
+        playlists = store.list_playlists(conn)
+
+    assert playlists[0]["track_count"] == 2
+
+
+def test_delete_playlist_removes_its_track_links_too(isolated_cache):
+    with store.connect() as conn:
+        t1, _t2 = _seed_two_tracks(conn)
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.add_tracks_to_playlist(conn, playlist_id, [t1])
+
+        store.delete_playlist(conn, playlist_id)
+
+        assert store.list_playlists(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM playlist_tracks").fetchone()[0] == 0
+
+
+def test_set_playlist_ytmusic_id(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.set_playlist_ytmusic_id(conn, playlist_id, "PL123")
+
+        playlist = store.get_playlist(conn, playlist_id)
+
+    assert playlist["ytmusic_playlist_id"] == "PL123"

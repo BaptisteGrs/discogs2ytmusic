@@ -61,6 +61,25 @@ CREATE TABLE IF NOT EXISTS playlist_defs (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    ytmusic_playlist_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS playlist_tracks (
+    playlist_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,   -- ordering within the playlist
+    added_at REAL NOT NULL,
+    PRIMARY KEY (playlist_id, track_id),
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id),
+    FOREIGN KEY (track_id) REFERENCES tracks(id)
+);
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_id ON playlist_tracks(playlist_id);
 """
 
 
@@ -130,6 +149,10 @@ def _migrate_playlists_to_playlist_defs(conn: sqlite3.Connection) -> None:
 
     Each style becomes its own filter-based playlist def (tags=[style]), preserving
     the already-created YT Music playlist id so re-syncing doesn't create duplicates.
+
+    `playlists` is also the name of the current curated-playlists table (see SCHEMA) —
+    check for the legacy table's actual columns, not just table existence, so this
+    doesn't misfire against that unrelated table.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(playlists)")}
     if not {"style", "playlist_id", "created_at"} <= cols:
@@ -422,6 +445,107 @@ def set_playlist_def_ytmusic_id(conn: sqlite3.Connection, def_id: int, ytmusic_p
 def delete_playlist_def(conn: sqlite3.Connection, def_id: int) -> None:
     """Delete a saved playlist definition (does not touch the YT Music playlist itself)."""
     conn.execute("DELETE FROM playlist_defs WHERE id = ?", (def_id,))
+
+
+def get_release(conn: sqlite3.Connection, release_id: int) -> sqlite3.Row | None:
+    """Look up a cached release by its Discogs release_id."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM releases WHERE release_id = ?", (release_id,)).fetchone()
+
+
+def create_playlist(conn: sqlite3.Connection, name: str) -> int:
+    """Create a new, empty curated playlist.
+
+    Raises:
+        sqlite3.IntegrityError: if the name is already taken.
+    """
+    now = time.time()
+    conn.execute("INSERT INTO playlists (name, created_at, updated_at) VALUES (?, ?, ?)", (name, now, now))
+    return conn.execute("SELECT id FROM playlists WHERE name = ?", (name,)).fetchone()[0]
+
+
+def get_playlist(conn: sqlite3.Connection, playlist_id: int) -> sqlite3.Row | None:
+    """Look up a curated playlist by its id."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM playlists WHERE id = ?", (playlist_id,)).fetchone()
+
+
+def get_playlist_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
+    """Look up a curated playlist by its name."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM playlists WHERE name = ?", (name,)).fetchone()
+
+
+def list_playlists(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every curated playlist with its track count, ordered by name."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute(
+        """SELECT p.*, COUNT(pt.track_id) AS track_count
+           FROM playlists p LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+           GROUP BY p.id ORDER BY p.name"""
+    ).fetchall()
+
+
+def delete_playlist(conn: sqlite3.Connection, playlist_id: int) -> None:
+    """Delete a curated playlist and its track links (does not touch a linked YT Music playlist)."""
+    conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,))
+    conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+
+
+def set_playlist_ytmusic_id(conn: sqlite3.Connection, playlist_id: int, ytmusic_playlist_id: str) -> None:
+    """Record the YT Music playlist id created for a curated playlist."""
+    conn.execute(
+        "UPDATE playlists SET ytmusic_playlist_id = ?, updated_at = ? WHERE id = ?",
+        (ytmusic_playlist_id, time.time(), playlist_id),
+    )
+
+
+def list_playlist_track_ids(conn: sqlite3.Connection, playlist_id: int) -> list[int]:
+    """track_ids in a curated playlist, in playlist order."""
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position", (playlist_id,)
+        )
+    ]
+
+
+def add_tracks_to_playlist(conn: sqlite3.Connection, playlist_id: int, track_ids: list[int]) -> int:
+    """Append tracks to the end of a playlist, in order, skipping any already present.
+
+    Returns:
+        How many tracks were actually added.
+    """
+    existing = {
+        row[0] for row in conn.execute("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,))
+    }
+    next_pos = conn.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,)
+    ).fetchone()[0]
+    now = time.time()
+    added = 0
+    for track_id in track_ids:
+        if track_id in existing:
+            continue
+        conn.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)",
+            (playlist_id, track_id, next_pos, now),
+        )
+        existing.add(track_id)
+        next_pos += 1
+        added += 1
+    if added:
+        conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (now, playlist_id))
+    return added
+
+
+def remove_tracks_from_playlist(conn: sqlite3.Connection, playlist_id: int, track_ids: list[int]) -> None:
+    """Remove tracks from a curated playlist."""
+    conn.executemany(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+        [(playlist_id, track_id) for track_id in track_ids],
+    )
+    conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (time.time(), playlist_id))
 
 
 def _split_va_track_title(release_artist: str, raw_title: str) -> tuple[str, str] | None:

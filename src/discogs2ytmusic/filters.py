@@ -111,6 +111,47 @@ class TrackRow:
     locked: bool
 
 
+def _build_track_row(
+    conn: sqlite3.Connection,
+    release: sqlite3.Row,
+    track_id: int | None,
+    artist: str,
+    title: str,
+    position: str | None,
+    artist_overridden: bool,
+) -> TrackRow:
+    match = store.get_match(conn, artist, title)
+    video_id = match["video_id"] if match else None
+    searched_at = None
+    if match is not None:
+        searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
+    source = (match["source"] if match else None) or ""
+    return TrackRow(
+        track_id=track_id,
+        release_id=release["release_id"],
+        track_artist=artist,
+        release_artist=store.effective_release_artist(release),
+        track_title=title,
+        position=position,
+        release_title=store.effective_release_title(release),
+        styles=json.loads(release["styles"]) or [],
+        genres=json.loads(release["genres"]) or [],
+        labels=json.loads(release["labels"]) or [],
+        year=release["year"],
+        discogs_url=release_url(release["release_id"]),
+        match_id=match["id"] if match is not None else None,
+        matched=bool(video_id),
+        video_id=video_id,
+        youtube_url=f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
+        video_title=(match["video_title"] if match else None) or "",
+        source=source,
+        score=match["score"] if match is not None else None,
+        channel=(match["channel"] if match is not None else None) or "",
+        searched_at=searched_at,
+        locked=artist_overridden or source == "manual",
+    )
+
+
 def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -> list[TrackRow]:
     """One row per track across the whole collection, optionally narrowed by a filter.
 
@@ -120,45 +161,38 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
     for release, tracks in store.iter_releases_with_tracks(conn):
         if filt is not None and not release_matches(release, filt):
             continue
-        release_artist = store.effective_release_artist(release)
-        release_title = store.effective_release_title(release)
         positions = {t["id"]: t["position"] for t in tracks}
         artist_overridden = {t["id"]: bool(t["search_artist"]) for t in tracks}
         for track_id, artist, title in store.effective_track_queries(release, tracks):
-            match = store.get_match(conn, artist, title)
-            video_id = match["video_id"] if match else None
-            if filt is not None and filt.matched_only and not video_id:
-                continue
-            searched_at = None
-            if match is not None:
-                searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
-            source = (match["source"] if match else None) or ""
-            locked = artist_overridden.get(track_id, False) or source == "manual"
-            rows.append(
-                TrackRow(
-                    track_id=track_id,
-                    release_id=release["release_id"],
-                    track_artist=artist,
-                    release_artist=release_artist,
-                    track_title=title,
-                    position=positions.get(track_id) if track_id is not None else None,
-                    release_title=release_title,
-                    styles=json.loads(release["styles"]) or [],
-                    genres=json.loads(release["genres"]) or [],
-                    labels=json.loads(release["labels"]) or [],
-                    year=release["year"],
-                    discogs_url=release_url(release["release_id"]),
-                    match_id=match["id"] if match is not None else None,
-                    matched=bool(video_id),
-                    video_id=video_id,
-                    youtube_url=f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
-                    video_title=(match["video_title"] if match else None) or "",
-                    source=source,
-                    score=match["score"] if match is not None else None,
-                    channel=(match["channel"] if match is not None else None) or "",
-                    searched_at=searched_at,
-                    locked=locked,
-                )
+            row = _build_track_row(
+                conn,
+                release,
+                track_id,
+                artist,
+                title,
+                positions.get(track_id) if track_id is not None else None,
+                artist_overridden.get(track_id, False),
             )
+            if filt is not None and filt.matched_only and not row.video_id:
+                continue
+            rows.append(row)
     rows.sort(key=lambda r: (r.track_artist, r.track_title))
+    return rows
+
+
+def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[TrackRow]:
+    """TrackRows for one curated playlist's tracks, in playlist order (unlike `resolve_rows`,
+    this is not re-sorted — playlist order is meaningful)."""
+    rows: list[TrackRow] = []
+    for track_id in store.list_playlist_track_ids(conn, playlist_id):
+        track = store.get_track(conn, track_id)
+        if track is None:
+            continue  # stale reference — shouldn't happen, but don't let it crash the page
+        release = store.get_release(conn, track["release_id"])
+        if release is None:
+            continue
+        [(_, artist, title)] = store.effective_track_queries(release, [track])
+        rows.append(
+            _build_track_row(conn, release, track_id, artist, title, track["position"], bool(track["search_artist"]))
+        )
     return rows
