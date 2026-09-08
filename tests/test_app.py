@@ -10,6 +10,11 @@ from discogs2ytmusic import store
 APP_PATH = str(Path(__file__).resolve().parents[1] / "src" / "discogs2ytmusic" / "app.py")
 
 
+def _select_playlist(at: AppTest, playlist_id: int) -> AppTest:
+    """Click the sidebar nav button for `playlist_id`, making it the active main-pane view."""
+    return at.button(key=f"nav_playlist_{playlist_id}").click().run()
+
+
 def _seed(conn, dummy_library):
     for r in dummy_library:
         store.upsert_release(
@@ -43,7 +48,7 @@ def test_app_lists_every_track_by_default(isolated_cache, dummy_library):
 
     assert not at.exception
     total_tracks = sum(len(r["tracklist"]) for r in dummy_library)
-    assert at.tabs[0].caption[0].value == f"{total_tracks} tracks (0 matched)"
+    assert at.main.caption[0].value == f"{total_tracks} tracks (0 matched)"
 
 
 def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
@@ -55,7 +60,7 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
 
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "Acid" in r["styles"])
-    assert at.tabs[0].caption[0].value == f"{expected} tracks (0 matched)"
+    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
 
 
 def test_app_matched_only_checkbox_narrows_the_table(isolated_cache, dummy_library):
@@ -68,7 +73,7 @@ def test_app_matched_only_checkbox_narrows_the_table(isolated_cache, dummy_libra
     at.checkbox(key="collection_matched_only").check().run()
 
     assert not at.exception
-    assert at.tabs[0].caption[0].value == "1 tracks (1 matched)"
+    assert at.main.caption[0].value == "1 tracks (1 matched)"
 
 
 def test_app_shows_position_in_its_own_column_and_keeps_track_title_clean(isolated_cache, dummy_library):
@@ -95,7 +100,7 @@ def test_app_handles_a_collection_with_a_single_distinct_year(isolated_cache):
     at = AppTest.from_file(APP_PATH).run()
 
     assert not at.exception
-    assert at.tabs[0].caption[0].value == "1 tracks (0 matched)"
+    assert at.main.caption[0].value == "1 tracks (0 matched)"
 
 
 def test_app_shows_match_confidence(isolated_cache, dummy_library):
@@ -148,17 +153,17 @@ def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_li
     assert bool(df.loc[first["artist"], "locked"]) is True
 
 
-# --- Playlists tab ---
+# --- Sidebar nav / Playlists ---
 
 
-def test_playlists_tab_shows_empty_state_when_no_playlists_exist(isolated_cache, dummy_library):
+def test_sidebar_shows_empty_state_when_no_playlists_exist(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
 
     assert not at.exception
-    assert any("No playlists yet" in i.value for i in at.info)
+    assert any("No playlists yet" in c.value for c in at.sidebar.caption)
 
 
 def test_creating_an_empty_playlist_from_the_form_makes_it_selectable(isolated_cache, dummy_library):
@@ -173,8 +178,8 @@ def test_creating_an_empty_playlist_from_the_form_makes_it_selectable(isolated_c
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
     assert [p["name"] for p in playlists] == ["My Favorites"]
-    assert at.session_state["playlists_selected_id"] == playlists[0]["id"]
-    assert at.subheader[0].value == "My Favorites"
+    assert at.session_state["nav_playlist_id"] == playlists[0]["id"]
+    assert at.main.subheader[0].value == "My Favorites"
 
 
 def test_creating_a_playlist_with_a_duplicate_name_shows_an_error(isolated_cache, dummy_library):
@@ -200,9 +205,10 @@ def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_li
         store.add_tracks_to_playlist(conn, playlist_id, [track_id])
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
 
     assert not at.exception
-    assert any("1 track(s), 1 matched" in c.value for c in at.caption)
+    assert any("1 track(s), 1 matched" in c.value for c in at.main.caption)
 
 
 def test_playlist_search_excludes_tracks_already_in_the_playlist(isolated_cache, dummy_library):
@@ -223,6 +229,7 @@ def test_playlist_search_excludes_tracks_already_in_the_playlist(isolated_cache,
     # not the raw release artist string, which VA releases like this one don't map 1:1 to a track.
     shared_artist = multi_track_release["tracklist"][0]["discogs_artist"]
     at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
     at.text_input(key=f"playlist_search_{playlist_id}").input(shared_artist).run()
 
     assert not at.exception
@@ -238,6 +245,7 @@ def test_playlist_search_matches_by_artist_or_title_case_insensitively(isolated_
         second = dummy_library[1]
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
     at.text_input(key=f"playlist_search_{playlist_id}").input(second["artist"].lower()).run()
 
     assert not at.exception
@@ -248,10 +256,11 @@ def test_playlist_search_matches_by_artist_or_title_case_insensitively(isolated_
 def test_deleting_a_playlist_requires_confirmation(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
-        store.create_playlist(conn, "My Favorites")
+        playlist_id = store.create_playlist(conn, "My Favorites")
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key="delete_button_1").click().run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"delete_button_{playlist_id}").click().run()
 
     assert not at.exception
     assert any("does NOT delete" in w.value for w in at.warning)
@@ -262,11 +271,12 @@ def test_deleting_a_playlist_requires_confirmation(isolated_cache, dummy_library
 def test_confirming_delete_removes_the_playlist(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
-        store.create_playlist(conn, "My Favorites")
+        playlist_id = store.create_playlist(conn, "My Favorites")
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key="delete_button_1").click().run()
-    at.button(key="confirm_delete_yes_1").click().run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"delete_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_delete_yes_{playlist_id}").click().run()
 
     assert not at.exception
     with store.connect() as conn:
@@ -276,11 +286,12 @@ def test_confirming_delete_removes_the_playlist(isolated_cache, dummy_library):
 def test_cancelling_delete_keeps_the_playlist(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
-        store.create_playlist(conn, "My Favorites")
+        playlist_id = store.create_playlist(conn, "My Favorites")
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key="delete_button_1").click().run()
-    at.button(key="confirm_delete_no_1").click().run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"delete_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_delete_no_{playlist_id}").click().run()
 
     assert not at.exception
     with store.connect() as conn:
@@ -305,6 +316,7 @@ def test_sync_requires_confirmation_and_never_touches_ytmusic_without_it(isolate
     monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", _blow_up)
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
     at.button(key=f"sync_button_{playlist_id}").click().run()
 
     assert not at.exception
@@ -341,6 +353,7 @@ def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_
     )
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
     at.button(key=f"sync_button_{playlist_id}").click().run()
     at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
 
@@ -361,6 +374,7 @@ def test_sync_with_no_matched_tracks_shows_no_button(isolated_cache, dummy_libra
         store.add_tracks_to_playlist(conn, playlist_id, [track_id])
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
 
     assert not at.exception
-    assert any("No matched tracks" in c.value for c in at.caption)
+    assert any("No matched tracks" in c.value for c in at.main.caption)

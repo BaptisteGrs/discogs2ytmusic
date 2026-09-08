@@ -209,22 +209,26 @@ uv run discogs2ytmusic ui
 
 Launches a local Streamlit app (`app.py`) over the same cache the CLI uses.
 
-The **Collection** tab is a filterable, editable table of every cached track:
-filter by style/genre, label, year, or matched-only; edit a track's artist
-inline to override the YouTube search query, or paste/clear a YouTube link
-directly — both save as the same manual corrections `fix-artist`/`correct`
+A sidebar drives navigation: **My Discogs Collection** at the top, then a
+**Playlists** section listing every hand-curated playlist you've created.
+
+**My Discogs Collection** is a filterable, editable table of every cached
+track: filter by style/genre, label, year, or matched-only; edit a track's
+artist inline to override the YouTube search query, or paste/clear a YouTube
+link directly — both save as the same manual corrections `fix-artist`/`correct`
 make from the CLI, and a corrected row is marked **Locked** so it survives the
 next `scan --refresh`/`rematch`. Select tracks (the leading checkbox column)
 to add them straight to a new or existing playlist.
 
-The **Playlists** tab manages hand-curated playlists — unlike
-`push-style-playlists`' one-playlist-per-style-tag, you build these track by
-track: create a playlist, add tracks from the Collection tab or by searching
-by artist/title within the tab itself, reorder by removing and re-adding, and
-push the result to a real YT Music playlist (named `Discogs - <name>`) with
-its own confirmed Sync button — safe to re-run, it reuses the same YT Music
-playlist rather than duplicating it. Deleting a playlist here only forgets it
-locally; it never deletes the linked YT Music playlist.
+**Playlists** manages hand-curated playlists — unlike `push-style-playlists`'
+one-playlist-per-style-tag, you build these track by track: create a playlist
+from the sidebar's "+ New playlist" form, add tracks from the Collection view
+or by searching by artist/title within a playlist itself, reorder by removing
+and re-adding, and push the result to a real YT Music playlist (named
+`Discogs - <name>`) with its own confirmed Sync button — safe to re-run, it
+reuses the same YT Music playlist rather than duplicating it. Deleting a
+playlist here only forgets it locally; it never deletes the linked YT Music
+playlist.
 
 ## Testing
 

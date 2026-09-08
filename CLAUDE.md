@@ -43,9 +43,9 @@ Discogs API  →  sqlite cache (store.py)  →  matcher.py  →  YT Music API
 - **`collection_edits.py`** — diffs the Streamlit data editor's before/after
   DataFrames and persists changes as manual corrections via `store`.
 - **`cli.py`** — the Typer app; thin command layer over the modules above.
-- **`app.py`** — the Streamlit UI; thin view layer over `filters`/`store`.
-  Collection tab (browse/edit/select tracks) + Playlists tab (curated
-  playlists — see below).
+- **`app.py`** — the Streamlit UI; thin view layer over `filters`/`store`. A
+  sidebar (My Discogs Collection + a Playlists section, one entry per curated
+  playlist) drives which view renders in the main pane — see below.
 - **`config.py`** — credential/cache file locations (via `platformdirs`) and
   the `Config` dataclass for saved Discogs credentials.
 - **`dummy_library.py`** — loads `tests/fixtures/dummy_library.json` for the
@@ -107,8 +107,8 @@ uv run discogs2ytmusic --library dummy sync
   filter-based persistence used only by the legacy `push-style-playlists` CLI
   command (one playlist per Discogs style tag, auto-built from a filter).
   `playlists`/`playlist_tracks` is the newer hand-curated playlist feature
-  behind the UI's Playlists tab (`store.create_playlist`/`add_tracks_to_playlist`/
-  etc.) — an explicit, ordered list of tracks a user assembled themselves, no
+  behind the UI's Playlists sidebar section (`store.create_playlist`/
+  `add_tracks_to_playlist`/etc.) — an explicit, ordered list of tracks a user assembled themselves, no
   filter involved. They don't share rows or code paths. The table name
   `playlists` was reused for the new feature, which is exactly what made
   `_migrate_playlists_to_playlist_defs` (below) need a real column check
