@@ -166,9 +166,9 @@ This is the original one-playlist-per-Discogs-style-tag flow (`[Legacy]` in
 `--help`): every style tag with matches gets its own YT Music playlist, named
 `Discogs - <style>` and safe to re-run — existing playlists are reused (not
 duplicated), and matched tracks are cached so re-syncing only searches for new
-tracks. It's being superseded by the Playlists tab in the [browsable UI](#browsable-web-ui)
-(define a playlist by filters, review it, push it with its own button), which
-is still in progress.
+tracks. For hand-picking exactly which tracks go where instead of one
+playlist per style tag, build a curated playlist in the
+[browsable UI](#browsable-web-ui) instead.
 
 ### Re-match tracks after a matcher/schema change
 
@@ -208,14 +208,23 @@ uv run discogs2ytmusic ui
 ```
 
 Launches a local Streamlit app (`app.py`) over the same cache the CLI uses.
+
 The **Collection** tab is a filterable, editable table of every cached track:
 filter by style/genre, label, year, or matched-only; edit a track's artist
 inline to override the YouTube search query, or paste/clear a YouTube link
 directly — both save as the same manual corrections `fix-artist`/`correct`
 make from the CLI, and a corrected row is marked **Locked** so it survives the
-next `scan --refresh`/`rematch`. The **Playlists** tab (build/review/push a
-saved playlist definition) is still in progress — use `push-style-playlists`
-from the CLI in the meantime.
+next `scan --refresh`/`rematch`. Select tracks (the leading checkbox column)
+to add them straight to a new or existing playlist.
+
+The **Playlists** tab manages hand-curated playlists — unlike
+`push-style-playlists`' one-playlist-per-style-tag, you build these track by
+track: create a playlist, add tracks from the Collection tab or by searching
+by artist/title within the tab itself, reorder by removing and re-adding, and
+push the result to a real YT Music playlist (named `Discogs - <name>`) with
+its own confirmed Sync button — safe to re-run, it reuses the same YT Music
+playlist rather than duplicating it. Deleting a playlist here only forgets it
+locally; it never deletes the linked YT Music playlist.
 
 ## Testing
 
