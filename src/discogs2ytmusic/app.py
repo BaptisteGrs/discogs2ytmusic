@@ -493,19 +493,23 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
             if not ytmusic_client.is_authenticated():
                 st.error("Not authenticated with YT Music. Run: `discogs2ytmusic auth ytmusic`")
                 return
-            yt = ytmusic_client.get_client(authenticated=True)
             playlist_name = f"Discogs - {playlist['name']}"
-            with store.connect() as conn:
-                existing_id = playlist["ytmusic_playlist_id"]
-                if existing_id:
-                    ytmusic_id = existing_id
-                else:
-                    ytmusic_id = ytmusic_client.get_or_create_playlist(
-                        yt, playlist_name, description="Curated from the Discogs collection app"
-                    )
-                    store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
-                conn.commit()
-            ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
+            try:
+                yt = ytmusic_client.get_client(authenticated=True)
+                with store.connect() as conn:
+                    existing_id = playlist["ytmusic_playlist_id"]
+                    if existing_id:
+                        ytmusic_id = existing_id
+                    else:
+                        ytmusic_id = ytmusic_client.get_or_create_playlist(
+                            yt, playlist_name, description="Curated from the Discogs collection app"
+                        )
+                        store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
+                    conn.commit()
+                ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
+            except RuntimeError as e:
+                st.error(str(e))
+                return
             st.success(f"Pushed {len(video_ids)} track(s) to '{playlist_name}'.")
             st.rerun()
     with col2:
