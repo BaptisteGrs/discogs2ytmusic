@@ -173,7 +173,8 @@ def test_creating_an_empty_playlist_from_the_form_makes_it_selectable(isolated_c
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
     assert [p["name"] for p in playlists] == ["My Favorites"]
-    assert at.selectbox(key="playlists_selected").value == "My Favorites"
+    assert at.session_state["playlists_selected_id"] == playlists[0]["id"]
+    assert at.subheader[0].value == "My Favorites"
 
 
 def test_creating_a_playlist_with_a_duplicate_name_shows_an_error(isolated_cache, dummy_library):
