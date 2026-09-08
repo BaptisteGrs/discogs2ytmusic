@@ -27,18 +27,20 @@ OEMBED_TIMEOUT = 5
 class _SilentLogger:
     """Swallows yt-dlp's own stderr logging — failures are handled/counted by us."""
 
-    def debug(self, msg):
+    def debug(self, msg: str) -> None:
         pass
 
-    def warning(self, msg):
+    def warning(self, msg: str) -> None:
         pass
 
-    def error(self, msg):
+    def error(self, msg: str) -> None:
         pass
 
 
 @dataclass
 class MatchResult:
+    """The best candidate found for a track query, or an empty result if none scored high enough."""
+
     video_id: str | None
     video_title: str | None
     source: str  # 'ytmusic' | 'ytdlp' | 'discogs' | 'none'
@@ -63,6 +65,11 @@ def _throttle_ytdlp() -> None:
 
 
 def search_ytmusic(yt: YTMusic, artist: str, title: str) -> MatchResult | None:
+    """Search YT Music's own catalog (songs + videos) for a track.
+
+    Returns:
+        The best-scoring candidate, or None if nothing cleared `YTMUSIC_THRESHOLD`.
+    """
     query = _query_string(artist, title)
     best: MatchResult | None = None
     try:
@@ -86,6 +93,14 @@ def search_ytmusic(yt: YTMusic, artist: str, title: str) -> MatchResult | None:
 
 
 def search_ytdlp(artist: str, title: str) -> MatchResult | None:
+    """Fall back to a plain YouTube search via yt-dlp when YT Music itself has no hit.
+
+    Throttled and retried (see `YTDLP_MIN_INTERVAL`/`YTDLP_MAX_RETRIES`) since firing
+    requests back-to-back tends to trip YouTube's bot detection.
+
+    Returns:
+        The best-scoring candidate, or None if nothing cleared `YTDLP_THRESHOLD`.
+    """
     import yt_dlp
 
     query = _query_string(artist, title)
@@ -126,6 +141,11 @@ def search_ytdlp(artist: str, title: str) -> MatchResult | None:
 
 
 def find_match(yt: YTMusic, artist: str, title: str) -> MatchResult:
+    """Find a video for one track, trying YT Music first and yt-dlp as a fallback.
+
+    Returns:
+        A `MatchResult`; `source='none'` if neither search found a confident hit.
+    """
     result = search_ytmusic(yt, artist, title)
     if result:
         return result

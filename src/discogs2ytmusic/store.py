@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 from .config import CACHE_DB, ensure_dirs
@@ -18,7 +19,8 @@ CREATE TABLE IF NOT EXISTS releases (
     labels TEXT NOT NULL DEFAULT '[]',   -- json list
     artist_override TEXT,   -- manual correction; NULL falls back to `artist`
     title_override TEXT,    -- manual correction; NULL falls back to `title`
-    videos TEXT NOT NULL DEFAULT '[]',   -- json list of {"uri", "title", "duration"} — Discogs' own embedded YouTube links
+    -- json list of {"uri", "title", "duration"} — Discogs' own embedded YouTube links
+    videos TEXT NOT NULL DEFAULT '[]',
     fetched_at REAL NOT NULL
 );
 
@@ -28,8 +30,12 @@ CREATE TABLE IF NOT EXISTS tracks (
     position TEXT NOT NULL,
     title TEXT NOT NULL,
     duration TEXT,
-    search_artist TEXT,   -- manual override for the artist used to search YouTube; NULL falls back to discogs_artist/releases.artist
-    discogs_artist TEXT,  -- Discogs' own per-track artist credit (compilations/VA releases only; NULL when it's just the release artist)
+    -- manual override for the artist used to search YouTube; NULL falls back to
+    -- discogs_artist/releases.artist
+    search_artist TEXT,
+    -- Discogs' own per-track artist credit (compilations/VA releases only; NULL
+    -- when it's just the release artist)
+    discogs_artist TEXT,
     FOREIGN KEY (release_id) REFERENCES releases(release_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
@@ -48,7 +54,9 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE TABLE IF NOT EXISTS playlist_defs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    filter_json TEXT NOT NULL,   -- {"tags": [...], "labels": [...], "year_min": int|null, "year_max": int|null, "matched_only": bool}
+    -- {"tags": [...], "labels": [...], "year_min": int|null, "year_max": int|null,
+    --  "matched_only": bool}
+    filter_json TEXT NOT NULL,
     ytmusic_playlist_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -140,7 +148,8 @@ def _migrate_playlists_to_playlist_defs(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def connect():
+def connect() -> Iterator[sqlite3.Connection]:
+    """Open the sqlite cache, applying schema/migrations first, and commit on clean exit."""
     ensure_dirs()
     conn = sqlite3.connect(CACHE_DB)
     conn.executescript(SCHEMA)
@@ -156,11 +165,12 @@ def connect():
 
 
 def match_key(artist: str, title: str) -> str:
+    """Build the normalized `matches.query_key` for an (artist, title) pair."""
     return f"{artist.strip().lower()}||{title.strip().lower()}"
 
 
 def upsert_release(
-    conn,
+    conn: sqlite3.Connection,
     release_id: int,
     artist: str,
     title: str,
@@ -193,30 +203,43 @@ def upsert_release(
              year=excluded.year, labels=excluded.labels,
              videos=COALESCE(?, videos), fetched_at=excluded.fetched_at""",
         (
-            release_id, artist, title, json.dumps(styles), json.dumps(genres),
-            year, json.dumps(labels or []), videos_json if videos_json is not None else "[]", time.time(),
+            release_id,
+            artist,
+            title,
+            json.dumps(styles),
+            json.dumps(genres),
+            year,
+            json.dumps(labels or []),
+            videos_json if videos_json is not None else "[]",
+            time.time(),
             videos_json,
         ),
     )
 
 
-def set_release_artist_override(conn, release_id: int, artist: str | None) -> None:
+def set_release_artist_override(conn: sqlite3.Connection, release_id: int, artist: str | None) -> None:
+    """Set (or, with `artist=None`, clear) the manual artist override for a release."""
     conn.execute("UPDATE releases SET artist_override = ? WHERE release_id = ?", (artist, release_id))
 
 
-def set_release_title_override(conn, release_id: int, title: str | None) -> None:
+def set_release_title_override(conn: sqlite3.Connection, release_id: int, title: str | None) -> None:
+    """Set (or, with `title=None`, clear) the manual title override for a release."""
     conn.execute("UPDATE releases SET title_override = ? WHERE release_id = ?", (title, release_id))
 
 
-def effective_release_artist(release) -> str:
+def effective_release_artist(release: sqlite3.Row) -> str:
+    """The artist to use for a release: its manual override if set, else Discogs' own."""
     return release["artist_override"] or release["artist"]
 
 
-def effective_release_title(release) -> str:
+def effective_release_title(release: sqlite3.Row) -> str:
+    """The title to use for a release: its manual override if set, else Discogs' own."""
     return release["title_override"] or release["title"]
 
 
-def replace_tracks(conn, release_id: int, tracks: list[tuple[str, str, str | None, str | None]]) -> None:
+def replace_tracks(
+    conn: sqlite3.Connection, release_id: int, tracks: list[tuple[str, str, str | None, str | None]]
+) -> None:
     """`tracks` is (position, title, duration, discogs_artist) — the last is Discogs' own
     per-track artist credit (see the `tracks.discogs_artist` column comment), or None.
 
@@ -250,6 +273,7 @@ def replace_tracks(conn, release_id: int, tracks: list[tuple[str, str, str | Non
                 "INSERT INTO tracks (release_id, position, title, duration, discogs_artist) VALUES (?, ?, ?, ?, ?)",
                 (release_id, pos, title, duration, discogs_artist),
             )
+            assert cur.lastrowid is not None  # row was just inserted above
             keep_ids.add(cur.lastrowid)
 
     stale_ids = [row["id"] for row in existing if row["id"] not in keep_ids]
@@ -257,22 +281,29 @@ def replace_tracks(conn, release_id: int, tracks: list[tuple[str, str, str | Non
         conn.executemany("DELETE FROM tracks WHERE id = ?", [(i,) for i in stale_ids])
 
 
-def has_tracks(conn, release_id: int) -> bool:
+def has_tracks(conn: sqlite3.Connection, release_id: int) -> bool:
+    """Whether a release already has at least one cached tracklist row."""
     row = conn.execute("SELECT 1 FROM tracks WHERE release_id = ? LIMIT 1", (release_id,)).fetchone()
     return row is not None
 
 
-def get_match(conn, artist: str, title: str) -> sqlite3.Row | None:
+def get_match(conn: sqlite3.Connection, artist: str, title: str) -> sqlite3.Row | None:
+    """Look up the cached YouTube match for an (artist, title) query, if any."""
     conn.row_factory = sqlite3.Row
-    return conn.execute(
-        "SELECT * FROM matches WHERE query_key = ?", (match_key(artist, title),)
-    ).fetchone()
+    return conn.execute("SELECT * FROM matches WHERE query_key = ?", (match_key(artist, title),)).fetchone()
 
 
 def save_match(
-    conn, artist: str, title: str, video_id: str | None, video_title: str | None,
-    source: str, score: float | None, channel: str | None = None,
+    conn: sqlite3.Connection,
+    artist: str,
+    title: str,
+    video_id: str | None,
+    video_title: str | None,
+    source: str,
+    score: float | None,
+    channel: str | None = None,
 ) -> None:
+    """Insert or overwrite the cached match for an (artist, title) query."""
     conn.execute(
         """INSERT INTO matches (query_key, video_id, video_title, source, score, channel, searched_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -284,33 +315,40 @@ def save_match(
     )
 
 
-def get_match_by_id(conn, match_id: int) -> sqlite3.Row | None:
+def get_match_by_id(conn: sqlite3.Connection, match_id: int) -> sqlite3.Row | None:
+    """Look up a cached match by its surrogate id (the id shown by `export`)."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
 
 
-def update_match(conn, match_id: int, video_id: str | None, video_title: str | None, source: str) -> None:
+def update_match(
+    conn: sqlite3.Connection, match_id: int, video_id: str | None, video_title: str | None, source: str
+) -> None:
     """Overwrite a match with a manually-supplied result. Score and channel are cleared —
     a human pick has no fuzzy score, and we don't look up the channel for a manual entry."""
     conn.execute(
-        "UPDATE matches SET video_id = ?, video_title = ?, source = ?, score = NULL, channel = NULL, searched_at = ? WHERE id = ?",
+        "UPDATE matches SET video_id = ?, video_title = ?, source = ?, score = NULL, "
+        "channel = NULL, searched_at = ? WHERE id = ?",
         (video_id, video_title, source, time.time(), match_id),
     )
 
 
-def delete_match(conn, match_id: int) -> None:
+def delete_match(conn: sqlite3.Connection, match_id: int) -> None:
+    """Forget a cached match entirely so the next sync searches for it again."""
     conn.execute("DELETE FROM matches WHERE id = ?", (match_id,))
 
 
-def count_matches(conn) -> int:
+def count_matches(conn: sqlite3.Connection) -> int:
+    """Total number of cached matches (searched or manually corrected)."""
     return conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
 
 
-def count_manual_matches(conn) -> int:
+def count_manual_matches(conn: sqlite3.Connection) -> int:
+    """Number of cached matches that were manually corrected via `correct`."""
     return conn.execute("SELECT COUNT(*) FROM matches WHERE source = 'manual'").fetchone()[0]
 
 
-def clear_all_matches(conn, include_manual: bool = False) -> int:
+def clear_all_matches(conn: sqlite3.Connection, include_manual: bool = False) -> int:
     """Forget cached matches so the next sync searches (and re-matches) them from scratch.
     Used to backfill fields added to a match after it was already cached (e.g. `channel`),
     since a normal sync skips anything already in the cache.
@@ -328,31 +366,36 @@ def clear_all_matches(conn, include_manual: bool = False) -> int:
     return n
 
 
-def get_track(conn, track_id: int) -> sqlite3.Row | None:
+def get_track(conn: sqlite3.Connection, track_id: int) -> sqlite3.Row | None:
+    """Look up a track by its surrogate id (the id shown by `export`)."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
 
 
-def set_track_search_artist(conn, track_id: int, artist: str | None) -> None:
+def set_track_search_artist(conn: sqlite3.Connection, track_id: int, artist: str | None) -> None:
+    """Set (or, with `artist=None`, clear) the manual search-artist override for a track."""
     conn.execute("UPDATE tracks SET search_artist = ? WHERE id = ?", (artist, track_id))
 
 
-def get_playlist_def_by_name(conn, name: str) -> sqlite3.Row | None:
+def get_playlist_def_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
+    """Look up a saved playlist definition by its name."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM playlist_defs WHERE name = ?", (name,)).fetchone()
 
 
-def get_playlist_def(conn, def_id: int) -> sqlite3.Row | None:
+def get_playlist_def(conn: sqlite3.Connection, def_id: int) -> sqlite3.Row | None:
+    """Look up a saved playlist definition by its id."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM playlist_defs WHERE id = ?", (def_id,)).fetchone()
 
 
-def list_playlist_defs(conn) -> list[sqlite3.Row]:
+def list_playlist_defs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """All saved playlist definitions, alphabetical by name."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM playlist_defs ORDER BY name").fetchall()
 
 
-def upsert_playlist_def(conn, name: str, filter_json: str) -> int:
+def upsert_playlist_def(conn: sqlite3.Connection, name: str, filter_json: str) -> int:
     """Create a playlist def, or update its filter if the name already exists. Returns its id."""
     now = time.time()
     conn.execute(
@@ -361,17 +404,21 @@ def upsert_playlist_def(conn, name: str, filter_json: str) -> int:
            ON CONFLICT(name) DO UPDATE SET filter_json=excluded.filter_json, updated_at=excluded.updated_at""",
         (name, filter_json, now, now),
     )
-    return get_playlist_def_by_name(conn, name)["id"]
+    row = get_playlist_def_by_name(conn, name)
+    assert row is not None  # just upserted above
+    return row["id"]
 
 
-def set_playlist_def_ytmusic_id(conn, def_id: int, ytmusic_playlist_id: str) -> None:
+def set_playlist_def_ytmusic_id(conn: sqlite3.Connection, def_id: int, ytmusic_playlist_id: str) -> None:
+    """Record the YT Music playlist id created for a playlist definition."""
     conn.execute(
         "UPDATE playlist_defs SET ytmusic_playlist_id = ?, updated_at = ? WHERE id = ?",
         (ytmusic_playlist_id, time.time(), def_id),
     )
 
 
-def delete_playlist_def(conn, def_id: int) -> None:
+def delete_playlist_def(conn: sqlite3.Connection, def_id: int) -> None:
+    """Delete a saved playlist definition (does not touch the YT Music playlist itself)."""
     conn.execute("DELETE FROM playlist_defs WHERE id = ?", (def_id,))
 
 
@@ -397,7 +444,7 @@ def _is_untitled(title: str) -> bool:
     return title.strip().lower() == "untitled"
 
 
-def _resolve_untitled(release, position: str, title: str) -> str:
+def _resolve_untitled(release: sqlite3.Row, position: str, title: str) -> str:
     """An "Untitled" track has nothing useful to search on — fall back to the release
     title plus the track's own vinyl position (e.g. "Yoyaku Barcelona 2025 A2"), which is
     closer to how such tracks tend to actually get uploaded/labeled on YouTube."""
@@ -406,7 +453,7 @@ def _resolve_untitled(release, position: str, title: str) -> str:
     return f"{effective_release_title(release)} {position}".strip()
 
 
-def effective_track_queries(release, tracks) -> list[tuple[int | None, str, str]]:
+def effective_track_queries(release: sqlite3.Row, tracks: Sequence[sqlite3.Row]) -> list[tuple[int | None, str, str]]:
     """(track_id, artist, title) triples to search/display for a release.
 
     Resolves the artist per track, in priority order:
@@ -423,7 +470,8 @@ def effective_track_queries(release, tracks) -> list[tuple[int | None, str, str]
     """
     base_artist = effective_release_artist(release)
     if not tracks:
-        return [(None, base_artist, effective_release_title(release))]  # no tracklist on file — fall back to the release itself
+        # No tracklist on file — fall back to the release itself.
+        return [(None, base_artist, effective_release_title(release))]
 
     triples = []
     for t in tracks:
@@ -439,12 +487,12 @@ def effective_track_queries(release, tracks) -> list[tuple[int | None, str, str]
     return triples
 
 
-def iter_releases_with_tracks(conn):
+def iter_releases_with_tracks(
+    conn: sqlite3.Connection,
+) -> Iterator[tuple[sqlite3.Row, list[sqlite3.Row]]]:
     """Yield (release_row, [track_rows]) for everything cached."""
     conn.row_factory = sqlite3.Row
     releases = conn.execute("SELECT * FROM releases").fetchall()
     for r in releases:
-        tracks = conn.execute(
-            "SELECT * FROM tracks WHERE release_id = ? ORDER BY id", (r["release_id"],)
-        ).fetchall()
+        tracks = conn.execute("SELECT * FROM tracks WHERE release_id = ? ORDER BY id", (r["release_id"],)).fetchall()
         yield r, tracks

@@ -38,9 +38,7 @@ def test_scan_captures_discogs_per_track_artist_credits(isolated_cache, fake_dis
     assert result.exit_code == 0, result.output
 
     with store.connect() as conn:
-        release, tracks = next(
-            (r, t) for r, t in store.iter_releases_with_tracks(conn) if r["release_id"] == 34365844
-        )
+        release, tracks = next((r, t) for r, t in store.iter_releases_with_tracks(conn) if r["release_id"] == 34365844)
         queries = store.effective_track_queries(release, tracks)
 
     by_title = {title: artist for _tid, artist, title in queries}

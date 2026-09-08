@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import requests
@@ -15,14 +16,19 @@ MIN_REQUEST_INTERVAL = 1.1
 
 @dataclass
 class Track:
+    """One entry from a release's Discogs tracklist."""
+
     position: str
     title: str
     duration: str | None
-    artists: list[str] = field(default_factory=list)  # per-track credit, only present when it differs from the release artist
+    # Per-track credit; only present when it differs from the release artist.
+    artists: list[str] = field(default_factory=list)
 
 
 @dataclass
 class DiscogsVideo:
+    """A video Discogs itself embeds on a release page — usually a YouTube link."""
+
     uri: str  # YouTube watch URL
     title: str
     duration: int | None = None
@@ -30,20 +36,26 @@ class DiscogsVideo:
 
 @dataclass
 class ReleaseDetail:
+    """Full tracklist + embedded videos for one release, from `DiscogsClient.get_release_detail`."""
+
     tracklist: list[Track]
     videos: list[DiscogsVideo]
 
 
 class DiscogsError(RuntimeError):
-    pass
+    """Raised for any non-2xx response from the Discogs API."""
 
 
 def release_url(release_id: int) -> str:
+    """Build the public discogs.com page URL for a release id."""
     return f"{WEB_BASE}/release/{release_id}"
 
 
 class DiscogsClient:
+    """Thin, rate-limited wrapper around the Discogs API endpoints this app needs."""
+
     def __init__(self, token: str):
+        """Create a client authenticated with a Discogs personal access token."""
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
         self.session.headers["Authorization"] = f"Discogs token={token}"
@@ -66,7 +78,7 @@ class DiscogsClient:
         """Resolve the token owner (used to confirm auth + default username)."""
         return self._get("/oauth/identity")
 
-    def iter_collection_basic(self, username: str):
+    def iter_collection_basic(self, username: str) -> Iterator[dict]:
         """Yield basic_information dicts for every release in the user's collection (folder 0 = All)."""
         page = 1
         while True:
@@ -77,8 +89,7 @@ class DiscogsClient:
             releases = data.get("releases", [])
             if not releases:
                 return
-            for item in releases:
-                yield item
+            yield from releases
             pagination = data.get("pagination", {})
             if page >= pagination.get("pages", page):
                 return

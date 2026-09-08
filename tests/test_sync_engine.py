@@ -17,7 +17,11 @@ def test_ensure_matches_prefers_a_confident_discogs_video_over_search(isolated_c
 
     with store.connect() as conn:
         _seed_release(
-            conn, 1, "Aline Umber, HOSTOM", "Yoyaku Barcelona 2025", ["Deep House"],
+            conn,
+            1,
+            "Aline Umber, HOSTOM",
+            "Yoyaku Barcelona 2025",
+            ["Deep House"],
             videos=[{"uri": "https://www.youtube.com/watch?v=AAA", "title": "HOSTOM - Tree House", "duration": 300}],
             tracks=[("A2", "Tree House", None, "HOSTOM")],
         )
@@ -35,13 +39,18 @@ def test_ensure_matches_prefers_a_confident_discogs_video_over_search(isolated_c
 
 def test_ensure_matches_falls_back_to_search_when_no_confident_discogs_video(isolated_cache, monkeypatch):
     monkeypatch.setattr(
-        matcher, "find_match",
+        matcher,
+        "find_match",
         lambda yt, artist, title: matcher.MatchResult("search-id", title, "ytmusic", 90.0, channel="Some Channel"),
     )
 
     with store.connect() as conn:
         _seed_release(
-            conn, 1, "Solo Artist", "Some EP", ["House"],
+            conn,
+            1,
+            "Solo Artist",
+            "Some EP",
+            ["House"],
             videos=[{"uri": "https://www.youtube.com/watch?v=ZZZ", "title": "Completely Unrelated", "duration": 100}],
             tracks=[("A1", "Some Track", None, None)],
         )
@@ -81,11 +90,17 @@ def test_ensure_matches_calls_on_track_done_once_per_query(isolated_cache, monke
 
     with store.connect() as conn:
         _seed_release(
-            conn, 1, "Solo Artist", "Some EP", ["House"],
+            conn,
+            1,
+            "Solo Artist",
+            "Some EP",
+            ["House"],
             tracks=[("A1", "Track One", None, None), ("A2", "Track Two", None, None)],
         )
         releases_with_tracks = list(store.iter_releases_with_tracks(conn))
         calls = []
-        sync_engine.ensure_matches(conn, yt=object(), releases_with_tracks=releases_with_tracks, on_track_done=lambda: calls.append(1))
+        sync_engine.ensure_matches(
+            conn, yt=object(), releases_with_tracks=releases_with_tracks, on_track_done=lambda: calls.append(1)
+        )
 
     assert len(calls) == 2

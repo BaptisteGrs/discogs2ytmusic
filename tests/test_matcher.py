@@ -161,7 +161,9 @@ class _FakeResponse:
 
 def test_resolve_channel_returns_the_channel_name(monkeypatch):
     monkeypatch.setattr(
-        matcher.requests, "get", lambda url, params=None, timeout=None: _FakeResponse({"author_name": "Yoyaku Record Store"})
+        matcher.requests,
+        "get",
+        lambda url, params=None, timeout=None: _FakeResponse({"author_name": "Yoyaku Record Store"}),
     )
 
     assert matcher.resolve_channel("abc123") == "Yoyaku Record Store"

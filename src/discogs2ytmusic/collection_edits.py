@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import sqlite3
+from typing import Any
+
 import pandas as pd
 
 from . import store, ytmusic_client
 
 
-def _int_or_none(value) -> int | None:
+def _int_or_none(value: Any) -> int | None:
     return None if pd.isna(value) else int(value)
 
 
-def apply_artist_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -> int:
+def _str(value: Any) -> str:
+    """Cast a DataFrame cell to str — columns we read here are always string dtype."""
+    return str(value)
+
+
+def apply_artist_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame) -> int:
     """Diff the `track_artist` column and persist changes as artist overrides.
 
     A track-backed row gets a per-track `search_artist` override; a release
@@ -20,7 +28,7 @@ def apply_artist_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -> in
     """
     count = 0
     for idx in original.index:
-        old_val, new_val = original.at[idx, "track_artist"], edited.at[idx, "track_artist"]
+        old_val, new_val = _str(original.at[idx, "track_artist"]), _str(edited.at[idx, "track_artist"])
         if new_val == old_val:
             continue
         override = new_val.strip() or None
@@ -28,12 +36,16 @@ def apply_artist_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -> in
         if track_id is not None:
             store.set_track_search_artist(conn, track_id, override)
         else:
-            store.set_release_artist_override(conn, int(original.at[idx, "release_id"]), override)
+            release_id = _int_or_none(original.at[idx, "release_id"])
+            assert release_id is not None  # every row has a release_id
+            store.set_release_artist_override(conn, release_id, override)
         count += 1
     return count
 
 
-def apply_video_link_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -> tuple[int, list[str]]:
+def apply_video_link_edits(
+    conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame
+) -> tuple[int, list[str]]:
     """Diff the `youtube_url` column and persist changes as manual match corrections.
 
     Uses the *edited* artist/title (so a simultaneous artist correction on the
@@ -43,7 +55,7 @@ def apply_video_link_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -
     count = 0
     errors: list[str] = []
     for idx in original.index:
-        old_val, new_val = original.at[idx, "youtube_url"], edited.at[idx, "youtube_url"]
+        old_val, new_val = _str(original.at[idx, "youtube_url"]), _str(edited.at[idx, "youtube_url"])
         if new_val == old_val:
             continue
         new_val = new_val.strip()
@@ -64,7 +76,7 @@ def apply_video_link_edits(conn, original: pd.DataFrame, edited: pd.DataFrame) -
         if match_id is not None:
             store.update_match(conn, match_id, video_id=video_id, video_title=None, source="manual")
         else:
-            artist, title = edited.at[idx, "track_artist"], edited.at[idx, "track_title"]
+            artist, title = _str(edited.at[idx, "track_artist"]), _str(edited.at[idx, "track_title"])
             store.save_match(conn, artist, title, video_id, None, "manual", None)
         count += 1
     return count, errors

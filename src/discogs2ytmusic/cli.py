@@ -4,16 +4,17 @@ import csv
 import enum
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
+from ytmusicapi import YTMusic
 
 from . import dummy_library, store, sync_engine, views, ytmusic_client
 from .config import Config
@@ -26,7 +27,9 @@ app.add_typer(auth_app, name="auth")
 console = Console()
 
 
-class Library(str, enum.Enum):
+class Library(enum.StrEnum):
+    """Which cache to point commands at (see `--library` in the app callback)."""
+
     real = "real"
     dummy = "dummy"
 
@@ -43,7 +46,7 @@ def cli_options(
         "15-track test collection in a separate cache — no Discogs auth needed for `scan`, "
         "and it never touches your real cache. Only works from a full repo checkout.",
     ),
-):
+) -> None:
     """Sync your Discogs collection to YouTube Music playlists."""
     global _active_library
     _active_library = library
@@ -56,15 +59,15 @@ def cli_options(
 @auth_app.command("discogs")
 def auth_discogs(
     token: str = typer.Option(..., prompt=True, hide_input=True, help="Discogs personal access token"),
-    username: Optional[str] = typer.Option(None, help="Discogs username (auto-detected from token if omitted)"),
-):
+    username: str | None = typer.Option(None, help="Discogs username (auto-detected from token if omitted)"),
+) -> None:
     """Save Discogs credentials and verify them."""
     client = DiscogsClient(token)
     try:
         identity = client.identity()
     except DiscogsError as e:
         console.print(f"[red]Could not verify token:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
     resolved_username = username or identity.get("username")
     cfg = Config(discogs_token=token, discogs_username=resolved_username)
     cfg.save()
@@ -73,7 +76,7 @@ def auth_discogs(
 
 @auth_app.command("ytmusic")
 def auth_ytmusic(
-    from_file: Optional[Path] = typer.Option(
+    from_file: Path | None = typer.Option(
         None,
         "--from-file",
         exists=True,
@@ -81,7 +84,7 @@ def auth_ytmusic(
         help="Read 'cookie' and 'x-goog-authuser' from a text file instead of an interactive prompt "
         "(a file with lines like 'cookie: ...' and 'x-goog-authuser: 0').",
     ),
-):
+) -> None:
     """Link your YT Music account (two values copied from a browser DevTools request)."""
     ytmusic_client.run_setup(from_file=from_file)
 
@@ -109,16 +112,24 @@ def _scan_dummy() -> None:
         releases = dummy_library.load_releases()
     except dummy_library.DummyLibraryUnavailable as e:
         console.print(f"[red]{e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     with store.connect() as conn:
         for r in releases:
             store.upsert_release(
-                conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"],
-                year=r.get("year"), labels=r.get("labels", []), videos=r.get("videos", []),
+                conn,
+                r["release_id"],
+                r["artist"],
+                r["title"],
+                r["styles"],
+                r["genres"],
+                year=r.get("year"),
+                labels=r.get("labels", []),
+                videos=r.get("videos", []),
             )
             store.replace_tracks(
-                conn, r["release_id"],
+                conn,
+                r["release_id"],
                 [(t["position"], t["title"], t["duration"], t.get("discogs_artist")) for t in r["tracklist"]],
             )
     console.print(f"[green]Loaded dummy library ({len(releases)} releases) into {store.CACHE_DB}[/green]")
@@ -126,8 +137,10 @@ def _scan_dummy() -> None:
 
 @app.command()
 def scan(
-    refresh: bool = typer.Option(False, "--refresh", help="Re-fetch collection and tracklists from Discogs instead of using the cache"),
-):
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Re-fetch collection and tracklists from Discogs instead of using the cache"
+    ),
+) -> None:
     """Fetch your Discogs collection (with styles + tracklists) into the local cache and show a breakdown by style."""
     if _active_library == Library.dummy:
         _scan_dummy()
@@ -154,18 +167,21 @@ def scan(
             styles = info.get("styles", []) or []
             genres = info.get("genres", []) or []
             year = info.get("year") or None
-            labels = [l["name"] for l in info.get("labels", []) or [] if l.get("name")]
+            labels = [label["name"] for label in info.get("labels", []) or [] if label.get("name")]
 
             videos = None  # None means "don't touch whatever's already cached" (see upsert_release)
             if refresh or not store.has_tracks(conn, release_id):
                 detail = client.get_release_detail(release_id)
                 store.replace_tracks(
-                    conn, release_id,
+                    conn,
+                    release_id,
                     [(t.position, t.title, t.duration, _clean_artist_names(t.artists)) for t in detail.tracklist],
                 )
                 videos = [{"uri": v.uri, "title": v.title, "duration": v.duration} for v in detail.videos]
 
-            store.upsert_release(conn, release_id, artist, title, styles, genres, year=year, labels=labels, videos=videos)
+            store.upsert_release(
+                conn, release_id, artist, title, styles, genres, year=year, labels=labels, videos=videos
+            )
             conn.commit()  # commit per-release so a crash/interrupt doesn't lose earlier progress
             progress.advance(task2)
 
@@ -187,9 +203,7 @@ def _print_style_breakdown() -> None:
     console.print(table)
 
 
-def _match_by_style(
-    conn, yt, style: Optional[list[str]]
-) -> dict[str, list[tuple[str, str]]]:
+def _match_by_style(conn: sqlite3.Connection, yt: YTMusic, style: list[str] | None) -> dict[str, list[tuple[str, str]]]:
     """Ensure every track is matched, grouped by Discogs style tag. Never touches YT Music playlists."""
     by_style: dict[str, list[tuple[str, str]]] = defaultdict(list)  # style -> [(artist, title)]
     releases_with_tracks = []
@@ -219,7 +233,7 @@ def _match_by_style(
     return by_style
 
 
-def _video_ids_by_style(conn, by_style: dict[str, list[tuple[str, str]]]) -> dict[str, list[str]]:
+def _video_ids_by_style(conn: sqlite3.Connection, by_style: dict[str, list[tuple[str, str]]]) -> dict[str, list[str]]:
     style_video_ids: dict[str, list[str]] = {}
     for s, track_list in by_style.items():
         video_ids: list[str] = []
@@ -237,9 +251,13 @@ def _video_ids_by_style(conn, by_style: dict[str, list[tuple[str, str]]]) -> dic
 
 @app.command()
 def sync(
-    style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."),
-    refresh_collection: bool = typer.Option(False, "--refresh", help="Re-fetch the Discogs collection first (equivalent to running `scan --refresh`)."),
-):
+    style: list[str] | None = typer.Option(
+        None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."
+    ),
+    refresh_collection: bool = typer.Option(
+        False, "--refresh", help="Re-fetch the Discogs collection first (equivalent to running `scan --refresh`)."
+    ),
+) -> None:
     """Match every track to a YouTube video and preview matched/total counts per Discogs style tag.
 
     This only searches and caches YouTube/YT Music matches — it never creates or modifies
@@ -271,10 +289,16 @@ def sync(
 
 @app.command(name="push-style-playlists")
 def push_style_playlists(
-    style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."),
-    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Preview without touching YT Music (default). Use --apply to actually create/update playlists."),
+    style: list[str] | None = typer.Option(
+        None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Preview without touching YT Music (default). Use --apply to actually create/update playlists.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (for scripting)."),
-):
+) -> None:
     """[Legacy] Auto-create one YT Music playlist per Discogs style tag and push every matched track to it.
 
     This bypasses any playlist review — every style tag with matches gets its own playlist,
@@ -314,7 +338,9 @@ def push_style_playlists(
         console.print(table)
 
         if dry_run:
-            console.print("[cyan]Dry run only — no playlists were created. Re-run with --apply to push to YT Music.[/cyan]")
+            console.print(
+                "[cyan]Dry run only — no playlists were created. Re-run with --apply to push to YT Music.[/cyan]"
+            )
             return
 
         for s, video_ids in style_video_ids.items():
@@ -344,12 +370,14 @@ def push_style_playlists(
 
 @app.command()
 def rematch(
-    style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."),
+    style: list[str] | None = typer.Option(
+        None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."
+    ),
     include_manual: bool = typer.Option(
         False, "--include-manual", help="Also clear manually-corrected matches (normally preserved)."
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (for scripting)."),
-):
+) -> None:
     """Clear cached YouTube matches and re-match everything from scratch.
 
     Use this to backfill fields added to the match cache after tracks were already matched
@@ -408,8 +436,8 @@ EXPORT_FIELDNAMES = [
 @app.command()
 def export(
     output: Path = typer.Option(Path("matches.csv"), "--output", "-o", help="CSV file to write."),
-    style: Optional[list[str]] = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable."),
-):
+    style: list[str] | None = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable."),
+) -> None:
     """Export cached track-to-YouTube matches to a CSV for manual review.
 
     Reads whatever is already in the local cache — run `sync` (dry-run is
@@ -456,13 +484,13 @@ def _parse_video_id(value: str) -> str:
         return ytmusic_client.parse_video_id(value)
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 @app.command()
 def correct(
     match_id: int = typer.Argument(..., help="The match_id shown by `export`."),
-    video_id: Optional[str] = typer.Option(
+    video_id: str | None = typer.Option(
         None, "--video-id", help="The correct video id, or a full YouTube/YT Music URL, to use for this match."
     ),
     reject: bool = typer.Option(
@@ -471,7 +499,7 @@ def correct(
     clear: bool = typer.Option(
         False, "--clear", help="Forget this cached result so the next `sync` searches it again from scratch."
     ),
-):
+) -> None:
     """Manually fix one cached YouTube match, addressed by the match_id from `export`.
 
     Pass exactly one of --video-id, --reject, or --clear.
@@ -489,7 +517,10 @@ def correct(
 
         if clear:
             store.delete_match(conn, match_id)
-            console.print(f"[green]Cleared match {match_id} ('{row['query_key']}') — it will be searched again on the next sync.[/green]")
+            console.print(
+                f"[green]Cleared match {match_id} ('{row['query_key']}') — "
+                "it will be searched again on the next sync.[/green]"
+            )
             return
 
         if reject:
@@ -497,6 +528,7 @@ def correct(
             console.print(f"[green]Marked match {match_id} ('{row['query_key']}') as no-match.[/green]")
             return
 
+        assert video_id is not None  # the only remaining mode, per the modes_given check above
         resolved_id = _parse_video_id(video_id)
         store.update_match(conn, match_id, video_id=resolved_id, video_title=None, source="manual")
         console.print(f"[green]Corrected match {match_id} ('{row['query_key']}') → {resolved_id}[/green]")
@@ -505,13 +537,18 @@ def correct(
 @app.command(name="fix-artist")
 def fix_artist(
     track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
-    artist: Optional[str] = typer.Option(
+    artist: str | None = typer.Option(
         None,
         "--artist",
-        help="Artist name to search YouTube with for this track, instead of the release's (possibly multi-credit) artist string.",
+        help=(
+            "Artist name to search YouTube with for this track, instead of the release's "
+            "(possibly multi-credit) artist string."
+        ),
     ),
-    clear: bool = typer.Option(False, "--clear", help="Remove the override and fall back to the release's artist again."),
-):
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove the override and fall back to the release's artist again."
+    ),
+) -> None:
     """Override the artist name used to build the YouTube search query for one track.
 
     Useful when a release is credited to multiple artists (Discogs joins them with
@@ -550,6 +587,7 @@ def ui() -> None:
 
 
 def main() -> None:
+    """Entry point registered as the `discogs2ytmusic` console script."""
     app()
 
 

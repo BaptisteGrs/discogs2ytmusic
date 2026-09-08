@@ -4,7 +4,7 @@ import sqlite3
 
 from typer.testing import CliRunner
 
-from discogs2ytmusic import cli, matcher, store
+from discogs2ytmusic import cli, matcher
 from discogs2ytmusic.matcher import MatchResult
 
 runner = CliRunner()

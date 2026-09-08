@@ -30,9 +30,13 @@ def _seed_matches(conn, *, matched: bool):
         for _track_id, artist, title in store.effective_track_queries(release, tracks):
             if matched:
                 store.save_match(
-                    conn, artist, title,
+                    conn,
+                    artist,
+                    title,
                     video_id=f"vid::{artist}::{title}",
-                    video_title=title, source="ytmusic", score=90.0,
+                    video_title=title,
+                    source="ytmusic",
+                    score=90.0,
                 )
             else:
                 store.save_match(conn, artist, title, video_id=None, video_title=None, source="none", score=0.0)

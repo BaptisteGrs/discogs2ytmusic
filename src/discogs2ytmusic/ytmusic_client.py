@@ -17,6 +17,7 @@ SETUP_INSTRUCTIONS = (
 
 
 def is_authenticated() -> bool:
+    """Whether `run_setup` has already saved YT Music auth headers."""
     return YTMUSIC_AUTH_FILE.exists()
 
 
@@ -97,24 +98,37 @@ def parse_video_id(value: str) -> str:
 
 
 def get_client(authenticated: bool = True) -> YTMusic:
+    """Build a YTMusic client.
+
+    Args:
+        authenticated: If True (needed to create/modify playlists), require and use the
+            saved auth headers. If False, use an anonymous client — enough for search.
+
+    Raises:
+        RuntimeError: if `authenticated` is True but `run_setup` hasn't been run yet.
+    """
     if authenticated:
         if not is_authenticated():
-            raise RuntimeError(
-                "Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic"
-            )
+            raise RuntimeError("Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic")
         return YTMusic(str(YTMUSIC_AUTH_FILE))
     return YTMusic()
 
 
 def get_or_create_playlist(yt: YTMusic, name: str, description: str = "") -> str:
+    """Return the id of the existing playlist named `name`, creating it if none exists."""
     existing = yt.get_library_playlists(limit=200)
     for pl in existing:
         if pl.get("title") == name:
             return pl["playlistId"]
-    return yt.create_playlist(name, description)
+    result = yt.create_playlist(name, description)
+    if not isinstance(result, str):
+        # ytmusicapi returns an error dict here instead of raising, on failure.
+        raise RuntimeError(f"Failed to create playlist {name!r}: {result}")
+    return result
 
 
 def add_tracks(yt: YTMusic, playlist_id: str, video_ids: list[str]) -> None:
+    """Add videos to a playlist, chunked to stay under YT Music's request size limits."""
     if not video_ids:
         return
     # YT Music silently ignores duplicates already in the playlist, but chunk

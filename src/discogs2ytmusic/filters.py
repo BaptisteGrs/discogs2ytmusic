@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -27,6 +28,7 @@ class PlaylistFilter:
     matched_only: bool = False
 
     def to_json(self) -> str:
+        """Serialize to the JSON stored in `playlist_defs.filter_json`."""
         return json.dumps(
             {
                 "tags": self.tags,
@@ -38,7 +40,8 @@ class PlaylistFilter:
         )
 
     @classmethod
-    def from_json(cls, raw: str) -> "PlaylistFilter":
+    def from_json(cls, raw: str) -> PlaylistFilter:
+        """Deserialize a `PlaylistFilter` from `playlist_defs.filter_json`."""
         data = json.loads(raw)
         return cls(
             tags=data.get("tags") or [],
@@ -49,11 +52,11 @@ class PlaylistFilter:
         )
 
 
-def _norm(values) -> set[str]:
+def _norm(values: Iterable[str]) -> set[str]:
     return {v.strip().lower() for v in values}
 
 
-def release_matches(release, filt: PlaylistFilter) -> bool:
+def release_matches(release: sqlite3.Row, filt: PlaylistFilter) -> bool:
     """Whether a release passes a filter's styles/genres/labels/year criteria.
 
     `matched_only` is a per-track concern (a release has no single matched
@@ -70,9 +73,7 @@ def release_matches(release, filt: PlaylistFilter) -> bool:
     year = release["year"]
     if filt.year_min is not None and (year is None or year < filt.year_min):
         return False
-    if filt.year_max is not None and (year is None or year > filt.year_max):
-        return False
-    return True
+    return not (filt.year_max is not None and (year is None or year > filt.year_max))
 
 
 @dataclass
@@ -105,7 +106,9 @@ class TrackRow:
     score: float | None
     channel: str | None
     searched_at: str | None
-    locked: bool  # a manual correction (artist override and/or picked video) protects this row from scan/sync overwrites
+    # A manual correction (artist override and/or picked video) protects this row from
+    # scan/sync overwrites.
+    locked: bool
 
 
 def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -> list[TrackRow]:

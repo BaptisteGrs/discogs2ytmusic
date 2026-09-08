@@ -8,8 +8,14 @@ from discogs2ytmusic import filters, store
 def _seed(conn, dummy_library):
     for r in dummy_library:
         store.upsert_release(
-            conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"],
-            year=r.get("year"), labels=r.get("labels", []),
+            conn,
+            r["release_id"],
+            r["artist"],
+            r["title"],
+            r["styles"],
+            r["genres"],
+            year=r.get("year"),
+            labels=r.get("labels", []),
         )
         store.replace_tracks(
             conn,
@@ -22,7 +28,9 @@ def _seed(conn, dummy_library):
 
 
 def test_playlist_filter_json_round_trip():
-    filt = filters.PlaylistFilter(tags=["Electro", "Tech House"], labels=["Warp"], year_min=1990, year_max=2010, matched_only=True)
+    filt = filters.PlaylistFilter(
+        tags=["Electro", "Tech House"], labels=["Warp"], year_min=1990, year_max=2010, matched_only=True
+    )
     restored = filters.PlaylistFilter.from_json(filt.to_json())
     assert restored == filt
 
@@ -149,9 +157,7 @@ def test_resolve_rows_flags_a_manually_overridden_artist_as_locked(isolated_cach
     with store.connect() as conn:
         _seed(conn, dummy_library)
         first = dummy_library[0]
-        track = conn.execute(
-            "SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)
-        ).fetchone()
+        track = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()
         store.set_track_search_artist(conn, track[0], "Corrected Artist")
 
     with store.connect() as conn:
@@ -167,7 +173,9 @@ def test_resolve_rows_flags_a_manual_match_as_locked(isolated_cache, dummy_libra
     with store.connect() as conn:
         _seed(conn, dummy_library)
         first = dummy_library[0]
-        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "manual-vid", "Manual pick", "manual", None)
+        store.save_match(
+            conn, first["artist"], first["tracklist"][0]["title"], "manual-vid", "Manual pick", "manual", None
+        )
 
     with store.connect() as conn:
         rows = filters.resolve_rows(conn)

@@ -10,8 +10,14 @@ from discogs2ytmusic import store
 def _seed(conn, dummy_library):
     for r in dummy_library:
         store.upsert_release(
-            conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"],
-            year=r.get("year"), labels=r.get("labels", []),
+            conn,
+            r["release_id"],
+            r["artist"],
+            r["title"],
+            r["styles"],
+            r["genres"],
+            year=r.get("year"),
+            labels=r.get("labels", []),
         )
         store.replace_tracks(
             conn,
@@ -144,9 +150,7 @@ def test_playlist_def_round_trip(isolated_cache):
 def test_playlists_table_migrates_into_playlist_defs(isolated_cache, dummy_library):
     """Caches created before playlist_defs existed must fold the old style->playlist_id table in."""
     conn = sqlite3.connect(isolated_cache)
-    conn.execute(
-        "CREATE TABLE playlists (style TEXT PRIMARY KEY, playlist_id TEXT NOT NULL, created_at REAL NOT NULL)"
-    )
+    conn.execute("CREATE TABLE playlists (style TEXT PRIMARY KEY, playlist_id TEXT NOT NULL, created_at REAL NOT NULL)")
     conn.execute("INSERT INTO playlists VALUES (?, ?, ?)", ("House", "PL-legacy", 1700000000.0))
     conn.commit()
     conn.close()
@@ -207,7 +211,12 @@ def test_split_va_track_title_rejects_an_empty_side():
 
 
 def test_effective_track_queries_applies_the_va_split_when_unambiguous():
-    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    release = {
+        "artist": "Aline Umber, HOSTOM",
+        "artist_override": None,
+        "title": "Yoyaku Barcelona 2025",
+        "title_override": None,
+    }
     tracks = [
         {"id": 1, "search_artist": None, "discogs_artist": None, "title": "HOSTOM - Oto", "position": "A1"},
         {"id": 2, "search_artist": None, "discogs_artist": None, "title": "No Dash Here", "position": "A2"},
@@ -219,8 +228,21 @@ def test_effective_track_queries_applies_the_va_split_when_unambiguous():
 
 
 def test_effective_track_queries_manual_override_wins_over_the_va_split():
-    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
-    tracks = [{"id": 1, "search_artist": "Manually Corrected", "discogs_artist": None, "title": "HOSTOM - Oto", "position": "A1"}]
+    release = {
+        "artist": "Aline Umber, HOSTOM",
+        "artist_override": None,
+        "title": "Yoyaku Barcelona 2025",
+        "title_override": None,
+    }
+    tracks = [
+        {
+            "id": 1,
+            "search_artist": "Manually Corrected",
+            "discogs_artist": None,
+            "title": "HOSTOM - Oto",
+            "position": "A1",
+        }
+    ]
 
     result = store.effective_track_queries(release, tracks)
 
@@ -229,7 +251,9 @@ def test_effective_track_queries_manual_override_wins_over_the_va_split():
 
 def test_effective_track_queries_does_not_split_single_artist_releases():
     release = {"artist": "Solo Artist", "artist_override": None, "title": "Some EP", "title_override": None}
-    tracks = [{"id": 1, "search_artist": None, "discogs_artist": None, "title": "Some Artist - Some Track", "position": "A1"}]
+    tracks = [
+        {"id": 1, "search_artist": None, "discogs_artist": None, "title": "Some Artist - Some Track", "position": "A1"}
+    ]
 
     result = store.effective_track_queries(release, tracks)
 
@@ -243,7 +267,12 @@ def test_effective_track_queries_prefers_discogs_artist_over_the_va_split_guess(
     """Even though the title *also* matches the dash-split pattern, a structured
     discogs_artist credit (the real fix for this release shape) must win — the
     dash-split is only a fallback for releases where Discogs gave no such credit."""
-    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    release = {
+        "artist": "Aline Umber, HOSTOM",
+        "artist_override": None,
+        "title": "Yoyaku Barcelona 2025",
+        "title_override": None,
+    }
     tracks = [{"id": 1, "search_artist": None, "discogs_artist": "HOSTOM", "title": "HOSTOM - Oto", "position": "A1"}]
 
     result = store.effective_track_queries(release, tracks)
@@ -254,7 +283,12 @@ def test_effective_track_queries_prefers_discogs_artist_over_the_va_split_guess(
 def test_effective_track_queries_uses_discogs_artist_for_a_clean_title_with_no_dash():
     """The actual real-world case: Discogs' tracklist API gives a per-track artist credit
     without ever embedding it into the title text (e.g. title is just "Tree House")."""
-    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    release = {
+        "artist": "Aline Umber, HOSTOM",
+        "artist_override": None,
+        "title": "Yoyaku Barcelona 2025",
+        "title_override": None,
+    }
     tracks = [{"id": 1, "search_artist": None, "discogs_artist": "HOSTOM", "title": "Tree House", "position": "A2"}]
 
     result = store.effective_track_queries(release, tracks)
@@ -263,8 +297,21 @@ def test_effective_track_queries_uses_discogs_artist_for_a_clean_title_with_no_d
 
 
 def test_effective_track_queries_manual_override_wins_over_discogs_artist():
-    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
-    tracks = [{"id": 1, "search_artist": "Manually Corrected", "discogs_artist": "HOSTOM", "title": "Tree House", "position": "A2"}]
+    release = {
+        "artist": "Aline Umber, HOSTOM",
+        "artist_override": None,
+        "title": "Yoyaku Barcelona 2025",
+        "title_override": None,
+    }
+    tracks = [
+        {
+            "id": 1,
+            "search_artist": "Manually Corrected",
+            "discogs_artist": "HOSTOM",
+            "title": "Tree House",
+            "position": "A2",
+        }
+    ]
 
     result = store.effective_track_queries(release, tracks)
 
@@ -280,9 +327,7 @@ def test_real_va_release_regression_hostom_tree_house(isolated_cache, dummy_libr
         _seed(conn, dummy_library)
 
     with store.connect() as conn:
-        release, tracks = next(
-            (r, t) for r, t in store.iter_releases_with_tracks(conn) if r["release_id"] == 34365844
-        )
+        release, tracks = next((r, t) for r, t in store.iter_releases_with_tracks(conn) if r["release_id"] == 34365844)
         queries = store.effective_track_queries(release, tracks)
 
     by_title = {title: artist for _tid, artist, title in queries}
@@ -313,7 +358,12 @@ def test_effective_track_queries_resolves_untitled_to_release_title_plus_positio
 def test_effective_track_queries_untitled_fallback_applies_after_discogs_artist_resolution():
     """The untitled fallback is a title-only normalization — it must not disturb whichever
     tier (override/discogs_artist/VA-split/release artist) already resolved the artist."""
-    release = {"artist": "Aline Umber, HOSTOM", "artist_override": None, "title": "Yoyaku Barcelona 2025", "title_override": None}
+    release = {
+        "artist": "Aline Umber, HOSTOM",
+        "artist_override": None,
+        "title": "Yoyaku Barcelona 2025",
+        "title_override": None,
+    }
     tracks = [{"id": 1, "search_artist": None, "discogs_artist": "HOSTOM", "title": "Untitled", "position": "B3"}]
 
     result = store.effective_track_queries(release, tracks)
