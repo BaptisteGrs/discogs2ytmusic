@@ -164,6 +164,25 @@ def test_playlists_table_migrates_into_playlist_defs(isolated_cache, dummy_libra
     assert not legacy_cols  # old table is gone
 
 
+def test_connect_ignores_playlists_table_with_unrelated_shape(isolated_cache, dummy_library):
+    """A `playlists` table that isn't the old style->playlist_id shape must not crash connect().
+
+    Regression test: a `playlists` table from some other, unrelated schema (e.g. an
+    abandoned prototype) was previously assumed to always be the legacy shape, which
+    crashed with "no such column: style" instead of just being left alone.
+    """
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute("CREATE TABLE playlists (id INTEGER PRIMARY KEY, name TEXT NOT NULL, ytmusic_playlist_id TEXT)")
+    conn.execute("INSERT INTO playlists (name, ytmusic_playlist_id) VALUES (?, ?)", ("Unrelated", "PL-other"))
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(playlists)")}
+
+    assert cols == {"id", "name", "ytmusic_playlist_id"}  # left untouched, not mistaken for the legacy shape
+
+
 def test_release_overrides_apply_to_effective_track_queries(isolated_cache, dummy_library):
     release_id = dummy_library[0]["release_id"]
     with store.connect() as conn:

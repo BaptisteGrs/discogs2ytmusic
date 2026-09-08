@@ -132,8 +132,10 @@ def _migrate_playlists_to_playlist_defs(conn: sqlite3.Connection) -> None:
     the already-created YT Music playlist id so re-syncing doesn't create duplicates.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(playlists)")}
-    if not cols:
-        return  # no legacy table — nothing to migrate
+    if not {"style", "playlist_id", "created_at"} <= cols:
+        # No legacy table, or a `playlists` table from some other (unrelated) shape —
+        # either way there's nothing in the expected old shape to migrate.
+        return
     rows = conn.execute("SELECT style, playlist_id, created_at FROM playlists").fetchall()
     now = time.time()
     for style, playlist_id, created_at in rows:
