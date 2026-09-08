@@ -150,6 +150,51 @@ def test_resolve_rows_matched_only_excludes_unmatched_tracks(isolated_cache, dum
     assert rows[0].video_id == "vid1"
 
 
+# --- resolve_playlist_rows ---
+
+
+def test_resolve_playlist_rows_returns_tracks_in_playlist_order(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        all_tracks = conn.execute("SELECT id, title FROM tracks ORDER BY id").fetchall()
+        t1, t2 = all_tracks[3][0], all_tracks[0][0]  # deliberately out of natural/id order
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.add_tracks_to_playlist(conn, playlist_id, [t1, t2])
+
+    with store.connect() as conn:
+        rows = filters.resolve_playlist_rows(conn, playlist_id)
+
+    assert [r.track_id for r in rows] == [t1, t2]
+
+
+def test_resolve_playlist_rows_empty_playlist(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+
+    with store.connect() as conn:
+        rows = filters.resolve_playlist_rows(conn, playlist_id)
+
+    assert rows == []
+
+
+def test_resolve_playlist_rows_reflects_match_and_locked_state(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    with store.connect() as conn:
+        rows = filters.resolve_playlist_rows(conn, playlist_id)
+
+    assert len(rows) == 1
+    assert rows[0].video_id == "vid1"
+    assert rows[0].matched is True
+    assert rows[0].locked is False
+
+
 # --- resolve_rows: locked flag ---
 
 
