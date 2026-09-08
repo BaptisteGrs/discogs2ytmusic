@@ -301,7 +301,7 @@ def _playlist_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
 
 
 def render_playlists_tab() -> None:
-    """Render the curated-playlists tab: create/select/delete a playlist and edit its tracks."""
+    """Render the curated-playlists tab: a vertical playlist list next to the selected playlist's detail."""
     st.header("Playlists")
 
     with store.connect() as conn:
@@ -312,36 +312,47 @@ def render_playlists_tab() -> None:
         _render_create_playlist_form()
         return
 
-    names = [p["name"] for p in playlists]
-    selected_name = st.selectbox("Playlist", names, key="playlists_selected")
-    playlist = next(p for p in playlists if p["name"] == selected_name)
+    selected_id = st.session_state.get("playlists_selected_id")
+    if selected_id not in {p["id"] for p in playlists}:
+        selected_id = playlists[0]["id"]
+        st.session_state["playlists_selected_id"] = selected_id
 
-    _render_create_playlist_form()
-    st.divider()
-    _render_playlist_detail(playlist)
+    list_col, detail_col = st.columns([1, 3])
+    with list_col:
+        for p in playlists:
+            if st.button(
+                p["name"],
+                key=f"playlist_nav_{p['id']}",
+                width="stretch",
+                type="primary" if p["id"] == selected_id else "secondary",
+            ):
+                st.session_state["playlists_selected_id"] = p["id"]
+                st.rerun()
+        st.divider()
+        _render_create_playlist_form()
+
+    playlist = next(p for p in playlists if p["id"] == selected_id)
+    with detail_col:
+        _render_playlist_detail(playlist)
 
 
 def _render_create_playlist_form() -> None:
-    with st.expander("Create a new (empty) playlist"):
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            name = st.text_input("Name", key="new_empty_playlist_name")
-        with col2:
-            st.write("")
-            if st.button("Create", key="create_empty_playlist"):
-                name = name.strip()
-                if not name:
-                    st.error("Enter a name.")
-                else:
-                    with store.connect() as conn:
-                        try:
-                            store.create_playlist(conn, name)
-                        except sqlite3.IntegrityError:
-                            st.error(f"A playlist named '{name}' already exists.")
-                            return
-                        conn.commit()
-                    st.session_state["playlists_selected"] = name
-                    st.rerun()
+    with st.expander("+ New playlist"):
+        name = st.text_input("Name", key="new_empty_playlist_name")
+        if st.button("Create", key="create_empty_playlist", width="stretch"):
+            name = name.strip()
+            if not name:
+                st.error("Enter a name.")
+            else:
+                with store.connect() as conn:
+                    try:
+                        playlist_id = store.create_playlist(conn, name)
+                    except sqlite3.IntegrityError:
+                        st.error(f"A playlist named '{name}' already exists.")
+                        return
+                    conn.commit()
+                st.session_state["playlists_selected_id"] = playlist_id
+                st.rerun()
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
@@ -350,7 +361,20 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
         rows = resolve_playlist_rows(conn, playlist_id)
 
     matched = sum(1 for r in rows if r.matched)
-    st.subheader(playlist["name"])
+
+    title_col, sync_col, delete_col = st.columns([3, 3, 3])
+    with title_col:
+        st.subheader(playlist["name"])
+    with sync_col:
+        _render_sync_button(playlist, rows)
+    with delete_col:
+        _render_delete_button(playlist)
+
+    if st.session_state.get(f"confirm_sync_{playlist_id}"):
+        _render_sync_confirmation(playlist, rows)
+    if st.session_state.get(f"confirm_delete_{playlist_id}"):
+        _render_delete_confirmation(playlist)
+
     st.caption(
         f"{len(rows)} track(s), {matched} matched"
         + (
@@ -425,26 +449,27 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
                 del st.session_state[f"playlist_search_editor_{playlist_id}"]
                 st.rerun()
 
-    st.divider()
-    _render_sync_controls(playlist, rows)
-    _render_delete_controls(playlist)
 
-
-def _render_sync_controls(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
+def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     playlist_id = playlist["id"]
     video_ids = [r.video_id for r in rows if r.video_id]
 
-    st.markdown("**Sync to YT Music**")
     if not video_ids:
         st.caption("No matched tracks to push yet.")
         return
 
     confirm_key = f"confirm_sync_{playlist_id}"
-    if not st.session_state.get(confirm_key):
-        if st.button(f"Sync {len(video_ids)} track(s) to YT Music", key=f"sync_button_{playlist_id}"):
-            st.session_state[confirm_key] = True
-            st.rerun()
+    if st.session_state.get(confirm_key):
         return
+    if st.button(f"Sync {len(video_ids)} track(s) to YT Music", key=f"sync_button_{playlist_id}", width="stretch"):
+        st.session_state[confirm_key] = True
+        st.rerun()
+
+
+def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
+    playlist_id = playlist["id"]
+    video_ids = [r.video_id for r in rows if r.video_id]
+    confirm_key = f"confirm_sync_{playlist_id}"
 
     st.warning(
         "This will create (or update) a real playlist on your YT Music account "
@@ -478,16 +503,20 @@ def _render_sync_controls(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
             st.rerun()
 
 
-def _render_delete_controls(playlist: sqlite3.Row) -> None:
+def _render_delete_button(playlist: sqlite3.Row) -> None:
     playlist_id = playlist["id"]
     confirm_key = f"confirm_delete_{playlist_id}"
 
-    st.markdown("**Delete playlist**")
-    if not st.session_state.get(confirm_key):
-        if st.button("Delete this playlist", key=f"delete_button_{playlist_id}"):
-            st.session_state[confirm_key] = True
-            st.rerun()
+    if st.session_state.get(confirm_key):
         return
+    if st.button("Delete this playlist", key=f"delete_button_{playlist_id}", width="stretch"):
+        st.session_state[confirm_key] = True
+        st.rerun()
+
+
+def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
+    playlist_id = playlist["id"]
+    confirm_key = f"confirm_delete_{playlist_id}"
 
     st.warning(
         "This removes the playlist from this app only — it does NOT delete the linked "
@@ -500,7 +529,7 @@ def _render_delete_controls(playlist: sqlite3.Row) -> None:
                 store.delete_playlist(conn, playlist_id)
                 conn.commit()
             st.session_state[confirm_key] = False
-            st.session_state.pop("playlists_selected", None)
+            st.session_state.pop("playlists_selected_id", None)
             st.rerun()
     with col2:
         if st.button("Cancel", key=f"confirm_delete_no_{playlist_id}"):
