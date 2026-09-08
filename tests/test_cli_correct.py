@@ -105,7 +105,9 @@ def test_correct_unknown_match_id_errors(isolated_cache):
     assert "No cached match" in result.output
 
 
-def test_fix_artist_overrides_search_query_used_by_sync_and_export(isolated_cache, dummy_library, tmp_path, monkeypatch):
+def test_fix_artist_overrides_search_query_used_by_sync_and_export(
+    isolated_cache, dummy_library, tmp_path, monkeypatch
+):
     release = dummy_library[0]
     track = release["tracklist"][0]
 

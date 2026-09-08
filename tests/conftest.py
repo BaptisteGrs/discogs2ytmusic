@@ -41,7 +41,9 @@ class FakeDiscogsClient:
             if r["release_id"] == release_id:
                 tracklist = [
                     Track(
-                        position=t["position"], title=t["title"], duration=t["duration"],
+                        position=t["position"],
+                        title=t["title"],
+                        duration=t["duration"],
                         artists=[t["discogs_artist"]] if t.get("discogs_artist") else [],
                     )
                     for t in r["tracklist"]

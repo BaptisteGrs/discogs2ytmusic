@@ -10,8 +10,22 @@ from discogs2ytmusic.filters import PlaylistFilter, TrackRow, resolve_rows
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
 COLLECTION_COLUMNS = [
-    "release_title", "track_artist", "position", "track_title", "labels", "year", "matched", "discogs_url", "youtube_url",
-    "channel", "locked", "release_artist", "styles", "genres", "confidence", "video_title",
+    "release_title",
+    "track_artist",
+    "position",
+    "track_title",
+    "labels",
+    "year",
+    "matched",
+    "discogs_url",
+    "youtube_url",
+    "channel",
+    "locked",
+    "release_artist",
+    "styles",
+    "genres",
+    "confidence",
+    "video_title",
 ]
 
 
@@ -72,6 +86,7 @@ def _rows_to_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
 
 
 def render_collection_tab() -> None:
+    """Render the browsable/editable table of every cached track and its YouTube match."""
     st.header("My Discogs Collection")
 
     all_rows = _all_rows()
@@ -126,8 +141,20 @@ def render_collection_tab() -> None:
         width="stretch",
         column_order=COLLECTION_COLUMNS,
         disabled=[
-            "release_artist", "position", "track_title", "release_title", "discogs_url",
-            "styles", "genres", "labels", "year", "matched", "confidence", "video_title", "channel", "locked",
+            "release_artist",
+            "position",
+            "track_title",
+            "release_title",
+            "discogs_url",
+            "styles",
+            "genres",
+            "labels",
+            "year",
+            "matched",
+            "confidence",
+            "video_title",
+            "channel",
+            "locked",
         ],
         column_config={
             "track_artist": st.column_config.TextColumn(
@@ -144,9 +171,7 @@ def render_collection_tab() -> None:
             ),
             "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
             "matched": st.column_config.CheckboxColumn("Matched"),
-            "channel": st.column_config.TextColumn(
-                "Channel", help="Uploader/channel of the matched YouTube video"
-            ),
+            "channel": st.column_config.TextColumn("Channel", help="Uploader/channel of the matched YouTube video"),
             "locked": st.column_config.CheckboxColumn(
                 "Locked",
                 help=(
@@ -157,7 +182,10 @@ def render_collection_tab() -> None:
             ),
             "confidence": st.column_config.ProgressColumn(
                 "Confidence",
-                help="Fuzzy-match score between the Discogs track and the YouTube result. Blank for manually-corrected links.",
+                help=(
+                    "Fuzzy-match score between the Discogs track and the YouTube result. "
+                    "Blank for manually-corrected links."
+                ),
                 min_value=0,
                 max_value=100,
                 format="%d%%",
@@ -178,6 +206,7 @@ def render_collection_tab() -> None:
 
 
 def main() -> None:
+    """Streamlit entry point — lays out the Collection/Playlists tabs."""
     tab1, tab2 = st.tabs(["My Discogs Collection", "Playlists"])
     with tab1:
         render_collection_tab()

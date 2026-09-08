@@ -13,8 +13,14 @@ APP_PATH = str(Path(__file__).resolve().parents[1] / "src" / "discogs2ytmusic" /
 def _seed(conn, dummy_library):
     for r in dummy_library:
         store.upsert_release(
-            conn, r["release_id"], r["artist"], r["title"], r["styles"], r["genres"],
-            year=r.get("year"), labels=r.get("labels", []),
+            conn,
+            r["release_id"],
+            r["artist"],
+            r["title"],
+            r["styles"],
+            r["genres"],
+            year=r.get("year"),
+            labels=r.get("labels", []),
         )
         store.replace_tracks(
             conn,
@@ -81,7 +87,9 @@ def test_app_shows_position_in_its_own_column_and_keeps_track_title_clean(isolat
 
 def test_app_handles_a_collection_with_a_single_distinct_year(isolated_cache):
     with store.connect() as conn:
-        store.upsert_release(conn, 1, "Solo Artist", "Solo EP", ["House"], ["Electronic"], year=2020, labels=["Some Label"])
+        store.upsert_release(
+            conn, 1, "Solo Artist", "Solo EP", ["House"], ["Electronic"], year=2020, labels=["Some Label"]
+        )
         store.replace_tracks(conn, 1, [("A1", "Track One", None, None)])
 
     at = AppTest.from_file(APP_PATH).run()
@@ -109,7 +117,16 @@ def test_app_shows_the_matched_video_channel(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         first = dummy_library[0]
-        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0, channel="Yoyaku Record Store")
+        store.save_match(
+            conn,
+            first["artist"],
+            first["tracklist"][0]["title"],
+            "vid1",
+            "Video",
+            "ytmusic",
+            90.0,
+            channel="Yoyaku Record Store",
+        )
 
     at = AppTest.from_file(APP_PATH).run()
     df = at.get_by_key("collection_editor").value.set_index("track_artist")

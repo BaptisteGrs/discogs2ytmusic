@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
-from typing import Callable
+import sqlite3
+from collections.abc import Callable, Iterable, Sequence
+
+from ytmusicapi import YTMusic
 
 from . import matcher, store
 
 
 def ensure_matches(
-    conn, yt, releases_with_tracks, on_track_done: Callable[[], None] | None = None
+    conn: sqlite3.Connection,
+    yt: YTMusic,
+    releases_with_tracks: Iterable[tuple[sqlite3.Row, Sequence[sqlite3.Row]]],
+    on_track_done: Callable[[], None] | None = None,
 ) -> None:
     """Make sure every track across the given (release, tracks) pairs has a cached match.
 
@@ -48,7 +54,9 @@ def ensure_matches(
                 result = matcher.find_match(yt, artist, title)
                 channel = result.channel
 
-            store.save_match(conn, artist, title, result.video_id, result.video_title, result.source, result.score, channel=channel)
+            store.save_match(
+                conn, artist, title, result.video_id, result.video_title, result.source, result.score, channel=channel
+            )
             conn.commit()
             if on_track_done:
                 on_track_done()

@@ -1,18 +1,21 @@
 # discogs2ytmusic
 
-## To do 
+[![CI](https://github.com/BaptisteGrs/discogs2ytmusic/actions/workflows/ci.yml/badge.svg)](https://github.com/BaptisteGrs/discogs2ytmusic/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-- [ ] Add `YT Channel` column. Filter by group of YT channels (possible to mark favorites).
-- [ ] Wantlist tab
-- [ ] To review filter for low confidence matches
-- [ ] If Untitled in a release, use side tags (A2,...) to search for the song
-- [ ] Use the song links already in Discogs if they are already present. Check the confidence on these links if possible. 
-
-
-Wrapper for your Discogs collection. 
+Wrapper for your Discogs collection.
 Map YT Music links automatically.
-Create playlists easily and push them on your YT account. 
-Dig people's collection or label catalogue. 
+Create playlists easily and push them on your YT account.
+Dig people's collection or label catalogue.
+
+Runs entirely locally as a CLI, with an optional browsable/editable Streamlit UI.
+
+## Roadmap
+
+- [ ] Filter the Collection tab by channel (favorite a group of channels).
+- [ ] Wantlist tab.
+- [ ] A dedicated filter for low-confidence matches.
 
 ## Setup
 
@@ -152,13 +155,32 @@ Neither command touches YouTube — both just edit the local cache.
 
 ### Actually create/update the playlists
 
+`sync` only searches and caches matches — it never touches your YT Music account.
+Pushing a playlist is a separate, explicitly confirmed step:
+
 ```bash
-uv run discogs2ytmusic sync --apply
+uv run discogs2ytmusic push-style-playlists --apply
 ```
 
-Playlists are named `Discogs - <style>` and are safe to re-run: existing
-playlists are reused (not duplicated), and matched tracks are cached so
-re-syncing only searches for new tracks.
+This is the original one-playlist-per-Discogs-style-tag flow (`[Legacy]` in
+`--help`): every style tag with matches gets its own YT Music playlist, named
+`Discogs - <style>` and safe to re-run — existing playlists are reused (not
+duplicated), and matched tracks are cached so re-syncing only searches for new
+tracks. It's being superseded by the Playlists tab in the [browsable UI](#browsable-web-ui)
+(define a playlist by filters, review it, push it with its own button), which
+is still in progress.
+
+### Re-match tracks after a matcher/schema change
+
+```bash
+uv run discogs2ytmusic rematch
+```
+
+A normal `sync` skips anything already cached, so it never picks up fields
+added to the match cache after the fact (e.g. the `channel` column). `rematch`
+clears the cache and re-fetches the Discogs collection first, then re-matches
+everything from scratch. Manually-corrected matches (via `correct`) are
+preserved by default — pass `--include-manual` to clear those too.
 
 ### Try any command against a small test collection instead of your own
 
@@ -178,6 +200,22 @@ seeing the whole `scan` → `sync` → `export` flow end-to-end in seconds. This
 only works from a full repo checkout (it reads `tests/fixtures/dummy_library.json`
 directly, it isn't packaged) — omit the flag, or pass `--library real`
 (the default), to use your actual collection.
+
+## Browsable web UI
+
+```bash
+uv run discogs2ytmusic ui
+```
+
+Launches a local Streamlit app (`app.py`) over the same cache the CLI uses.
+The **Collection** tab is a filterable, editable table of every cached track:
+filter by style/genre, label, year, or matched-only; edit a track's artist
+inline to override the YouTube search query, or paste/clear a YouTube link
+directly — both save as the same manual corrections `fix-artist`/`correct`
+make from the CLI, and a corrected row is marked **Locked** so it survives the
+next `scan --refresh`/`rematch`. The **Playlists** tab (build/review/push a
+saved playlist definition) is still in progress — use `push-style-playlists`
+from the CLI in the meantime.
 
 ## Testing
 
@@ -211,6 +249,20 @@ the pattern in `tests/fixtures/dummy_library.json`: pick a `release_id`,
 `artist`, `title`, `styles`, `genres`, and one or more `tracklist` entries per
 release, drawn from `~/Library/Caches/discogs2ytmusic/cache.sqlite3` (or the
 equivalent cache path on your OS).
+
+## Development
+
+```bash
+uv sync                          # installs dev tools too (ruff, mypy, pytest, pre-commit)
+uv run ruff check .              # lint
+uv run ruff format .             # format
+uv run mypy src                  # type-check
+uv run pytest                    # test (with coverage)
+uv run pre-commit install        # optional: run the above automatically on every commit
+```
+
+CI (`.github/workflows/ci.yml`) runs all four on every push/PR. See
+[`CLAUDE.md`](CLAUDE.md) for an architecture overview and conventions.
 
 ## Notes
 

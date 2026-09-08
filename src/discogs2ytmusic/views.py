@@ -11,6 +11,11 @@ from .discogs import release_url
 
 @dataclass
 class MatchRow:
+    """One (style, track) pairing for the legacy per-style export/sync flow.
+
+    A track that carries N style tags appears as N separate rows, one per style.
+    """
+
     match_id: int | None  # None if this track has never been searched (no cached matches row)
     track_id: int | None  # None for the release-title fallback used when a release has no tracklist
     style: str

@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CLI output left in the repo root by `export`
+/*.csv

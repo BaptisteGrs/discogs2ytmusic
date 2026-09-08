@@ -9,7 +9,9 @@ runner = CliRunner()
 
 
 def _always_matches(yt, artist, title):
-    return MatchResult(video_id=f"vid::{artist}::{title}", video_title=title, source="ytmusic", score=100.0, channel="Some Channel")
+    return MatchResult(
+        video_id=f"vid::{artist}::{title}", video_title=title, source="ytmusic", score=100.0, channel="Some Channel"
+    )
 
 
 def test_rematch_without_confirmation_aborts_and_leaves_matches_untouched(isolated_cache, monkeypatch):
