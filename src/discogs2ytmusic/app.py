@@ -300,40 +300,50 @@ def _playlist_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
     return _rows_to_dataframe(rows, flag_column="remove")
 
 
-def render_playlists_tab() -> None:
-    """Render the curated-playlists tab: a vertical playlist list next to the selected playlist's detail."""
-    st.header("Playlists")
-
+def render_sidebar_nav() -> tuple[str, int | None]:
+    """Render the sidebar: a Collection link, then a Playlists section with one button per
+    curated playlist. Returns the current selection as ("collection", None) or ("playlist", id).
+    """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
+    playlist_ids = {p["id"] for p in playlists}
 
-    if not playlists:
-        st.info("No playlists yet. Select some tracks in the Collection tab and add them to a new playlist.")
-        _render_create_playlist_form()
-        return
+    kind = st.session_state.get("nav_kind", "collection")
+    playlist_id = st.session_state.get("nav_playlist_id")
+    if kind != "playlist" or playlist_id not in playlist_ids:
+        kind, playlist_id = "collection", None
 
-    selected_id = st.session_state.get("playlists_selected_id")
-    if selected_id not in {p["id"] for p in playlists}:
-        selected_id = playlists[0]["id"]
-        st.session_state["playlists_selected_id"] = selected_id
+    with st.sidebar:
+        if st.button(
+            "My Discogs Collection",
+            key="nav_collection",
+            width="stretch",
+            type="primary" if kind == "collection" else "secondary",
+        ):
+            st.session_state["nav_kind"] = "collection"
+            st.session_state["nav_playlist_id"] = None
+            st.rerun()
 
-    list_col, detail_col = st.columns([1, 3])
-    with list_col:
+        st.divider()
+        st.caption("Playlists")
+        if not playlists:
+            st.caption("No playlists yet — create one below.")
         for p in playlists:
+            is_selected = kind == "playlist" and p["id"] == playlist_id
             if st.button(
                 p["name"],
-                key=f"playlist_nav_{p['id']}",
+                key=f"nav_playlist_{p['id']}",
                 width="stretch",
-                type="primary" if p["id"] == selected_id else "secondary",
+                type="primary" if is_selected else "secondary",
             ):
-                st.session_state["playlists_selected_id"] = p["id"]
+                st.session_state["nav_kind"] = "playlist"
+                st.session_state["nav_playlist_id"] = p["id"]
                 st.rerun()
+
         st.divider()
         _render_create_playlist_form()
 
-    playlist = next(p for p in playlists if p["id"] == selected_id)
-    with detail_col:
-        _render_playlist_detail(playlist)
+    return kind, playlist_id
 
 
 def _render_create_playlist_form() -> None:
@@ -351,7 +361,8 @@ def _render_create_playlist_form() -> None:
                         st.error(f"A playlist named '{name}' already exists.")
                         return
                     conn.commit()
-                st.session_state["playlists_selected_id"] = playlist_id
+                st.session_state["nav_kind"] = "playlist"
+                st.session_state["nav_playlist_id"] = playlist_id
                 st.rerun()
 
 
@@ -529,7 +540,8 @@ def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
                 store.delete_playlist(conn, playlist_id)
                 conn.commit()
             st.session_state[confirm_key] = False
-            st.session_state.pop("playlists_selected_id", None)
+            st.session_state["nav_kind"] = "collection"
+            st.session_state["nav_playlist_id"] = None
             st.rerun()
     with col2:
         if st.button("Cancel", key=f"confirm_delete_no_{playlist_id}"):
@@ -538,12 +550,15 @@ def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
 
 
 def main() -> None:
-    """Streamlit entry point — lays out the Collection/Playlists tabs."""
-    tab1, tab2 = st.tabs(["My Discogs Collection", "Playlists"])
-    with tab1:
+    """Streamlit entry point — a sidebar (Collection + Playlists) driving the main content pane."""
+    kind, playlist_id = render_sidebar_nav()
+    if kind == "playlist" and playlist_id is not None:
+        with store.connect() as conn:
+            playlist = store.get_playlist(conn, playlist_id)
+        assert playlist is not None  # render_sidebar_nav already dropped stale/deleted ids
+        _render_playlist_detail(playlist)
+    else:
         render_collection_tab()
-    with tab2:
-        render_playlists_tab()
 
 
 main()
