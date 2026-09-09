@@ -309,6 +309,9 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_top hr {
     margin: 0 !important;
 }
+.st-key-nav_top [data-testid="stMarkdownContainer"]:has(hr) {
+    margin-bottom: 0 !important;
+}
 .st-key-nav_top button,
 .st-key-nav_playlists button {
     background-color: transparent !important;
