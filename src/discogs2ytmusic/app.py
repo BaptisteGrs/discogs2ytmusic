@@ -136,7 +136,7 @@ def render_collection_tab() -> None:
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
-        tags = st.multiselect("Style / genre", tag_options, key="collection_tags")
+        tags = st.multiselect("Style", tag_options, key="collection_tags")
     with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
     with col3:
@@ -302,6 +302,10 @@ def _playlist_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
 
 _SIDEBAR_NAV_CSS = """
 <style>
+.st-key-nav_top,
+.st-key-nav_playlists {
+    gap: 0.15rem !important;
+}
 .st-key-nav_top button,
 .st-key-nav_playlists button {
     background-color: transparent !important;
@@ -376,8 +380,6 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                 st.session_state["nav_playlist_id"] = None
                 st.rerun()
 
-            st.divider()
-
             if st.button(
                 "Playlists",
                 key="nav_playlists_toggle",
@@ -391,7 +393,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
         if expanded:
             with st.container(key="nav_playlists"):
                 if not playlists:
-                    st.caption("No playlists yet — create one below.")
+                    st.caption("No playlists yet — create one from the Collection view.")
                 for p in playlists:
                     is_selected = kind == "playlist" and p["id"] == playlist_id
                     if _nav_button(p["name"], key=f"nav_playlist_{p['id']}", selected=is_selected):
@@ -399,30 +401,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                         st.session_state["nav_playlist_id"] = p["id"]
                         st.rerun()
 
-        st.divider()
-        _render_create_playlist_form()
-
     return kind, playlist_id
-
-
-def _render_create_playlist_form() -> None:
-    with st.expander("+ New playlist"):
-        name = st.text_input("Name", key="new_empty_playlist_name")
-        if st.button("Create", key="create_empty_playlist", width="stretch"):
-            name = name.strip()
-            if not name:
-                st.error("Enter a name.")
-            else:
-                with store.connect() as conn:
-                    try:
-                        playlist_id = store.create_playlist(conn, name)
-                    except sqlite3.IntegrityError:
-                        st.error(f"A playlist named '{name}' already exists.")
-                        return
-                    conn.commit()
-                st.session_state["nav_kind"] = "playlist"
-                st.session_state["nav_playlist_id"] = playlist_id
-                st.rerun()
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
@@ -436,7 +415,7 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     title_col, actions_col = st.columns([3, 2])
     with title_col:
         st.subheader(playlist["name"])
-    with actions_col, st.container(horizontal=True, horizontal_alignment="right"):
+    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap=10):
         _render_sync_button(playlist, rows)
         _render_delete_button(playlist)
 

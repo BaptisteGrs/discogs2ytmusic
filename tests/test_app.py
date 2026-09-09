@@ -166,35 +166,6 @@ def test_sidebar_shows_empty_state_when_no_playlists_exist(isolated_cache, dummy
     assert any("No playlists yet" in c.value for c in at.sidebar.caption)
 
 
-def test_creating_an_empty_playlist_from_the_form_makes_it_selectable(isolated_cache, dummy_library):
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-
-    at = AppTest.from_file(APP_PATH).run()
-    at.text_input(key="new_empty_playlist_name").input("My Favorites").run()
-    at.button(key="create_empty_playlist").click().run()
-
-    assert not at.exception
-    with store.connect() as conn:
-        playlists = store.list_playlists(conn)
-    assert [p["name"] for p in playlists] == ["My Favorites"]
-    assert at.session_state["nav_playlist_id"] == playlists[0]["id"]
-    assert at.main.subheader[0].value == "My Favorites"
-
-
-def test_creating_a_playlist_with_a_duplicate_name_shows_an_error(isolated_cache, dummy_library):
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-        store.create_playlist(conn, "My Favorites")
-
-    at = AppTest.from_file(APP_PATH).run()
-    at.text_input(key="new_empty_playlist_name").input("My Favorites").run()
-    at.button(key="create_empty_playlist").click().run()
-
-    assert not at.exception
-    assert any("already exists" in e.value for e in at.error)
-
-
 def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
