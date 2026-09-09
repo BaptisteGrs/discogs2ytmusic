@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from getpass import getpass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -37,6 +39,23 @@ def is_authenticated() -> bool:
     return YTMUSIC_AUTH_FILE.exists()
 
 
+def _create_auth_file_privately() -> None:
+    """Create `YTMUSIC_AUTH_FILE` at 0600 if it doesn't exist yet.
+
+    `ytmusicapi.setup()` writes this file itself via a plain `open(path, "w")`, which — on
+    first creation — takes the process's default umask (typically `644`, world-readable),
+    leaving a brief window before the `chmod` below catches up. Pre-creating an *empty* file
+    at 0600 closes that window; `open(path, "w")` on an already-existing file only truncates
+    its contents, it doesn't reset permission bits. A no-op if the file already exists (a
+    re-auth), so a failed attempt here can never wipe out a working saved session.
+    """
+    try:
+        fd = os.open(YTMUSIC_AUTH_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    os.close(fd)
+
+
 def save_auth_headers(cookie: str, authuser: str) -> None:
     """Validate and persist YT Music `cookie`/`x-goog-authuser` header values.
 
@@ -56,12 +75,13 @@ def save_auth_headers(cookie: str, authuser: str) -> None:
         raise ValueError("Both 'cookie' and 'x-goog-authuser' are required.")
 
     ensure_dirs()
+    _create_auth_file_privately()
     headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}\nauthorization: {_SAPISIDHASH_MARKER}"
     try:
         setup(filepath=str(YTMUSIC_AUTH_FILE), headers_raw=headers_raw)
     except YTMusicUserError as e:
         raise YTMusicAuthError(str(e)) from e
-    YTMUSIC_AUTH_FILE.chmod(0o600)  # contains a live session cookie — owner-read/write only
+    YTMUSIC_AUTH_FILE.chmod(0o600)  # re-assert regardless — cheap, and guards future ytmusicapi changes
 
 
 def run_setup(from_file: Path | None = None) -> None:
@@ -80,8 +100,10 @@ def run_setup(from_file: Path | None = None) -> None:
         cookie, authuser = parse_headers_block(text)
     else:
         print(SETUP_INSTRUCTIONS)
-        cookie = input("cookie: ").strip()
-        authuser = input("x-goog-authuser: ").strip()
+        # getpass (not input()) so the cookie — a live Google session, not just a YT Music
+        # token — doesn't echo to the terminal or linger in scrollback/session recordings.
+        cookie = getpass("cookie: ").strip()
+        authuser = getpass("x-goog-authuser: ").strip()
 
     try:
         save_auth_headers(cookie, authuser)

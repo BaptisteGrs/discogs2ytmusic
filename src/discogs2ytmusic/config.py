@@ -50,6 +50,12 @@ class Config:
 
 
 def ensure_dirs() -> None:
-    """Create the config/cache directories if they don't exist yet."""
+    """Create the config/cache directories if they don't exist yet, private to the owner.
+
+    `CONFIG_DIR` holds credential files (`CONFIG_FILE`, `YTMUSIC_AUTH_FILE`); `mkdir`'s own
+    `mode` argument is still subject to the process umask, so a follow-up `chmod` is needed
+    to reliably land on `0700` rather than just "whatever the umask left standing".
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.chmod(0o700)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)

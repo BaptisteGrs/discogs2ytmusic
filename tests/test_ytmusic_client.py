@@ -27,6 +27,30 @@ def _fake_headers_file(tmp_path: Path, headers: dict) -> Path:
     return path
 
 
+def test_save_auth_headers_creates_the_file_owner_only_from_the_start(isolated_auth_file):
+    ytmusic_client.save_auth_headers("__Secure-3PAPISID=deadbeef; SID=fake", "0")
+
+    assert (isolated_auth_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_save_auth_headers_never_wipes_an_existing_valid_session_on_a_failed_reauth(isolated_auth_file, monkeypatch):
+    """A failed re-auth attempt (e.g. a typo'd cookie ytmusicapi rejects) must not destroy a
+    previously working saved session — `_create_auth_file_privately` only pre-creates the
+    file when it's absent, precisely so this can't happen."""
+    isolated_auth_file.write_text('{"still": "the old working session"}')
+    isolated_auth_file.chmod(0o600)
+
+    def _blow_up(*a, **k):
+        raise YTMusicUserError("nope")
+
+    monkeypatch.setattr(ytmusic_client, "setup", _blow_up)
+
+    with pytest.raises(ytmusic_client.YTMusicAuthError):
+        ytmusic_client.save_auth_headers("__Secure-3PAPISID=deadbeef; SID=fake", "0")
+
+    assert json.loads(isolated_auth_file.read_text()) == {"still": "the old working session"}
+
+
 def test_is_authenticated_reflects_whether_the_auth_file_exists(isolated_auth_file):
     assert ytmusic_client.is_authenticated() is False
     isolated_auth_file.write_text("{}")
@@ -52,6 +76,28 @@ def test_run_setup_saves_headers_ytmusicapi_accepts_as_browser_auth(tmp_path, is
 
     yt = YTMusic(str(isolated_auth_file))
     assert yt.auth_type == AuthType.BROWSER
+
+
+def test_run_setup_interactive_prompt_masks_the_cookie_via_getpass(isolated_auth_file, monkeypatch):
+    """The cookie is a live Google session, not just a YT Music token — it must not be
+    echoed to the terminal via a plain `input()` prompt (unlike, say, `x-goog-authuser`,
+    which is just a small integer but is masked too here for the same, single code path)."""
+    prompts = []
+
+    def _fake_getpass(prompt: str) -> str:
+        prompts.append(prompt)
+        return {"cookie: ": "__Secure-3PAPISID=deadbeef; SID=fake", "x-goog-authuser: ": "0"}[prompt]
+
+    def _no_input(*args, **kwargs):
+        raise AssertionError("run_setup must not fall back to input() for the cookie prompt")
+
+    monkeypatch.setattr(ytmusic_client, "getpass", _fake_getpass)
+    monkeypatch.setattr("builtins.input", _no_input)
+
+    ytmusic_client.run_setup()
+
+    assert prompts == ["cookie: ", "x-goog-authuser: "]
+    assert ytmusic_client.is_authenticated() is True
 
 
 def test_run_setup_aborts_when_cookie_or_authuser_missing(tmp_path, isolated_auth_file):
