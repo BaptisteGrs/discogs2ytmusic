@@ -83,14 +83,21 @@ def test_get_client_unauthenticated_never_touches_the_saved_auth_file(isolated_a
 
 
 class _FakePlaylistsClient:
-    """Stands in for a `YTMusic` client for `get_or_create_playlist`/`add_tracks`, with no
+    """Stands in for a `YTMusic` client for playlist create/lookup/add/remove, with no
     network calls — records what would have been sent instead of hitting a real account."""
 
-    def __init__(self, existing: list[dict] | None = None, create_result: str | dict = "new-playlist-id"):
+    def __init__(
+        self,
+        existing: list[dict] | None = None,
+        create_result: str | dict = "new-playlist-id",
+        playlist_tracks: list[dict] | None = None,
+    ):
         self.existing = existing or []
         self.create_result = create_result
+        self.playlist_tracks = playlist_tracks or []
         self.created: list[tuple[str, str]] = []
         self.added: list[tuple[str, list[str]]] = []
+        self.removed: list[tuple[str, list[dict]]] = []
 
     def get_library_playlists(self, limit: int = 200) -> list[dict]:
         return self.existing
@@ -102,13 +109,31 @@ class _FakePlaylistsClient:
     def add_playlist_items(self, playlist_id: str, video_ids: list[str], duplicates: bool = False) -> None:
         self.added.append((playlist_id, video_ids))
 
+    def get_playlist(self, playlist_id: str, limit: int | None = 100) -> dict:
+        return {"id": playlist_id, "tracks": self.playlist_tracks}
+
+    def remove_playlist_items(self, playlist_id: str, videos: list[dict]) -> None:
+        self.removed.append((playlist_id, videos))
+
+
+def test_find_playlist_returns_the_id_of_a_matching_playlist_by_name():
+    yt = _FakePlaylistsClient(existing=[{"title": "Discogs - My Favorites", "playlistId": "existing-id"}])
+
+    assert ytmusic_client.find_playlist(yt, "Discogs - My Favorites") == "existing-id"  # type: ignore[arg-type]
+
+
+def test_find_playlist_returns_none_when_no_playlist_matches():
+    yt = _FakePlaylistsClient(existing=[{"title": "Some Other Playlist", "playlistId": "other-id"}])
+
+    assert ytmusic_client.find_playlist(yt, "Discogs - My Favorites") is None  # type: ignore[arg-type]
+
 
 def test_get_or_create_playlist_reuses_an_existing_playlist_by_name():
     yt = _FakePlaylistsClient(existing=[{"title": "Discogs - My Favorites", "playlistId": "existing-id"}])
 
     result = ytmusic_client.get_or_create_playlist(yt, "Discogs - My Favorites")  # type: ignore[arg-type]
 
-    assert result == "existing-id"
+    assert result == ("existing-id", False)
     assert yt.created == []  # never called create_playlist
 
 
@@ -117,7 +142,7 @@ def test_get_or_create_playlist_creates_when_no_existing_playlist_matches():
 
     result = ytmusic_client.get_or_create_playlist(yt, "Discogs - New One", description="desc")  # type: ignore[arg-type]
 
-    assert result == "brand-new-id"
+    assert result == ("brand-new-id", True)
     assert yt.created == [("Discogs - New One", "desc")]
 
 
@@ -145,6 +170,33 @@ def test_add_tracks_is_a_noop_for_an_empty_list():
     ytmusic_client.add_tracks(yt, "playlist-id", [])  # type: ignore[arg-type]
 
     assert yt.added == []
+
+
+def test_get_playlist_tracks_returns_the_tracks_key_with_no_page_limit():
+    tracks = [{"videoId": "v1", "setVideoId": "s1"}, {"videoId": "v2", "setVideoId": "s2"}]
+    yt = _FakePlaylistsClient(playlist_tracks=tracks)
+
+    result = ytmusic_client.get_playlist_tracks(yt, "playlist-id")  # type: ignore[arg-type]
+
+    assert result == tracks
+
+
+def test_remove_tracks_chunks_large_lists_to_stay_under_the_request_size_limit():
+    yt = _FakePlaylistsClient()
+    tracks = [{"videoId": f"v{i}", "setVideoId": f"s{i}"} for i in range(120)]
+
+    ytmusic_client.remove_tracks(yt, "playlist-id", tracks)  # type: ignore[arg-type]
+
+    assert [len(chunk) for _pid, chunk in yt.removed] == [50, 50, 20]
+    assert all(pid == "playlist-id" for pid, _chunk in yt.removed)
+
+
+def test_remove_tracks_is_a_noop_for_an_empty_list():
+    yt = _FakePlaylistsClient()
+
+    ytmusic_client.remove_tracks(yt, "playlist-id", [])  # type: ignore[arg-type]
+
+    assert yt.removed == []
 
 
 def test_run_setup_raises_systemexit_when_ytmusicapi_rejects_the_headers(tmp_path, isolated_auth_file, monkeypatch):
