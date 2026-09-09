@@ -136,7 +136,7 @@ def render_collection_tab() -> None:
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
-        tags = st.multiselect("Style / genre", tag_options, key="collection_tags")
+        tags = st.multiselect("Style", tag_options, key="collection_tags")
     with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
     with col3:
@@ -300,6 +300,78 @@ def _playlist_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
     return _rows_to_dataframe(rows, flag_column="remove")
 
 
+_SIDEBAR_NAV_CSS = """
+<style>
+.st-key-nav_top,
+.st-key-nav_playlists {
+    gap: 0.15rem !important;
+}
+[data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
+    gap: 0.4rem !important;
+}
+.st-key-nav_top hr {
+    margin: 0.5rem 0 !important;
+}
+.st-key-nav_top [data-testid="stMarkdownContainer"]:has(hr) {
+    margin-bottom: 0 !important;
+}
+.st-key-nav_top button,
+.st-key-nav_playlists button {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0.2rem 0 !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    justify-content: flex-start !important;
+}
+.st-key-nav_top button > div,
+.st-key-nav_playlists button > div {
+    justify-content: flex-start !important;
+}
+.st-key-nav_top button p,
+.st-key-nav_playlists button p {
+    color: #1F1E1D;
+    text-align: left !important;
+}
+.st-key-nav_top button p {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+.st-key-nav_playlists {
+    padding-left: 0.9rem;
+}
+.st-key-nav_playlists .stButton {
+    line-height: 1.3;
+}
+.st-key-nav_playlists button {
+    padding: 0.1rem 0 !important;
+}
+.st-key-nav_playlists button p {
+    font-weight: 400;
+    font-size: 0.85rem;
+    line-height: 1.3;
+}
+.st-key-nav_top button:hover p,
+.st-key-nav_playlists button:hover p {
+    color: #CC785C;
+}
+.st-key-nav_selected button p {
+    color: #CC785C !important;
+    font-weight: 500 !important;
+}
+</style>
+"""
+
+
+def _nav_button(label: str, *, key: str, selected: bool, **button_kwargs: object) -> bool:
+    """Render a plain-text sidebar nav button, accent-colored via a scoped wrapper when selected."""
+    if selected:
+        with st.container(key="nav_selected"):
+            return st.button(label, key=key, type="tertiary", width="stretch", **button_kwargs)  # type: ignore[arg-type]
+    return st.button(label, key=key, type="tertiary", width="stretch", **button_kwargs)  # type: ignore[arg-type]
+
+
 def render_sidebar_nav() -> tuple[str, int | None]:
     """Render the sidebar: a Collection link, then a Playlists section with one button per
     curated playlist. Returns the current selection as ("collection", None) or ("playlist", id).
@@ -313,57 +385,41 @@ def render_sidebar_nav() -> tuple[str, int | None]:
     if kind != "playlist" or playlist_id not in playlist_ids:
         kind, playlist_id = "collection", None
 
-    with st.sidebar:
-        if st.button(
-            "My Discogs Collection",
-            key="nav_collection",
-            width="stretch",
-            type="primary" if kind == "collection" else "secondary",
-        ):
-            st.session_state["nav_kind"] = "collection"
-            st.session_state["nav_playlist_id"] = None
-            st.rerun()
+    expanded = st.session_state.get("nav_playlists_expanded", True)
 
-        st.divider()
-        st.caption("Playlists")
-        if not playlists:
-            st.caption("No playlists yet — create one below.")
-        for p in playlists:
-            is_selected = kind == "playlist" and p["id"] == playlist_id
-            if st.button(
-                p["name"],
-                key=f"nav_playlist_{p['id']}",
-                width="stretch",
-                type="primary" if is_selected else "secondary",
-            ):
-                st.session_state["nav_kind"] = "playlist"
-                st.session_state["nav_playlist_id"] = p["id"]
+    with st.sidebar:
+        st.markdown(_SIDEBAR_NAV_CSS, unsafe_allow_html=True)
+
+        with st.container(key="nav_top"):
+            if _nav_button("My Discogs Collection", key="nav_collection", selected=kind == "collection"):
+                st.session_state["nav_kind"] = "collection"
+                st.session_state["nav_playlist_id"] = None
                 st.rerun()
 
-        st.divider()
-        _render_create_playlist_form()
+            st.divider()
+
+            if st.button(
+                "Playlists",
+                key="nav_playlists_toggle",
+                type="tertiary",
+                width="stretch",
+                icon=":material/expand_more:" if expanded else ":material/chevron_right:",
+            ):
+                st.session_state["nav_playlists_expanded"] = not expanded
+                st.rerun()
+
+        if expanded:
+            with st.container(key="nav_playlists"):
+                if not playlists:
+                    st.caption("No playlists yet — create one from the Collection view.")
+                for p in playlists:
+                    is_selected = kind == "playlist" and p["id"] == playlist_id
+                    if _nav_button(p["name"], key=f"nav_playlist_{p['id']}", selected=is_selected):
+                        st.session_state["nav_kind"] = "playlist"
+                        st.session_state["nav_playlist_id"] = p["id"]
+                        st.rerun()
 
     return kind, playlist_id
-
-
-def _render_create_playlist_form() -> None:
-    with st.expander("+ New playlist"):
-        name = st.text_input("Name", key="new_empty_playlist_name")
-        if st.button("Create", key="create_empty_playlist", width="stretch"):
-            name = name.strip()
-            if not name:
-                st.error("Enter a name.")
-            else:
-                with store.connect() as conn:
-                    try:
-                        playlist_id = store.create_playlist(conn, name)
-                    except sqlite3.IntegrityError:
-                        st.error(f"A playlist named '{name}' already exists.")
-                        return
-                    conn.commit()
-                st.session_state["nav_kind"] = "playlist"
-                st.session_state["nav_playlist_id"] = playlist_id
-                st.rerun()
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
@@ -373,12 +429,12 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
 
     matched = sum(1 for r in rows if r.matched)
 
-    title_col, sync_col, delete_col = st.columns([3, 3, 3])
+    st.markdown(_PLAYLIST_ACTION_CSS, unsafe_allow_html=True)
+    title_col, actions_col = st.columns([3, 2])
     with title_col:
         st.subheader(playlist["name"])
-    with sync_col:
+    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
         _render_sync_button(playlist, rows)
-    with delete_col:
         _render_delete_button(playlist)
 
     if st.session_state.get(f"confirm_sync_{playlist_id}"):
@@ -461,6 +517,28 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
                 st.rerun()
 
 
+_PLAYLIST_ACTION_CSS = """
+<style>
+.st-key-sync_pill button,
+.st-key-delete_pill button {
+    border-radius: 999px !important;
+    padding: 0.3rem 0.9rem !important;
+    min-height: 0 !important;
+    font-size: 0.85rem !important;
+}
+.st-key-delete_pill button {
+    border-color: #E5E2D9 !important;
+    color: #AF3029 !important;
+}
+.st-key-delete_pill button:hover {
+    border-color: #E3B6AE !important;
+    color: #AF3029 !important;
+    background-color: #FBEEEC !important;
+}
+</style>
+"""
+
+
 def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     playlist_id = playlist["id"]
     video_ids = [r.video_id for r in rows if r.video_id]
@@ -472,9 +550,16 @@ def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     confirm_key = f"confirm_sync_{playlist_id}"
     if st.session_state.get(confirm_key):
         return
-    if st.button(f"Sync {len(video_ids)} track(s) to YT Music", key=f"sync_button_{playlist_id}", width="stretch"):
-        st.session_state[confirm_key] = True
-        st.rerun()
+    with st.container(key="sync_pill", width="content"):
+        if st.button(
+            "Sync",
+            key=f"sync_button_{playlist_id}",
+            type="primary",
+            icon=":material/sync:",
+            help=f"Push {len(video_ids)} track(s) to YT Music",
+        ):
+            st.session_state[confirm_key] = True
+            st.rerun()
 
 
 def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
@@ -524,9 +609,15 @@ def _render_delete_button(playlist: sqlite3.Row) -> None:
 
     if st.session_state.get(confirm_key):
         return
-    if st.button("Delete this playlist", key=f"delete_button_{playlist_id}", width="stretch"):
-        st.session_state[confirm_key] = True
-        st.rerun()
+    with st.container(key="delete_pill", width="content"):
+        if st.button(
+            "Delete",
+            key=f"delete_button_{playlist_id}",
+            icon=":material/delete:",
+            help="Delete this playlist",
+        ):
+            st.session_state[confirm_key] = True
+            st.rerun()
 
 
 def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
