@@ -306,8 +306,11 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_playlists {
     gap: 0.15rem !important;
 }
+[data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
+    gap: 0.4rem !important;
+}
 .st-key-nav_top hr {
-    margin: 0 !important;
+    margin: 0.5rem 0 !important;
 }
 .st-key-nav_top [data-testid="stMarkdownContainer"]:has(hr) {
     margin-bottom: 0 !important;
@@ -338,9 +341,16 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_playlists {
     padding-left: 0.9rem;
 }
+.st-key-nav_playlists .stButton {
+    line-height: 1.3;
+}
+.st-key-nav_playlists button {
+    padding: 0.1rem 0 !important;
+}
 .st-key-nav_playlists button p {
     font-weight: 400;
     font-size: 0.85rem;
+    line-height: 1.3;
 }
 .st-key-nav_top button:hover p,
 .st-key-nav_playlists button:hover p {
