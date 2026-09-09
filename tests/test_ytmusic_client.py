@@ -156,3 +156,46 @@ def test_run_setup_raises_systemexit_when_ytmusicapi_rejects_the_headers(tmp_pat
 
     with pytest.raises(SystemExit):
         ytmusic_client.run_setup(from_file=headers_file)
+
+
+def test_save_auth_headers_saves_headers_ytmusicapi_accepts_as_browser_auth(isolated_auth_file):
+    """`save_auth_headers` is the shared helper behind both `run_setup` (CLI) and the
+    Streamlit UI's auth form — same regression coverage as run_setup's version above."""
+    ytmusic_client.save_auth_headers("__Secure-3PAPISID=deadbeef; SID=fake", "0")
+
+    saved = json.loads(isolated_auth_file.read_text())
+    assert "authorization" in saved
+    assert "SAPISIDHASH" in saved["authorization"]
+
+    yt = YTMusic(str(isolated_auth_file))
+    assert yt.auth_type == AuthType.BROWSER
+
+
+def test_save_auth_headers_raises_value_error_when_a_value_is_missing(isolated_auth_file):
+    with pytest.raises(ValueError, match="required"):
+        ytmusic_client.save_auth_headers("SID=fake", "")
+
+    assert not isolated_auth_file.exists()
+
+
+def test_save_auth_headers_raises_auth_error_when_ytmusicapi_rejects_the_headers(isolated_auth_file, monkeypatch):
+    def _blow_up(*a, **k):
+        raise YTMusicUserError("nope")
+
+    monkeypatch.setattr(ytmusic_client, "setup", _blow_up)
+
+    with pytest.raises(ytmusic_client.YTMusicAuthError, match="nope"):
+        ytmusic_client.save_auth_headers("SID=fake", "0")
+
+
+def test_parse_headers_block_reads_cookie_and_authuser_from_a_full_header_dump():
+    text = "cookie: SID=fake\nx-goog-authuser: 1\nuser-agent: Mozilla/5.0\n"
+
+    cookie, authuser = ytmusic_client.parse_headers_block(text)
+
+    assert cookie == "SID=fake"
+    assert authuser == "1"
+
+
+def test_parse_headers_block_returns_empty_strings_when_keys_are_absent():
+    assert ytmusic_client.parse_headers_block("user-agent: Mozilla/5.0") == ("", "")

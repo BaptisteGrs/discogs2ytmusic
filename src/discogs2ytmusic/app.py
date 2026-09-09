@@ -419,7 +419,41 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                         st.session_state["nav_playlist_id"] = p["id"]
                         st.rerun()
 
+        st.divider()
+        _render_ytmusic_auth_section()
+
     return kind, playlist_id
+
+
+def _render_ytmusic_auth_section() -> None:
+    """Sidebar form to connect (or re-connect) a YT Music account.
+
+    Expanded by default whenever no auth headers are saved yet, collapsed but still reachable
+    for re-auth otherwise. Submits through the same `ytmusic_client.save_auth_headers` the
+    CLI's `auth ytmusic` command uses, so both write `YTMUSIC_AUTH_FILE` identically — this is
+    additive for the UI-only workflow, not a replacement for the CLI command.
+    """
+    authenticated = ytmusic_client.is_authenticated()
+    label = "YT Music: connected" if authenticated else "YT Music: not connected"
+    icon = ":material/check_circle:" if authenticated else ":material/error:"
+    with st.expander(label, icon=icon, expanded=not authenticated):
+        st.caption(ytmusic_client.SETUP_INSTRUCTIONS)
+        headers_text = st.text_area(
+            "Paste the header block (or just the 'cookie' and 'x-goog-authuser' lines)",
+            key="ytmusic_auth_headers_input",
+            height=100,
+        )
+        if st.button("Save", key="ytmusic_auth_save"):
+            cookie, authuser = ytmusic_client.parse_headers_block(headers_text)
+            try:
+                ytmusic_client.save_auth_headers(cookie, authuser)
+            except ValueError:
+                st.error("Could not find both 'cookie' and 'x-goog-authuser' values in the pasted text.")
+            except ytmusic_client.YTMusicAuthError as e:
+                st.error(f"Could not authenticate: {e}")
+            else:
+                st.success("YT Music connected.")
+                st.rerun()
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
@@ -576,7 +610,7 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
         if st.button("Yes, push to YT Music", key=f"confirm_sync_yes_{playlist_id}"):
             st.session_state[confirm_key] = False
             if not ytmusic_client.is_authenticated():
-                st.error("Not authenticated with YT Music. Run: `discogs2ytmusic auth ytmusic`")
+                st.error("Not authenticated with YT Music. Use the 'YT Music' section in the sidebar to connect.")
                 return
             playlist_name = f"Discogs - {playlist['name']}"
             try:
