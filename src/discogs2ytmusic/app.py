@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from typing import Any
 
@@ -161,6 +162,21 @@ def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
     return [int(tid) for tid in selected["track_id"]]
 
 
+def _collection_editor_key(rows: list[TrackRow]) -> str:
+    """Derive the Collection tab's `st.data_editor` key from the currently visible row set.
+
+    `st.data_editor` matches pending edits (including our "select" checkbox column) to
+    the previous render by row *position*, not row identity. Reusing one static key
+    across differently-filtered row sets lets a stale edit apply to the wrong row once
+    the filter changes what's visible, or throw once a previously-edited position no
+    longer exists in a narrower dataframe (#19). Keying on the row set's track_ids
+    forces a fresh widget — with no pending edits — whenever the visible rows change.
+    """
+    ids = ",".join(str(r.track_id) for r in rows)
+    digest = hashlib.sha1(ids.encode()).hexdigest()[:12]
+    return f"collection_editor_{digest}"
+
+
 def render_collection_tab() -> None:
     """Render the browsable/editable table of every cached track and its YouTube match."""
     st.header("My Discogs Collection")
@@ -210,9 +226,10 @@ def render_collection_tab() -> None:
     st.caption(f"{len(rows)} tracks ({sum(1 for r in rows if r.matched)} matched)")
 
     df = _rows_to_dataframe(rows, flag_column="select")
+    editor_key = _collection_editor_key(rows)
     edited_df = st.data_editor(
         df,
-        key="collection_editor",
+        key=editor_key,
         hide_index=True,
         width="stretch",
         column_order=COLLECTION_COLUMNS,
@@ -246,13 +263,13 @@ def render_collection_tab() -> None:
         st.error(message)
     if n_artist or n_video:
         st.success(f"Saved {n_artist + n_video} correction(s).")
-        del st.session_state["collection_editor"]
+        del st.session_state[editor_key]
         st.rerun()
 
-    _render_add_to_playlist(edited_df)
+    _render_add_to_playlist(edited_df, editor_key)
 
 
-def _render_add_to_playlist(edited_df: pd.DataFrame) -> None:
+def _render_add_to_playlist(edited_df: pd.DataFrame, editor_key: str) -> None:
     """Checked rows in the Collection tab's "select" column -> add to an existing or new playlist."""
     selected_ids = _selected_track_ids(edited_df, "select")
 
@@ -300,7 +317,7 @@ def _render_add_to_playlist(edited_df: pd.DataFrame) -> None:
         conn.commit()
 
     st.success(f"Added {added} track(s) to '{name}'.")
-    del st.session_state["collection_editor"]
+    del st.session_state[editor_key]
     st.rerun()
 
 

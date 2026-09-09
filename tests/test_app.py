@@ -15,6 +15,15 @@ def _select_playlist(at: AppTest, playlist_id: int) -> AppTest:
     return at.button(key=f"nav_playlist_{playlist_id}").click().run()
 
 
+def _collection_editor_df(at: AppTest) -> pd.DataFrame:
+    """The Collection tab's `st.data_editor` value.
+
+    Its widget key is derived from the currently visible row set (see #19), so tests
+    look it up by element type rather than assuming a static key.
+    """
+    return at.main.dataframe[0].value
+
+
 def _seed(conn, dummy_library):
     for r in dummy_library:
         store.upsert_release(
@@ -63,6 +72,58 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
     assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
 
 
+def test_collection_editor_key_changes_with_the_filtered_row_set(isolated_cache, dummy_library):
+    """`_collection_editor_key` (app.py) is what makes #19's crash impossible: it derives
+    the `data_editor` widget key from the row set's track_ids, so pending edit state
+    (matched by row position) can never be reconciled against a differently-filtered,
+    differently-shaped dataframe.
+    """
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic.filters import PlaylistFilter, resolve_rows
+
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        all_rows = resolve_rows(conn)
+        acid_rows = resolve_rows(conn, PlaylistFilter(tags=["Acid"]))
+        all_rows_again = resolve_rows(conn)
+
+    assert 0 < len(acid_rows) < len(all_rows)
+    assert app_module._collection_editor_key(all_rows) != app_module._collection_editor_key(acid_rows)
+    # Same row set, recomputed independently -> same key, so unrelated reruns (e.g. a
+    # widget elsewhere on the page changing) don't needlessly reset pending edits.
+    assert app_module._collection_editor_key(all_rows) == app_module._collection_editor_key(all_rows_again)
+
+
+def test_collection_editor_widget_key_is_unique_per_filter_combination(isolated_cache, dummy_library):
+    """Regression test for #19 ("selecting a label after narrowing by year+subgenre throws
+    an error"): reproduce the narrowing sequence from the bug report and confirm each step
+    renders `st.data_editor` under a distinct widget key. Streamlit matches a data_editor's
+    pending edits (including our "select" checkbox column) to the previous render by row
+    position, not row identity, so reusing one static key across these differently-filtered
+    row sets is what let a stale edit be misapplied or throw against a now-out-of-range
+    position; distinct keys per row set rule that out.
+    """
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    unfiltered_key = at.main.dataframe[0].key
+
+    at.slider(key="collection_year").set_range(1993, 2021).run()
+    assert not at.exception
+    year_key = at.main.dataframe[0].key
+
+    at.multiselect(key="collection_tags").select("Acid").run()
+    assert not at.exception
+    tag_key = at.main.dataframe[0].key
+
+    at.multiselect(key="collection_labels").select("Djax-Up-Beats").run()
+    assert not at.exception
+    label_key = at.main.dataframe[0].key
+
+    assert len({unfiltered_key, year_key, tag_key, label_key}) == 4
+
+
 def test_app_matched_only_checkbox_narrows_the_table(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -81,7 +142,7 @@ def test_app_shows_position_in_its_own_column_and_keeps_track_title_clean(isolat
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
-    df = at.get_by_key("collection_editor").value
+    df = _collection_editor_df(at)
 
     first = dummy_library[0]
     assert first["tracklist"][0]["position"] == "A"
@@ -111,7 +172,7 @@ def test_app_shows_match_confidence(isolated_cache, dummy_library):
         store.save_match(conn, manual["artist"], manual["tracklist"][0]["title"], "vid2", "Video", "manual", None)
 
     at = AppTest.from_file(APP_PATH).run()
-    df = at.get_by_key("collection_editor").value.set_index("track_artist")
+    df = _collection_editor_df(at).set_index("track_artist")
 
     assert not at.exception
     assert df.loc[fuzzy["artist"], "confidence"] == 87.0
@@ -134,7 +195,7 @@ def test_app_shows_the_matched_video_channel(isolated_cache, dummy_library):
         )
 
     at = AppTest.from_file(APP_PATH).run()
-    df = at.get_by_key("collection_editor").value.set_index("track_artist")
+    df = _collection_editor_df(at).set_index("track_artist")
 
     assert not at.exception
     assert df.loc[first["artist"], "channel"] == "Yoyaku Record Store"
@@ -147,7 +208,7 @@ def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_li
         store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "manual", None)
 
     at = AppTest.from_file(APP_PATH).run()
-    df = at.get_by_key("collection_editor").value.set_index("track_artist")
+    df = _collection_editor_df(at).set_index("track_artist")
 
     assert not at.exception
     assert bool(df.loc[first["artist"], "locked"]) is True
