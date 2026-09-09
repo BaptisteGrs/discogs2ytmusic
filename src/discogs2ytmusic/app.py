@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from typing import Any
+from typing import Any, Literal, cast
 
 import pandas as pd
 import streamlit as st
 
 from discogs2ytmusic import store, ytmusic_client
 from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
-from discogs2ytmusic.filters import PlaylistFilter, TrackRow, resolve_playlist_rows, resolve_rows
+from discogs2ytmusic.filters import BoolOp, PlaylistFilter, TagGroup, TrackRow, resolve_playlist_rows, resolve_rows
 
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
@@ -209,6 +209,80 @@ def _collection_editor_key(rows: list[TrackRow]) -> str:
     return f"collection_editor_{digest}"
 
 
+def _tag_group_ids() -> list[int]:
+    """Stable per-group ids backing the Style filter's AND/OR group builder (#20).
+
+    Groups are addressed by an ever-incrementing id, not list position, so removing
+    one group can't shift another group's widget state (its picked tags/mode) onto
+    the wrong slot.
+    """
+    if "collection_tag_group_ids" not in st.session_state:
+        st.session_state["collection_tag_group_ids"] = [0]
+        st.session_state["collection_tag_group_next_id"] = 1
+    ids: list[int] = st.session_state["collection_tag_group_ids"]
+    return ids
+
+
+def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], BoolOp]:
+    """Render the Style filter's AND/OR group builder and return the resulting groups
+    and how they combine (see `PlaylistFilter.tag_groups`/`tag_groups_mode`).
+
+    Each group gets its own tag multiselect + and/or "match" mode; "+ Add style group"
+    appends another; a group beyond the first can be removed. Multiple groups only show
+    a combinator (AND/OR between groups) once there's more than one to combine.
+    """
+    group_ids = _tag_group_ids()
+    tag_groups: list[TagGroup] = []
+    for i, gid in enumerate(group_ids):
+        label_visibility: Literal["visible", "collapsed"] = "visible" if i == 0 else "collapsed"
+        tag_col, mode_col, remove_col = st.columns([3, 1, 1])
+        with tag_col:
+            selected = st.multiselect(
+                "Style", tag_options, key=f"collection_tag_group_{gid}", label_visibility=label_visibility
+            )
+        with mode_col:
+            mode = cast(
+                BoolOp,
+                st.selectbox(
+                    "Match",
+                    options=["or", "and"],
+                    format_func=lambda m: "any of" if m == "or" else "all of",
+                    key=f"collection_tag_group_mode_{gid}",
+                    label_visibility=label_visibility,
+                ),
+            )
+        with remove_col:
+            if i == 0:
+                st.write("")  # align with the labeled widgets in this row
+            if len(group_ids) > 1 and st.button("Remove", key=f"collection_tag_group_remove_{gid}"):
+                group_ids.remove(gid)
+                st.rerun()
+        if selected:
+            tag_groups.append(TagGroup(tags=selected, mode=mode))
+
+    add_col, combinator_col = st.columns([1, 3])
+    with add_col:
+        if st.button("+ Add style group", key="collection_tag_group_add"):
+            new_id = st.session_state["collection_tag_group_next_id"]
+            st.session_state["collection_tag_group_next_id"] = new_id + 1
+            group_ids.append(new_id)
+            st.rerun()
+    tag_groups_mode: BoolOp = "or"
+    if len(group_ids) > 1:
+        with combinator_col:
+            tag_groups_mode = cast(
+                BoolOp,
+                st.radio(
+                    "Combine style groups with",
+                    options=["or", "and"],
+                    format_func=lambda m: "Match ANY group (OR)" if m == "or" else "Match ALL groups (AND)",
+                    key="collection_tag_groups_mode",
+                    horizontal=True,
+                ),
+            )
+    return tag_groups, tag_groups_mode
+
+
 def render_collection_tab() -> None:
     """Render the browsable/editable table of every cached track and its YouTube match."""
     st.header("My Discogs Collection")
@@ -223,14 +297,14 @@ def render_collection_tab() -> None:
     channel_options = _channel_options(all_rows)
     year_lo, year_hi = _year_bounds(all_rows)
 
-    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
+    tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options)
+
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
-        tags = st.multiselect("Style", tag_options, key="collection_tags")
-    with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
-    with col3:
+    with col2:
         channels = st.multiselect("Channel", channel_options, key="collection_channels")
-    with col4:
+    with col3:
         if year_lo < year_hi:
             year_range = st.slider(
                 "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key="collection_year"
@@ -238,14 +312,15 @@ def render_collection_tab() -> None:
         else:
             st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
             year_range = (year_lo, year_hi)
-    with col5:
+    with col4:
         st.write("")  # vertical alignment with the widgets above
         matched_only = st.checkbox("Matched only", key="collection_matched_only")
 
-    narrowed = bool(tags or labels or channels or matched_only or year_range != (year_lo, year_hi))
+    narrowed = bool(tag_groups or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
         PlaylistFilter(
-            tags=tags,
+            tag_groups=tag_groups,
+            tag_groups_mode=tag_groups_mode,
             labels=labels,
             year_min=year_range[0] if year_range[0] > year_lo else None,
             year_max=year_range[1] if year_range[1] < year_hi else None,

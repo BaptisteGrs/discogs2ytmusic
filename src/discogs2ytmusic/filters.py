@@ -5,26 +5,52 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from . import store
 from .discogs import release_url
+
+BoolOp = Literal["and", "or"]
+
+
+@dataclass
+class TagGroup:
+    """One AND/OR group of style/genre tags, as used by `PlaylistFilter.tag_groups`.
+
+    `tags` are matched against a release's styles OR genres (case-insensitive), same
+    as a flat tag list always was. `mode` says whether a release must carry ALL of
+    `tags` ("and") or ANY of them ("or") to satisfy this group. An empty `tags` list
+    contributes nothing (it's dropped before evaluation — see `release_matches`).
+    """
+
+    tags: list[str] = field(default_factory=list)
+    mode: BoolOp = "or"
+
+    def matches(self, release_tags: set[str]) -> bool:
+        """Whether `release_tags` (already lower-cased) satisfies this group."""
+        wanted = _norm(self.tags)
+        return wanted <= release_tags if self.mode == "and" else bool(wanted & release_tags)
 
 
 @dataclass
 class PlaylistFilter:
     """A saved playlist's selection criteria.
 
-    `tags` matches a release's styles OR genres (OR'd together, case-insensitive) —
-    e.g. tags=["Electro", "Tech House"] catches a release tagged with either, on
-    either field. `labels` matches release label names the same way. `year_min`/
-    `year_max` bound the release year (inclusive); either side may be omitted.
-    `channels` matches a track's matched YouTube uploader/channel (OR'd together);
-    like `matched_only`, it's a per-track concern with no single value on a release,
-    so it's applied in `resolve_rows` rather than `release_matches`. All given
-    criteria are AND'd together; an empty/omitted criterion is skipped.
+    `tag_groups` matches a release's styles/genres with explicit AND/OR chaining: each
+    group is internally AND'd or OR'd per its own `mode`, and the groups themselves are
+    combined by `tag_groups_mode` — e.g. two OR-mode groups combined with "and" expresses
+    `("Electro" OR "Tech House") AND ("Vinyl Only" OR "Reissue")`. A single OR-mode group
+    reproduces the old flat-list-of-tags behavior. `labels` matches release label names
+    (OR'd together, case-insensitive). `year_min`/`year_max` bound the release year
+    (inclusive); either side may be omitted. `channels` matches a track's matched
+    YouTube uploader/channel (OR'd together); like `matched_only`, it's a per-track
+    concern with no single value on a release, so it's applied in `resolve_rows` rather
+    than `release_matches`. All given criteria are AND'd together; an empty/omitted
+    criterion is skipped.
     """
 
-    tags: list[str] = field(default_factory=list)
+    tag_groups: list[TagGroup] = field(default_factory=list)
+    tag_groups_mode: BoolOp = "or"
     labels: list[str] = field(default_factory=list)
     year_min: int | None = None
     year_max: int | None = None
@@ -35,7 +61,8 @@ class PlaylistFilter:
         """Serialize to the JSON stored in `playlist_defs.filter_json`."""
         return json.dumps(
             {
-                "tags": self.tags,
+                "tag_groups": [{"tags": g.tags, "mode": g.mode} for g in self.tag_groups],
+                "tag_groups_mode": self.tag_groups_mode,
                 "labels": self.labels,
                 "year_min": self.year_min,
                 "year_max": self.year_max,
@@ -46,10 +73,23 @@ class PlaylistFilter:
 
     @classmethod
     def from_json(cls, raw: str) -> PlaylistFilter:
-        """Deserialize a `PlaylistFilter` from `playlist_defs.filter_json`."""
+        """Deserialize a `PlaylistFilter` from `playlist_defs.filter_json`.
+
+        Accepts both the current `tag_groups` shape and the flat `tags: [...]` list
+        used before #20, which is treated as a single OR group for filter_json rows
+        saved before that change.
+        """
         data = json.loads(raw)
+        if "tag_groups" in data:
+            tag_groups = [
+                TagGroup(tags=g.get("tags") or [], mode=g.get("mode") or "or") for g in data.get("tag_groups") or []
+            ]
+        else:
+            legacy_tags = data.get("tags") or []
+            tag_groups = [TagGroup(tags=legacy_tags, mode="or")] if legacy_tags else []
         return cls(
-            tags=data.get("tags") or [],
+            tag_groups=tag_groups,
+            tag_groups_mode=data.get("tag_groups_mode") or "or",
             labels=data.get("labels") or [],
             year_min=data.get("year_min"),
             year_max=data.get("year_max"),
@@ -69,9 +109,12 @@ def release_matches(release: sqlite3.Row, filt: PlaylistFilter) -> bool:
     `matched_only` is a per-track concern (a release has no single matched
     state) so it's applied separately in `resolve_rows`, not here.
     """
-    if filt.tags:
+    active_groups = [g for g in filt.tag_groups if g.tags]
+    if active_groups:
         release_tags = _norm(json.loads(release["styles"]) or []) | _norm(json.loads(release["genres"]) or [])
-        if not release_tags & _norm(filt.tags):
+        group_results = [g.matches(release_tags) for g in active_groups]
+        combined = all(group_results) if filt.tag_groups_mode == "and" else any(group_results)
+        if not combined:
             return False
     if filt.labels:
         release_labels = _norm(json.loads(release["labels"]) or [])

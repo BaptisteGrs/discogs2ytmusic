@@ -65,7 +65,7 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
-    at.multiselect(key="collection_tags").select("Acid").run()
+    at.multiselect(key="collection_tag_group_0").select("Acid").run()
 
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "Acid" in r["styles"])
@@ -80,7 +80,7 @@ def test_select_all_checkbox_label_reflects_the_current_filtered_count(isolated_
     total = sum(len(r["tracklist"]) for r in dummy_library)
     assert at.checkbox(key="collection_select_all").label == f"Select all {total} filtered track(s)"
 
-    at.multiselect(key="collection_tags").select("Acid").run()
+    at.multiselect(key="collection_tag_group_0").select("Acid").run()
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "Acid" in r["styles"])
     assert at.checkbox(key="collection_select_all").label == f"Select all {expected} filtered track(s)"
@@ -103,7 +103,7 @@ def test_checking_select_all_adds_every_filtered_track_to_a_new_playlist(isolate
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
-    at.multiselect(key="collection_tags").select("Acid").run()
+    at.multiselect(key="collection_tag_group_0").select("Acid").run()
     at.checkbox(key="collection_select_all").check().run()
     at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
     at.text_input(key="collection_new_playlist_name").input("Acid Picks").run()
@@ -124,7 +124,7 @@ def test_checking_select_all_after_narrowing_further_only_adds_the_newly_filtere
 
     at = AppTest.from_file(APP_PATH).run()
     at.checkbox(key="collection_select_all").check().run()
-    at.multiselect(key="collection_tags").select("Acid").run()  # narrow the filter with select-all already on
+    at.multiselect(key="collection_tag_group_0").select("Acid").run()  # narrow the filter with select-all already on
     at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
     at.text_input(key="collection_new_playlist_name").input("Acid Only").run()
     at.button(key="collection_add_button").click().run()
@@ -138,6 +138,82 @@ def test_checking_select_all_after_narrowing_further_only_adds_the_newly_filtere
     assert {r.track_title for r in rows} == expected_titles
 
 
+def test_app_tag_group_and_mode_requires_every_tag_in_the_group(isolated_cache, dummy_library):
+    """Every fixture release is genre-tagged "Electronic", so an AND group of
+    ["House", "Electronic"] should behave just like a plain "House" style filter."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.multiselect(key="collection_tag_group_0").select("House").select("Electronic").run()
+    at.selectbox(key="collection_tag_group_mode_0").select("and").run()
+
+    assert not at.exception
+    expected = sum(len(r["tracklist"]) for r in dummy_library if "House" in r["styles"])
+    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+
+
+def test_app_add_style_group_button_adds_a_second_independent_group(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="collection_tag_group_add").click().run()
+
+    assert not at.exception
+    assert at.multiselect(key="collection_tag_group_1") is not None
+
+    at.multiselect(key="collection_tag_group_0").select("House").run()
+    at.multiselect(key="collection_tag_group_1").select("Techno").run()
+
+    assert not at.exception
+    expected = sum(len(r["tracklist"]) for r in dummy_library if set(r["styles"]) & {"House", "Techno"})
+    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+
+
+def test_app_combining_style_groups_with_and_requires_every_group_to_match(isolated_cache, dummy_library):
+    """No single fixture release is tagged both House and Techno, so combining a House
+    group and a Techno group with AND should match nothing."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="collection_tag_group_add").click().run()
+    at.multiselect(key="collection_tag_group_0").select("House").run()
+    at.multiselect(key="collection_tag_group_1").select("Techno").run()
+    at.radio(key="collection_tag_groups_mode").set_value("and").run()
+
+    assert not at.exception
+    assert at.main.caption[0].value == "0 tracks (0 matched)"
+
+
+def test_app_removing_a_style_group_drops_its_tags_from_the_filter(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="collection_tag_group_add").click().run()
+    at.multiselect(key="collection_tag_group_0").select("House").run()
+    at.multiselect(key="collection_tag_group_1").select("Techno").run()
+    at.button(key="collection_tag_group_remove_1").click().run()
+
+    assert not at.exception
+    expected = sum(len(r["tracklist"]) for r in dummy_library if "House" in r["styles"])
+    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+    assert not any(w.key == "collection_tag_group_1" for w in at.multiselect)
+
+
+def test_app_a_single_style_group_has_no_remove_button_or_combinator(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert not any(b.key == "collection_tag_group_remove_0" for b in at.button)
+    assert not any(r.key == "collection_tag_groups_mode" for r in at.radio)
+
+
 def test_collection_editor_key_changes_with_the_filtered_row_set(isolated_cache, dummy_library):
     """`_collection_editor_key` (app.py) is what makes #19's crash impossible: it derives
     the `data_editor` widget key from the row set's track_ids, so pending edit state
@@ -145,12 +221,12 @@ def test_collection_editor_key_changes_with_the_filtered_row_set(isolated_cache,
     differently-shaped dataframe.
     """
     import discogs2ytmusic.app as app_module
-    from discogs2ytmusic.filters import PlaylistFilter, resolve_rows
+    from discogs2ytmusic.filters import PlaylistFilter, TagGroup, resolve_rows
 
     with store.connect() as conn:
         _seed(conn, dummy_library)
         all_rows = resolve_rows(conn)
-        acid_rows = resolve_rows(conn, PlaylistFilter(tags=["Acid"]))
+        acid_rows = resolve_rows(conn, PlaylistFilter(tag_groups=[TagGroup(tags=["Acid"])]))
         all_rows_again = resolve_rows(conn)
 
     assert 0 < len(acid_rows) < len(all_rows)
@@ -179,7 +255,7 @@ def test_collection_editor_widget_key_is_unique_per_filter_combination(isolated_
     assert not at.exception
     year_key = at.main.dataframe[0].key
 
-    at.multiselect(key="collection_tags").select("Acid").run()
+    at.multiselect(key="collection_tag_group_0").select("Acid").run()
     assert not at.exception
     tag_key = at.main.dataframe[0].key
 
