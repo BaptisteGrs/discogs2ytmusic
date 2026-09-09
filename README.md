@@ -220,6 +220,17 @@ make from the CLI, and a corrected row is marked **Locked** so it survives the
 next `scan --refresh`/`rematch`. Select tracks (the leading checkbox column)
 to add them straight to a new or existing playlist.
 
+Three buttons above the table cover the rest of the CLI's scan → match → push
+loop, so the whole thing is doable without leaving the app: **Scan** re-fetches
+your collection and tracklists from Discogs (`scan --refresh`); **Sync
+matches** matches any unmatched tracks against YouTube/YT Music (`sync`) —
+it only populates the match cache, it never touches a real YT Music account;
+and **Rematch** clears cached matches and re-matches everything from scratch
+(`rematch`), preserving manual corrections unless you opt in to clearing
+those too. Rematch can take a while and is destructive to the match cache, so
+it asks for confirmation first, the same as the Playlists tab's delete/push
+buttons.
+
 **Playlists** manages hand-curated playlists — unlike `push-style-playlists`'
 one-playlist-per-style-tag, you build these track by track: create a playlist
 from the sidebar's "+ New playlist" form, add tracks from the Collection view

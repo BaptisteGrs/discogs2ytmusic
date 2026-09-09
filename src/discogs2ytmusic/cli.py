@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import enum
 import json
-import re
 import sqlite3
 import subprocess
 import sys
@@ -16,7 +15,7 @@ from rich.progress import Progress
 from rich.table import Table
 from ytmusicapi import YTMusic
 
-from . import dummy_library, store, sync_engine, views, ytmusic_client
+from . import dummy_library, scan_engine, store, sync_engine, views, ytmusic_client
 from .config import Config
 from .discogs import DiscogsClient, DiscogsError
 
@@ -100,16 +99,6 @@ def _load_discogs_client() -> tuple[DiscogsClient, str]:
     return DiscogsClient(cfg.discogs_token), cfg.discogs_username
 
 
-def _clean_artist_names(names: list[str]) -> str | None:
-    """Join Discogs artist credits into one display string, stripping each name's own
-    disambiguation suffix (e.g. "Rush (2)") before joining — joining first and stripping
-    only the tail (as the release-level artist below does) would miss any but the last name."""
-    if not names:
-        return None
-    cleaned = [re.sub(r"\s*\(\d+\)$", "", n).strip() for n in names]
-    return ", ".join(n for n in cleaned if n) or None
-
-
 def _scan_dummy() -> None:
     try:
         releases = dummy_library.load_releases()
@@ -162,30 +151,7 @@ def scan(
 
         task2 = progress.add_task("Fetching tracklists...", total=len(basics))
         for item in basics:
-            info = item["basic_information"]
-            release_id = info["id"]
-            artist = ", ".join(a["name"] for a in info.get("artists", []))
-            artist = re.sub(r"\s*\(\d+\)$", "", artist)  # strip Discogs disambiguation suffixes e.g. "Rush (2)"
-            title = info.get("title", "")
-            styles = info.get("styles", []) or []
-            genres = info.get("genres", []) or []
-            year = info.get("year") or None
-            labels = [label["name"] for label in info.get("labels", []) or [] if label.get("name")]
-
-            videos = None  # None means "don't touch whatever's already cached" (see upsert_release)
-            if refresh or not store.has_tracks(conn, release_id):
-                detail = client.get_release_detail(release_id)
-                store.replace_tracks(
-                    conn,
-                    release_id,
-                    [(t.position, t.title, t.duration, _clean_artist_names(t.artists)) for t in detail.tracklist],
-                )
-                videos = [{"uri": v.uri, "title": v.title, "duration": v.duration} for v in detail.videos]
-
-            store.upsert_release(
-                conn, release_id, artist, title, styles, genres, year=year, labels=labels, videos=videos
-            )
-            conn.commit()  # commit per-release so a crash/interrupt doesn't lose earlier progress
+            scan_engine.scan_release(conn, client, item, refresh)
             progress.advance(task2)
 
     _print_style_breakdown()

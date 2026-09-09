@@ -6,8 +6,10 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from discogs2ytmusic import store, ytmusic_client
+from discogs2ytmusic import scan_engine, store, sync_engine, ytmusic_client
 from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
+from discogs2ytmusic.config import Config
+from discogs2ytmusic.discogs import DiscogsClient, DiscogsError
 from discogs2ytmusic.filters import PlaylistFilter, TrackRow, resolve_playlist_rows, resolve_rows
 
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
@@ -161,13 +163,176 @@ def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
     return [int(tid) for tid in selected["track_id"]]
 
 
+def _load_discogs_client() -> tuple[DiscogsClient, str] | None:
+    """Build a Discogs client from saved credentials, or None if `auth discogs` hasn't been run yet."""
+    cfg = Config.load()
+    if not cfg.discogs_token or not cfg.discogs_username:
+        return None
+    return DiscogsClient(cfg.discogs_token), cfg.discogs_username
+
+
+def _run_scan(refresh: bool) -> bool:
+    """Fetch the Discogs collection (+ tracklists) into the cache — the UI equivalent of
+    `scan --refresh`. Shows its own progress bar and error/success messages; the caller
+    decides whether/how to refresh the page afterward.
+
+    Returns:
+        True if the scan completed, False if it couldn't start (no Discogs credentials
+        saved, or the Discogs API call itself failed).
+    """
+    creds = _load_discogs_client()
+    if creds is None:
+        st.error("Not authenticated with Discogs. Run `discogs2ytmusic auth discogs` first.")
+        return False
+    client, username = creds
+
+    try:
+        with st.spinner("Fetching collection listing..."):
+            basics = list(client.iter_collection_basic(username))
+    except DiscogsError as e:
+        st.error(f"Could not fetch your Discogs collection: {e}")
+        return False
+
+    total = len(basics)
+    progress = st.progress(0.0, text=f"Fetching tracklists... (0/{total})")
+    with store.connect() as conn:
+        for i, item in enumerate(basics, start=1):
+            scan_engine.scan_release(conn, client, item, refresh)
+            progress.progress(i / total if total else 1.0, text=f"Fetching tracklists... ({i}/{total})")
+    progress.empty()
+
+    st.success(f"Scanned {total} release(s).")
+    return True
+
+
+def _run_sync_matches() -> bool:
+    """Match any unmatched tracks against YouTube/YT Music — the UI equivalent of `sync`.
+
+    Only populates the match cache; it never touches a real YT Music account (pushing a
+    playlist to one has its own confirm-gated button in the Playlists tab).
+
+    Returns:
+        True if matching ran (even if it matched nothing), False if there was nothing to match.
+    """
+    with store.connect() as conn:
+        releases_with_tracks = list(store.iter_releases_with_tracks(conn))
+        total = sum(len(store.effective_track_queries(r, t)) for r, t in releases_with_tracks)
+        if total == 0:
+            st.info("Nothing to match yet — scan your collection first.")
+            return False
+
+        yt = ytmusic_client.get_client(authenticated=False)
+        progress = st.progress(0.0, text=f"Matching tracks... (0/{total})")
+        done = 0
+
+        def _on_track_done() -> None:
+            nonlocal done
+            done += 1
+            progress.progress(done / total, text=f"Matching tracks... ({done}/{total})")
+
+        sync_engine.ensure_matches(conn, yt, releases_with_tracks, on_track_done=_on_track_done)
+        progress.empty()
+
+    st.success(f"Matched {total} track(s).")
+    return True
+
+
+def _run_rematch(include_manual: bool) -> bool:
+    """Clear cached matches and re-match everything from scratch — the UI equivalent of
+    `rematch`. Preserves manually-corrected matches (`matches.source == 'manual'`) unless
+    `include_manual` is set, per the manual-correction "locking" invariant in CLAUDE.md.
+
+    Returns:
+        True if it completed, False if the re-scan or re-match step couldn't run.
+    """
+    with store.connect() as conn:
+        n_cleared = store.clear_all_matches(conn, include_manual=include_manual)
+        conn.commit()
+    st.info(f"Cleared {n_cleared} cached match(es).")
+
+    if not _run_scan(refresh=True):
+        return False
+    return _run_sync_matches()
+
+
+def _render_scan_button() -> None:
+    clicked = st.button("Scan", key="scan_button", help="Re-fetch your collection and tracklists from Discogs")
+    if clicked and _run_scan(refresh=True):
+        st.session_state.pop("collection_editor", None)
+        st.rerun()
+
+
+def _render_sync_matches_button() -> None:
+    clicked = st.button(
+        "Sync matches",
+        key="sync_matches_button",
+        help="Match any unmatched tracks against YouTube/YT Music (doesn't touch your YT Music account)",
+    )
+    if clicked and _run_sync_matches():
+        st.session_state.pop("collection_editor", None)
+        st.rerun()
+
+
+def _render_rematch_button() -> None:
+    if st.session_state.get("confirm_rematch"):
+        return
+    if st.button(
+        "Rematch",
+        key="rematch_button",
+        help="Clear cached matches and re-match everything from scratch (slow; preserves manual corrections)",
+    ):
+        st.session_state["confirm_rematch"] = True
+        st.rerun()
+
+
+def _render_rematch_confirmation() -> None:
+    with store.connect() as conn:
+        n_matches = store.count_matches(conn)
+        n_manual = store.count_manual_matches(conn)
+
+    include_manual = st.checkbox("Also clear manually-corrected matches", key="rematch_include_manual")
+    n_to_clear = n_matches if include_manual else n_matches - n_manual
+
+    warning = (
+        f"This will delete {n_to_clear} cached match(es) and re-search every track from scratch, "
+        "re-fetching your Discogs collection first. This can take a while and makes a lot of "
+        "YouTube/YT Music requests. It will NOT touch your real YT Music account."
+    )
+    if not include_manual and n_manual:
+        warning += f" {n_manual} manually-corrected match(es) will be kept untouched."
+    st.warning(warning)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, rematch", key="confirm_rematch_yes"):
+            st.session_state["confirm_rematch"] = False
+            if not _run_rematch(include_manual=include_manual):
+                return
+            st.session_state.pop("collection_editor", None)
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key="confirm_rematch_no"):
+            st.session_state["confirm_rematch"] = False
+            st.rerun()
+
+
 def render_collection_tab() -> None:
     """Render the browsable/editable table of every cached track and its YouTube match."""
     st.header("My Discogs Collection")
 
+    action_col1, action_col2, action_col3 = st.columns(3)
+    with action_col1:
+        _render_scan_button()
+    with action_col2:
+        _render_sync_matches_button()
+    with action_col3:
+        _render_rematch_button()
+    if st.session_state.get("confirm_rematch"):
+        _render_rematch_confirmation()
+
     all_rows = _all_rows()
     if not all_rows:
-        st.info("No collection cached yet. Run `discogs2ytmusic scan` first.")
+        st.info("No collection cached yet. Click Scan above, or run `discogs2ytmusic scan`.")
         return
 
     tag_options = _tag_options(all_rows)

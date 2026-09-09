@@ -153,6 +153,227 @@ def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_li
     assert bool(df.loc[first["artist"], "locked"]) is True
 
 
+# --- Scan / Sync matches / Rematch buttons ---
+#
+# AppTest re-executes the whole app.py source from scratch on every `.run()`, so patching a
+# name defined directly at module level in app.py (e.g. a plain `def` there) doesn't stick —
+# the fresh exec just redefines it. What does stick is patching an attribute on an already
+# -imported module (`config.Config.load`, `discogs.DiscogsClient`, `ytmusic_client.get_client`,
+# ...): those modules are cached in sys.modules, so app.py's own fresh `import`/`from ... import`
+# lines just re-bind to the same (now-patched) objects.
+
+
+def _mock_discogs_client(monkeypatch, fake_discogs_client, username="dummyuser"):
+    """Make `Config.load()` report saved credentials and `DiscogsClient(token)` return
+    `fake_discogs_client`, so app.py's scan action runs against the offline fixture."""
+    import discogs2ytmusic.config as config_module
+    import discogs2ytmusic.discogs as discogs_module
+
+    monkeypatch.setattr(
+        config_module.Config,
+        "load",
+        classmethod(lambda cls: config_module.Config(discogs_token="test-token", discogs_username=username)),
+    )
+    monkeypatch.setattr(discogs_module, "DiscogsClient", lambda token: fake_discogs_client)
+
+
+def test_collection_tab_shows_scan_sync_and_rematch_buttons(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert at.button(key="scan_button")
+    assert at.button(key="sync_matches_button")
+    assert at.button(key="rematch_button")
+
+
+def test_empty_state_still_offers_the_scan_button(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert any("No collection cached yet" in i.value for i in at.info)
+    assert at.button(key="scan_button")
+
+
+def test_scan_button_shows_error_when_discogs_not_authenticated(isolated_cache, monkeypatch):
+    import discogs2ytmusic.config as config_module
+
+    monkeypatch.setattr(config_module.Config, "load", classmethod(lambda cls: config_module.Config(None, None)))
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="scan_button").click().run()
+
+    assert not at.exception
+    assert any("Not authenticated with Discogs" in e.value for e in at.error)
+
+
+def test_scan_button_populates_the_cache_from_discogs(isolated_cache, fake_discogs_client, monkeypatch):
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="scan_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        releases = list(store.iter_releases_with_tracks(conn))
+    assert len(releases) == 15
+    assert sum(len(tracks) for _release, tracks in releases) == 18
+
+
+def test_scan_button_never_clobbers_a_manual_artist_override(isolated_cache, fake_discogs_client, monkeypatch):
+    """Regression guard for the CLAUDE.md locking invariant: a Scan (`scan --refresh`
+    equivalent) must never wipe out a manual `search_artist` correction."""
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="scan_button").click().run()
+
+    with store.connect() as conn:
+        release_id = fake_discogs_client._releases[0]["release_id"]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release_id,)).fetchone()[0]
+        store.set_track_search_artist(conn, track_id, "My Override")
+        conn.commit()
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="scan_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+    assert track["search_artist"] == "My Override"
+
+
+def test_sync_matches_button_matches_unmatched_tracks(isolated_cache, dummy_library, monkeypatch):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic import matcher
+    from discogs2ytmusic.matcher import MatchResult
+
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        matcher, "find_match", lambda yt, artist, title: MatchResult(f"vid::{title}", title, "ytmusic", 90.0)
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="sync_matches_button").click().run()
+
+    assert not at.exception
+    total_tracks = sum(len(r["tracklist"]) for r in dummy_library)
+    with store.connect() as conn:
+        assert store.count_matches(conn) == total_tracks
+
+
+def test_sync_matches_button_with_no_collection_shows_info_and_does_nothing(isolated_cache, monkeypatch):
+    import discogs2ytmusic.app as app_module
+
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="sync_matches_button").click().run()
+
+    assert not at.exception
+    assert any("Nothing to match" in i.value for i in at.info)
+    with store.connect() as conn:
+        assert store.count_matches(conn) == 0
+
+
+def test_rematch_button_requires_confirmation(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="rematch_button").click().run()
+
+    assert not at.exception
+    assert any("This will delete" in w.value for w in at.warning)
+    with store.connect() as conn:
+        assert store.count_matches(conn) == 1  # untouched until confirmed
+
+
+def test_cancelling_rematch_leaves_matches_untouched(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="rematch_button").click().run()
+    at.button(key="confirm_rematch_no").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        assert store.count_matches(conn) == 1
+
+
+def test_confirming_rematch_clears_and_rebuilds_matches_preserving_manual_by_default(
+    isolated_cache, dummy_library, fake_discogs_client, monkeypatch
+):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        fuzzy, manual = dummy_library[0], dummy_library[1]
+        store.save_match(conn, fuzzy["artist"], fuzzy["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        store.save_match(
+            conn, manual["artist"], manual["tracklist"][0]["title"], "manually-picked", "Manual pick", "manual", None
+        )
+
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic import matcher
+    from discogs2ytmusic.matcher import MatchResult
+
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        matcher, "find_match", lambda yt, artist, title: MatchResult(f"vid::{title}", title, "ytmusic", 100.0)
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="rematch_button").click().run()
+    at.button(key="confirm_rematch_yes").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        rebuilt = store.get_match(conn, fuzzy["artist"], fuzzy["tracklist"][0]["title"])
+        kept_manual = store.get_match(conn, manual["artist"], manual["tracklist"][0]["title"])
+    assert rebuilt["video_id"] == f"vid::{fuzzy['tracklist'][0]['title']}"
+    assert kept_manual["video_id"] == "manually-picked"
+    assert kept_manual["source"] == "manual"
+
+
+def test_confirming_rematch_with_include_manual_clears_manual_corrections_too(
+    isolated_cache, dummy_library, fake_discogs_client, monkeypatch
+):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(
+            conn, first["artist"], first["tracklist"][0]["title"], "manually-picked", "Manual pick", "manual", None
+        )
+
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic import matcher
+    from discogs2ytmusic.matcher import MatchResult
+
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        matcher, "find_match", lambda yt, artist, title: MatchResult(f"vid::{title}", title, "ytmusic", 100.0)
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="rematch_button").click().run()
+    at.checkbox(key="rematch_include_manual").check().run()
+    at.button(key="confirm_rematch_yes").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        match = store.get_match(conn, first["artist"], first["tracklist"][0]["title"])
+    assert match["video_id"] != "manually-picked"
+    assert match["source"] != "manual"
+
+
 # --- Sidebar nav / Playlists ---
 
 
