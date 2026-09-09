@@ -201,6 +201,53 @@ def test_app_shows_the_matched_video_channel(isolated_cache, dummy_library):
     assert df.loc[first["artist"], "channel"] == "Yoyaku Record Store"
 
 
+def test_app_channel_filter_narrows_the_table_to_that_channel(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first, second = dummy_library[0], dummy_library[1]
+        store.save_match(
+            conn,
+            first["artist"],
+            first["tracklist"][0]["title"],
+            "vid1",
+            "Video",
+            "ytmusic",
+            90.0,
+            channel="Yoyaku Record Store",
+        )
+        store.save_match(
+            conn,
+            second["artist"],
+            second["tracklist"][0]["title"],
+            "vid2",
+            "Video",
+            "ytmusic",
+            90.0,
+            channel="Some Other Channel",
+        )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.multiselect(key="collection_channels").select("Yoyaku Record Store").run()
+
+    assert not at.exception
+    df = _collection_editor_df(at)
+    assert df["channel"].tolist() == ["Yoyaku Record Store"]
+
+
+def test_app_channel_filter_options_only_list_distinct_non_empty_channels(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(
+            conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0, channel="Yoyaku"
+        )
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert at.multiselect(key="collection_channels").options == ["Yoyaku"]
+
+
 def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)

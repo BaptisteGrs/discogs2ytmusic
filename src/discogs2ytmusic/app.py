@@ -115,6 +115,10 @@ def _label_options(rows: list[TrackRow]) -> list[str]:
     return sorted(labels)
 
 
+def _channel_options(rows: list[TrackRow]) -> list[str]:
+    return sorted({r.channel for r in rows if r.channel})
+
+
 def _year_bounds(rows: list[TrackRow]) -> tuple[int, int]:
     years = [r.year for r in rows if r.year]
     if not years:
@@ -188,14 +192,17 @@ def render_collection_tab() -> None:
 
     tag_options = _tag_options(all_rows)
     label_options = _label_options(all_rows)
+    channel_options = _channel_options(all_rows)
     year_lo, year_hi = _year_bounds(all_rows)
 
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
     with col1:
         tags = st.multiselect("Style", tag_options, key="collection_tags")
     with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
     with col3:
+        channels = st.multiselect("Channel", channel_options, key="collection_channels")
+    with col4:
         if year_lo < year_hi:
             year_range = st.slider(
                 "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key="collection_year"
@@ -203,11 +210,11 @@ def render_collection_tab() -> None:
         else:
             st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
             year_range = (year_lo, year_hi)
-    with col4:
+    with col5:
         st.write("")  # vertical alignment with the widgets above
         matched_only = st.checkbox("Matched only", key="collection_matched_only")
 
-    narrowed = bool(tags or labels or matched_only or year_range != (year_lo, year_hi))
+    narrowed = bool(tags or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
         PlaylistFilter(
             tags=tags,
@@ -215,6 +222,7 @@ def render_collection_tab() -> None:
             year_min=year_range[0] if year_range[0] > year_lo else None,
             year_max=year_range[1] if year_range[1] < year_hi else None,
             matched_only=matched_only,
+            channels=channels,
         )
         if narrowed
         else None

@@ -18,7 +18,10 @@ class PlaylistFilter:
     e.g. tags=["Electro", "Tech House"] catches a release tagged with either, on
     either field. `labels` matches release label names the same way. `year_min`/
     `year_max` bound the release year (inclusive); either side may be omitted.
-    All given criteria are AND'd together; an empty/omitted criterion is skipped.
+    `channels` matches a track's matched YouTube uploader/channel (OR'd together);
+    like `matched_only`, it's a per-track concern with no single value on a release,
+    so it's applied in `resolve_rows` rather than `release_matches`. All given
+    criteria are AND'd together; an empty/omitted criterion is skipped.
     """
 
     tags: list[str] = field(default_factory=list)
@@ -26,6 +29,7 @@ class PlaylistFilter:
     year_min: int | None = None
     year_max: int | None = None
     matched_only: bool = False
+    channels: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize to the JSON stored in `playlist_defs.filter_json`."""
@@ -36,6 +40,7 @@ class PlaylistFilter:
                 "year_min": self.year_min,
                 "year_max": self.year_max,
                 "matched_only": self.matched_only,
+                "channels": self.channels,
             }
         )
 
@@ -49,6 +54,8 @@ class PlaylistFilter:
             year_min=data.get("year_min"),
             year_max=data.get("year_max"),
             matched_only=data.get("matched_only", False),
+            # Absent for filter_json rows saved before #28 added this field.
+            channels=data.get("channels") or [],
         )
 
 
@@ -174,6 +181,8 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
                 artist_overridden.get(track_id, False),
             )
             if filt is not None and filt.matched_only and not row.video_id:
+                continue
+            if filt is not None and filt.channels and row.channel not in filt.channels:
                 continue
             rows.append(row)
     rows.sort(key=lambda r: (r.track_artist, r.track_title))

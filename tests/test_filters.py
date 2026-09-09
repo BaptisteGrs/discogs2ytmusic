@@ -29,7 +29,12 @@ def _seed(conn, dummy_library):
 
 def test_playlist_filter_json_round_trip():
     filt = filters.PlaylistFilter(
-        tags=["Electro", "Tech House"], labels=["Warp"], year_min=1990, year_max=2010, matched_only=True
+        tags=["Electro", "Tech House"],
+        labels=["Warp"],
+        year_min=1990,
+        year_max=2010,
+        matched_only=True,
+        channels=["Warp Records"],
     )
     restored = filters.PlaylistFilter.from_json(filt.to_json())
     assert restored == filt
@@ -134,6 +139,31 @@ def test_resolve_rows_label_filter(isolated_cache, dummy_library):
         rows = filters.resolve_rows(conn, filters.PlaylistFilter(labels=["Yoyaku"]))
 
     assert {r.release_id for r in rows} == {target["release_id"]}
+
+
+def test_resolve_rows_channel_filter_excludes_other_channels_and_unmatched(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first, second = dummy_library[0], dummy_library[1]
+        store.save_match(
+            conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0, channel="Yoyaku"
+        )
+        store.save_match(
+            conn,
+            second["artist"],
+            second["tracklist"][0]["title"],
+            "vid2",
+            "Video",
+            "ytmusic",
+            90.0,
+            channel="Other Uploader",
+        )
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn, filters.PlaylistFilter(channels=["Yoyaku"]))
+
+    assert len(rows) == 1
+    assert rows[0].video_id == "vid1"
 
 
 def test_resolve_rows_matched_only_excludes_unmatched_tracks(isolated_cache, dummy_library):
