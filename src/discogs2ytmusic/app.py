@@ -523,17 +523,21 @@ def _render_ytmusic_page() -> None:
         else:
             st.info("Not connected", icon=":material/link_off:")
 
-        headers_text = st.text_area(
-            "Paste the header block (or just the 'cookie' and 'x-goog-authuser' lines)",
-            key="ytmusic_auth_headers_input",
-            height=160,
+        cookie = st.text_input(
+            "cookie",
+            key="ytmusic_auth_cookie_input",
+            placeholder="__Secure-3PAPISID=…; SID=…",
+        )
+        authuser = st.text_input(
+            "x-goog-authuser",
+            key="ytmusic_auth_authuser_input",
+            placeholder="0",
         )
         if st.button("Save", key="ytmusic_auth_save"):
-            cookie, authuser = ytmusic_client.parse_headers_block(headers_text)
             try:
                 ytmusic_client.save_auth_headers(cookie, authuser)
-            except ValueError:
-                st.error("Could not find both 'cookie' and 'x-goog-authuser' values in the pasted text.")
+            except ValueError as e:
+                st.error(str(e))
             except ytmusic_client.YTMusicAuthError as e:
                 st.error(f"Could not authenticate: {e}")
             else:

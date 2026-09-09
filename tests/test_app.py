@@ -396,7 +396,8 @@ def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
     assert any("How to get your header values" in m.value for m in at.main.markdown)
     assert any("music.youtube.com" in m.value for m in at.main.markdown)
     assert at.main.info[0].value == "Not connected"
-    assert at.text_area(key="ytmusic_auth_headers_input")
+    assert at.text_input(key="ytmusic_auth_cookie_input")
+    assert at.text_input(key="ytmusic_auth_authuser_input")
     assert at.button(key="ytmusic_auth_save")
 
 
@@ -406,9 +407,8 @@ def test_ytmusic_page_form_saves_valid_headers_and_flips_status_to_connected(iso
     # success-then-rerun action in this app, so what's checked here is the resulting state.
     at = AppTest.from_file(APP_PATH).run()
     at = _open_ytmusic_page(at)
-    at.text_area(key="ytmusic_auth_headers_input").input(
-        "cookie: __Secure-3PAPISID=deadbeef; SID=fake\nx-goog-authuser: 0"
-    ).run()
+    at.text_input(key="ytmusic_auth_cookie_input").input("__Secure-3PAPISID=deadbeef; SID=fake").run()
+    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
     at.button(key="ytmusic_auth_save").click().run()
 
     assert not at.exception
@@ -422,7 +422,7 @@ def test_ytmusic_page_form_shows_error_when_values_missing(isolated_cache):
     at.button(key="ytmusic_auth_save").click().run()
 
     assert not at.exception
-    assert any("Could not find both" in e.value for e in at.error)
+    assert any("required" in e.value for e in at.error)
     assert "is-off" in _sidebar_pill(at)
 
 
@@ -436,7 +436,8 @@ def test_ytmusic_page_form_shows_error_when_ytmusicapi_rejects_headers(isolated_
 
     at = AppTest.from_file(APP_PATH).run()
     at = _open_ytmusic_page(at)
-    at.text_area(key="ytmusic_auth_headers_input").input("cookie: x\nx-goog-authuser: 0").run()
+    at.text_input(key="ytmusic_auth_cookie_input").input("x").run()
+    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
     at.button(key="ytmusic_auth_save").click().run()
 
     assert not at.exception
