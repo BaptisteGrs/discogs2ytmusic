@@ -8,12 +8,16 @@ from ytmusicapi.exceptions import YTMusicUserError
 
 from .config import YTMUSIC_AUTH_FILE, ensure_dirs
 
-SETUP_INSTRUCTIONS = (
-    "To authenticate, open music.youtube.com in your browser while logged in,\n"
-    "open DevTools > Network, click a request to a *music.youtube.com* API\n"
-    "(e.g. 'browse'), open its Headers panel, and find these two values under\n"
-    "'Request Headers': cookie, and x-goog-authuser.\n"
+SETUP_STEPS: tuple[str, ...] = (
+    "Open music.youtube.com in your browser, logged in",
+    "Open DevTools > Network",
+    "Click a request to a music.youtube.com API (e.g. 'browse')",
+    "Find 'cookie' and 'x-goog-authuser' under its Request Headers",
 )
+
+# The CLI's interactive prompt prints this as one paragraph; the Streamlit UI renders
+# SETUP_STEPS itself as a numbered list — both read from the one list of steps.
+SETUP_INSTRUCTIONS = "To authenticate:\n" + "\n".join(f"{i}. {step}" for i, step in enumerate(SETUP_STEPS, 1)) + "\n"
 
 # ytmusicapi only classifies saved headers as browser/cookie auth (as opposed to defaulting
 # to expecting an OAuth token, and raising) if an `authorization` header containing this
@@ -148,7 +152,7 @@ def get_client(authenticated: bool = True) -> YTMusic:
         if not is_authenticated():
             raise RuntimeError(
                 "Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic "
-                "(or use the 'YT Music' section in the app sidebar)."
+                "(or use the app's YT Music page)."
             )
         try:
             return YTMusic(str(YTMUSIC_AUTH_FILE))
@@ -156,7 +160,7 @@ def get_client(authenticated: bool = True) -> YTMusic:
             raise RuntimeError(
                 "Saved YT Music auth is missing or malformed (an older version of this tool could "
                 "save auth headers ytmusicapi can't use for writes). Re-run: discogs2ytmusic auth ytmusic "
-                "(or use the 'YT Music' section in the app sidebar)."
+                "(or use the app's YT Music page)."
             ) from e
     return YTMusic()
 

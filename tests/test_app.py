@@ -352,18 +352,29 @@ def test_sync_with_no_matched_tracks_shows_no_button(isolated_cache, dummy_libra
     assert any("No matched tracks" in c.value for c in at.main.caption)
 
 
-def test_ytmusic_auth_section_is_expanded_and_shows_not_connected_by_default(isolated_cache):
+def _sidebar_pill(at: AppTest) -> str:
+    """The raw markdown source of the sidebar's YT Music status pill (a <span> with
+    unsafe_allow_html, so it's read back as markdown source, not rendered HTML)."""
+    matches = [m.value for m in at.sidebar.markdown if "<span" in m.value and "yt-status-pill" in m.value]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _open_ytmusic_page(at: AppTest) -> AppTest:
+    """Click the sidebar's YT Music nav item, making the dedicated connection page active."""
+    return at.button(key="nav_ytmusic_btn").click().run()
+
+
+def test_sidebar_shows_a_not_connected_pill_by_default(isolated_cache):
     at = AppTest.from_file(APP_PATH).run()
 
     assert not at.exception
-    # st.expander with a custom `icon` is exposed via at.status, not at.expander — see
-    # streamlit.testing.v1.element_tree.Status's docstring.
-    status = at.sidebar.status[0]
-    assert status.label == "YT Music: not connected"
-    assert status.proto.expanded is True
+    pill = _sidebar_pill(at)
+    assert "is-off" in pill
+    assert "Not connected" in pill
 
 
-def test_ytmusic_auth_section_shows_connected_and_collapsed_once_authenticated(isolated_cache, monkeypatch):
+def test_sidebar_shows_a_connected_pill_once_authenticated(isolated_cache, monkeypatch):
     import discogs2ytmusic.app as app_module
 
     monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
@@ -371,35 +382,51 @@ def test_ytmusic_auth_section_shows_connected_and_collapsed_once_authenticated(i
     at = AppTest.from_file(APP_PATH).run()
 
     assert not at.exception
-    status = at.sidebar.status[0]
-    assert status.label == "YT Music: connected"
-    assert status.proto.expanded is False
+    pill = _sidebar_pill(at)
+    assert "is-connected" in pill
+    assert "Connected" in pill
 
 
-def test_ytmusic_auth_form_saves_valid_headers_and_flips_status_to_connected(isolated_cache):
+def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+
+    assert not at.exception
+    assert at.main.subheader[0].value == "YT Music"
+    assert any("How to get your header values" in m.value for m in at.main.markdown)
+    assert any("music.youtube.com" in m.value for m in at.main.markdown)
+    assert at.main.info[0].value == "Not connected"
+    assert at.text_area(key="ytmusic_auth_headers_input")
+    assert at.button(key="ytmusic_auth_save")
+
+
+def test_ytmusic_page_form_saves_valid_headers_and_flips_status_to_connected(isolated_cache):
     # The success message itself doesn't survive the st.rerun() that follows it (a fresh
     # script run has no memory of the prior run's elements) — same as every other
     # success-then-rerun action in this app, so what's checked here is the resulting state.
     at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
     at.text_area(key="ytmusic_auth_headers_input").input(
         "cookie: __Secure-3PAPISID=deadbeef; SID=fake\nx-goog-authuser: 0"
     ).run()
     at.button(key="ytmusic_auth_save").click().run()
 
     assert not at.exception
-    assert at.sidebar.status[0].label == "YT Music: connected"
+    assert at.main.success[0].value == "Connected"
+    assert "is-connected" in _sidebar_pill(at)
 
 
-def test_ytmusic_auth_form_shows_error_when_values_missing(isolated_cache):
+def test_ytmusic_page_form_shows_error_when_values_missing(isolated_cache):
     at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
     at.button(key="ytmusic_auth_save").click().run()
 
     assert not at.exception
     assert any("Could not find both" in e.value for e in at.error)
-    assert at.sidebar.status[0].label == "YT Music: not connected"
+    assert "is-off" in _sidebar_pill(at)
 
 
-def test_ytmusic_auth_form_shows_error_when_ytmusicapi_rejects_headers(isolated_cache, monkeypatch):
+def test_ytmusic_page_form_shows_error_when_ytmusicapi_rejects_headers(isolated_cache, monkeypatch):
     import discogs2ytmusic.app as app_module
 
     def _reject(cookie: str, authuser: str) -> None:
@@ -408,6 +435,7 @@ def test_ytmusic_auth_form_shows_error_when_ytmusicapi_rejects_headers(isolated_
     monkeypatch.setattr(app_module.ytmusic_client, "save_auth_headers", _reject)
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
     at.text_area(key="ytmusic_auth_headers_input").input("cookie: x\nx-goog-authuser: 0").run()
     at.button(key="ytmusic_auth_save").click().run()
 
