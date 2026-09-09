@@ -306,6 +306,9 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_playlists {
     gap: 0.15rem !important;
 }
+.st-key-nav_top hr {
+    margin: 0 !important;
+}
 .st-key-nav_top button,
 .st-key-nav_playlists button {
     background-color: transparent !important;
@@ -380,6 +383,8 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                 st.session_state["nav_playlist_id"] = None
                 st.rerun()
 
+            st.divider()
+
             if st.button(
                 "Playlists",
                 key="nav_playlists_toggle",
@@ -415,7 +420,7 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     title_col, actions_col = st.columns([3, 2])
     with title_col:
         st.subheader(playlist["name"])
-    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap=10):
+    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
         _render_sync_button(playlist, rows)
         _render_delete_button(playlist)
 
@@ -532,7 +537,7 @@ def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     confirm_key = f"confirm_sync_{playlist_id}"
     if st.session_state.get(confirm_key):
         return
-    with st.container(key="sync_pill"):
+    with st.container(key="sync_pill", width="content"):
         if st.button(
             "Sync",
             key=f"sync_button_{playlist_id}",
@@ -587,7 +592,7 @@ def _render_delete_button(playlist: sqlite3.Row) -> None:
 
     if st.session_state.get(confirm_key):
         return
-    with st.container(key="delete_pill"):
+    with st.container(key="delete_pill", width="content"):
         if st.button(
             "Delete",
             key=f"delete_button_{playlist_id}",
