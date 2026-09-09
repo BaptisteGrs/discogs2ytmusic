@@ -15,6 +15,14 @@ SETUP_INSTRUCTIONS = (
     "'Request Headers': cookie, and x-goog-authuser.\n"
 )
 
+# ytmusicapi only classifies saved headers as browser/cookie auth (as opposed to defaulting
+# to expecting an OAuth token, and raising) if an `authorization` header containing this
+# marker is already present at load time — see ytmusicapi.auth.auth_parse.determine_auth_type.
+# The actual value doesn't matter: for real requests it recomputes a fresh SAPISIDHASH from
+# the cookie/origin on every call (ytmusicapi.YTMusicBase.headers), so this placeholder is
+# never sent anywhere — it only exists to make `determine_auth_type` pick the right branch.
+_SAPISIDHASH_MARKER = "SAPISIDHASH 0_0"
+
 
 def is_authenticated() -> bool:
     """Whether `run_setup` has already saved YT Music auth headers."""
@@ -49,7 +57,7 @@ def run_setup(from_file: Path | None = None) -> None:
         )
         raise SystemExit(1)
 
-    headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}"
+    headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}\nauthorization: {_SAPISIDHASH_MARKER}"
     try:
         setup(filepath=str(YTMUSIC_AUTH_FILE), headers_raw=headers_raw)
     except YTMusicUserError as e:
@@ -105,12 +113,19 @@ def get_client(authenticated: bool = True) -> YTMusic:
             saved auth headers. If False, use an anonymous client — enough for search.
 
     Raises:
-        RuntimeError: if `authenticated` is True but `run_setup` hasn't been run yet.
+        RuntimeError: if `authenticated` is True but `run_setup` hasn't been run yet, or the
+            saved auth file predates the `_SAPISIDHASH_MARKER` fix and needs to be regenerated.
     """
     if authenticated:
         if not is_authenticated():
             raise RuntimeError("Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic")
-        return YTMusic(str(YTMUSIC_AUTH_FILE))
+        try:
+            return YTMusic(str(YTMUSIC_AUTH_FILE))
+        except YTMusicUserError as e:
+            raise RuntimeError(
+                "Saved YT Music auth is missing or malformed (an older version of this tool could "
+                "save auth headers ytmusicapi can't use for writes). Re-run: discogs2ytmusic auth ytmusic"
+            ) from e
     return YTMusic()
 
 
