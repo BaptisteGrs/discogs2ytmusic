@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
-from discogs2ytmusic import store
+from discogs2ytmusic import filters, store
 
 APP_PATH = str(Path(__file__).resolve().parents[1] / "src" / "discogs2ytmusic" / "app.py")
 
@@ -70,6 +70,72 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "Acid" in r["styles"])
     assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+
+
+def test_select_all_checkbox_label_reflects_the_current_filtered_count(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    total = sum(len(r["tracklist"]) for r in dummy_library)
+    assert at.checkbox(key="collection_select_all").label == f"Select all {total} filtered track(s)"
+
+    at.multiselect(key="collection_tags").select("Acid").run()
+    assert not at.exception
+    expected = sum(len(r["tracklist"]) for r in dummy_library if "Acid" in r["styles"])
+    assert at.checkbox(key="collection_select_all").label == f"Select all {expected} filtered track(s)"
+
+
+def test_select_all_checkbox_is_disabled_when_the_filter_matches_nothing(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.checkbox(key="collection_matched_only").check().run()  # nothing matched yet -> zero rows
+
+    assert not at.exception
+    assert at.main.caption[0].value == "0 tracks (0 matched)"
+    assert at.checkbox(key="collection_select_all").disabled is True
+
+
+def test_checking_select_all_adds_every_filtered_track_to_a_new_playlist(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.multiselect(key="collection_tags").select("Acid").run()
+    at.checkbox(key="collection_select_all").check().run()
+    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
+    at.text_input(key="collection_new_playlist_name").input("Acid Picks").run()
+    at.button(key="collection_add_button").click().run()
+
+    assert not at.exception
+    expected_titles = {t["title"] for r in dummy_library if "Acid" in r["styles"] for t in r["tracklist"]}
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Acid Picks")
+        assert playlist is not None
+        rows = filters.resolve_playlist_rows(conn, playlist["id"])
+    assert {r.track_title for r in rows} == expected_titles
+
+
+def test_checking_select_all_after_narrowing_further_only_adds_the_newly_filtered_rows(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.checkbox(key="collection_select_all").check().run()
+    at.multiselect(key="collection_tags").select("Acid").run()  # narrow the filter with select-all already on
+    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
+    at.text_input(key="collection_new_playlist_name").input("Acid Only").run()
+    at.button(key="collection_add_button").click().run()
+
+    assert not at.exception
+    expected_titles = {t["title"] for r in dummy_library if "Acid" in r["styles"] for t in r["tracklist"]}
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Acid Only")
+        assert playlist is not None
+        rows = filters.resolve_playlist_rows(conn, playlist["id"])
+    assert {r.track_title for r in rows} == expected_titles
 
 
 def test_collection_editor_key_changes_with_the_filtered_row_set(isolated_cache, dummy_library):

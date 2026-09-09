@@ -126,6 +126,29 @@ def _year_bounds(rows: list[TrackRow]) -> tuple[int, int]:
     return (min(years), max(years))
 
 
+_TRACK_ROW_COLUMNS = [
+    "track_id",
+    "match_id",
+    "release_id",
+    "track_artist",
+    "release_artist",
+    "position",
+    "track_title",
+    "release_title",
+    "styles",
+    "genres",
+    "labels",
+    "year",
+    "matched",
+    "confidence",
+    "youtube_url",
+    "video_title",
+    "channel",
+    "locked",
+    "discogs_url",
+]
+
+
 def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> pd.DataFrame:
     """`flag_column`, if given, adds a leading boolean column (default False) — used for
     a transient "select"/"remove" checkbox that doesn't correspond to any stored field."""
@@ -153,10 +176,15 @@ def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> 
         }
         for r in rows
     ]
+    columns = list(_TRACK_ROW_COLUMNS)
     if flag_column:
         for record in records:
             record[flag_column] = False
-    return pd.DataFrame(records)
+        columns.append(flag_column)
+    # Pass `columns=` explicitly so an empty row set still yields a dataframe with the
+    # expected columns (incl. `flag_column`) instead of a columnless one that crashes
+    # any code — e.g. `_selected_track_ids` — expecting them to be present.
+    return pd.DataFrame(records, columns=columns)
 
 
 def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
@@ -232,34 +260,48 @@ def render_collection_tab() -> None:
         rows = resolve_rows(conn, filt)
 
     st.caption(f"{len(rows)} tracks ({sum(1 for r in rows if r.matched)} matched)")
+    select_all = st.checkbox(
+        f"Select all {len(rows)} filtered track(s)", key="collection_select_all", disabled=not rows
+    )
 
     df = _rows_to_dataframe(rows, flag_column="select")
+    if select_all:
+        df["select"] = True
     editor_key = _collection_editor_key(rows)
+    # "Select all" overrides the per-row picks below rather than merely pre-checking them
+    # (disabling "select" while it's on), so the individual checkboxes can't be used to
+    # carve out exceptions from it — turn it off first to hand-pick a subset instead.
+    disabled_columns = [
+        "release_artist",
+        "position",
+        "track_title",
+        "release_title",
+        "discogs_url",
+        "styles",
+        "genres",
+        "labels",
+        "year",
+        "matched",
+        "confidence",
+        "video_title",
+        "channel",
+        "locked",
+    ]
+    if select_all:
+        disabled_columns.append("select")
     edited_df = st.data_editor(
         df,
         key=editor_key,
         hide_index=True,
         width="stretch",
         column_order=COLLECTION_COLUMNS,
-        disabled=[
-            "release_artist",
-            "position",
-            "track_title",
-            "release_title",
-            "discogs_url",
-            "styles",
-            "genres",
-            "labels",
-            "year",
-            "matched",
-            "confidence",
-            "video_title",
-            "channel",
-            "locked",
-        ],
+        disabled=disabled_columns,
         column_config={
             **SHARED_COLUMN_CONFIG,
-            "select": st.column_config.CheckboxColumn("", help="Select tracks to add to a playlist"),
+            "select": st.column_config.CheckboxColumn(
+                "",
+                help="All filtered tracks are selected" if select_all else "Select tracks to add to a playlist",
+            ),
         },
     )
 
@@ -274,12 +316,16 @@ def render_collection_tab() -> None:
         del st.session_state[editor_key]
         st.rerun()
 
-    _render_add_to_playlist(edited_df, editor_key)
+    if select_all:
+        selected_ids = [r.track_id for r in rows if r.track_id is not None]
+    else:
+        selected_ids = _selected_track_ids(edited_df, "select")
+    _render_add_to_playlist(selected_ids, editor_key)
 
 
-def _render_add_to_playlist(edited_df: pd.DataFrame, editor_key: str) -> None:
-    """Checked rows in the Collection tab's "select" column -> add to an existing or new playlist."""
-    selected_ids = _selected_track_ids(edited_df, "select")
+def _render_add_to_playlist(selected_ids: list[int], editor_key: str) -> None:
+    """Checked rows in the Collection tab's "select" column (or every filtered track, if
+    "select all" is on) -> add to an existing or new playlist."""
 
     with store.connect() as conn:
         playlist_names = [p["name"] for p in store.list_playlists(conn)]
