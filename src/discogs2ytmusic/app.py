@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -37,19 +38,58 @@ PLAYLIST_TRACK_COLUMNS = [
     "track_artist",
     "position",
     "track_title",
+    "labels",
+    "year",
     "matched",
     "discogs_url",
     "youtube_url",
     "channel",
     "locked",
     "release_artist",
-    "labels",
-    "year",
     "styles",
     "genres",
     "confidence",
     "video_title",
 ]
+
+# Labels/help text for columns shared across the Collection tab and both Playlist-tab tables
+# (`render_collection_tab`, `_render_playlist_detail`'s tracks table and its "Add tracks" search
+# results table) — keeps the same field looking identical everywhere it's rendered. Each call site
+# layers its own checkbox column (`select`/`remove`) and `disabled` list on top of this.
+SHARED_COLUMN_CONFIG: dict[str, Any] = {
+    "track_artist": st.column_config.TextColumn(
+        "Track Artist", help="Edit to override the artist used for this track's YouTube search"
+    ),
+    "release_artist": st.column_config.TextColumn("Release Artist(s)"),
+    "position": st.column_config.TextColumn("Position", help="Vinyl side/track position, e.g. A1"),
+    "track_title": st.column_config.TextColumn("Track Title"),
+    "release_title": st.column_config.TextColumn("Release Title"),
+    "youtube_url": st.column_config.LinkColumn(
+        "YouTube link",
+        help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
+        display_text="Open",
+    ),
+    "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
+    "matched": st.column_config.CheckboxColumn("Matched"),
+    "channel": st.column_config.TextColumn("Channel", help="Uploader/channel of the matched YouTube video"),
+    "locked": st.column_config.CheckboxColumn(
+        "Locked",
+        help=(
+            "A manual correction (artist or YouTube link) protects this row from being "
+            "overwritten by `scan --refresh` or `rematch`. Clear the correction "
+            "(`fix-artist --clear` / `correct --clear`) to unlock it."
+        ),
+    ),
+    "confidence": st.column_config.ProgressColumn(
+        "Confidence",
+        help=(
+            "Fuzzy-match score between the Discogs track and the YouTube result. Blank for manually-corrected links."
+        ),
+        min_value=0,
+        max_value=100,
+        format="%d%%",
+    ),
+}
 
 _NEW_PLAYLIST_SENTINEL = "+ Create new playlist"
 
@@ -193,40 +233,8 @@ def render_collection_tab() -> None:
             "locked",
         ],
         column_config={
+            **SHARED_COLUMN_CONFIG,
             "select": st.column_config.CheckboxColumn("", help="Select tracks to add to a playlist"),
-            "track_artist": st.column_config.TextColumn(
-                "Track Artist", help="Edit to override the artist used for this track's YouTube search"
-            ),
-            "release_artist": st.column_config.TextColumn("Release Artist(s)"),
-            "position": st.column_config.TextColumn("Position", help="Vinyl side/track position, e.g. A1"),
-            "track_title": st.column_config.TextColumn("Track Title"),
-            "release_title": st.column_config.TextColumn("Release Title"),
-            "youtube_url": st.column_config.LinkColumn(
-                "YouTube link",
-                help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
-                display_text="Open",
-            ),
-            "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
-            "matched": st.column_config.CheckboxColumn("Matched"),
-            "channel": st.column_config.TextColumn("Channel", help="Uploader/channel of the matched YouTube video"),
-            "locked": st.column_config.CheckboxColumn(
-                "Locked",
-                help=(
-                    "A manual correction (artist or YouTube link) protects this row from being "
-                    "overwritten by `scan --refresh` or `rematch`. Clear the correction "
-                    "(`fix-artist --clear` / `correct --clear`) to unlock it."
-                ),
-            ),
-            "confidence": st.column_config.ProgressColumn(
-                "Confidence",
-                help=(
-                    "Fuzzy-match score between the Discogs track and the YouTube result. "
-                    "Blank for manually-corrected links."
-                ),
-                min_value=0,
-                max_value=100,
-                format="%d%%",
-            ),
         },
     )
 
@@ -461,15 +469,8 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
             column_order=PLAYLIST_TRACK_COLUMNS,
             disabled=[c for c in PLAYLIST_TRACK_COLUMNS if c != "remove"],
             column_config={
+                **SHARED_COLUMN_CONFIG,
                 "remove": st.column_config.CheckboxColumn("", help="Select tracks to remove from this playlist"),
-                "position": st.column_config.TextColumn("Position"),
-                "release_artist": st.column_config.TextColumn("Release Artist(s)"),
-                "youtube_url": st.column_config.LinkColumn("YouTube link", display_text="Open"),
-                "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
-                "matched": st.column_config.CheckboxColumn("Matched"),
-                "channel": st.column_config.TextColumn("Channel"),
-                "locked": st.column_config.CheckboxColumn("Locked"),
-                "confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100, format="%d%%"),
             },
         )
         to_remove = _selected_track_ids(edited_df, "remove")
@@ -505,7 +506,7 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
                 width="stretch",
                 column_order=["select", "track_artist", "track_title", "release_title", "matched"],
                 disabled=["track_artist", "track_title", "release_title", "matched"],
-                column_config={"select": st.column_config.CheckboxColumn("")},
+                column_config={**SHARED_COLUMN_CONFIG, "select": st.column_config.CheckboxColumn("")},
             )
             to_add = _selected_track_ids(edited_search_df, "select")
             if st.button(f"Add {len(to_add)} selected", key=f"add_from_search_{playlist_id}", disabled=not to_add):
