@@ -76,20 +76,23 @@ def auth_discogs(
 
 @auth_app.command("ytmusic")
 def auth_ytmusic(
-    from_file: Path | None = typer.Option(
+    client_id: str | None = typer.Option(
         None,
-        "--from-file",
-        exists=True,
-        dir_okay=False,
-        help="Read 'cookie' and 'x-goog-authuser' from a text file instead of an interactive prompt "
-        "(a file with lines like 'cookie: ...' and 'x-goog-authuser: 0').",
+        "--client-id",
+        help="OAuth client ID from your own Google Cloud project (see README). Only needed the "
+        "first time, or to switch clients — omit to reuse the one already saved.",
+    ),
+    client_secret: str | None = typer.Option(
+        None,
+        "--client-secret",
+        help="OAuth client secret matching --client-id.",
     ),
 ) -> None:
-    """Link your YT Music account (two values copied from a browser DevTools request).
+    """Link your YT Music account via Google's OAuth device-code sign-in.
 
-    Also available in the Streamlit app's sidebar, for a UI-only workflow.
+    Also available in the Streamlit app's YT Music page, for a UI-only workflow.
     """
-    ytmusic_client.run_setup(from_file=from_file)
+    ytmusic_client.run_setup(client_id=client_id, client_secret=client_secret)
 
 
 def _load_discogs_client() -> tuple[DiscogsClient, str]:

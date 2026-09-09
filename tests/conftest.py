@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from discogs2ytmusic import config as config_module
 from discogs2ytmusic import store as store_module
 from discogs2ytmusic import ytmusic_client as ytmusic_client_module
 from discogs2ytmusic.discogs import DiscogsVideo, ReleaseDetail, Track
@@ -71,10 +72,13 @@ def fake_discogs_client(dummy_library) -> FakeDiscogsClient:
 
 @pytest.fixture
 def isolated_cache(tmp_path, monkeypatch):
-    """Redirect the app's sqlite cache and YT Music auth file to temp paths so tests never
-    touch real local state (including whatever's saved on the machine running the tests)."""
+    """Redirect the app's sqlite cache, YT Music auth file, and saved config (Discogs token,
+    YT Music OAuth client id/secret) to temp paths so tests never touch real local state
+    (including whatever's saved on the machine running the tests)."""
     cache_db = tmp_path / "cache.sqlite3"
     monkeypatch.setattr(store_module, "CACHE_DB", cache_db)
     monkeypatch.setattr(ytmusic_client_module, "YTMUSIC_AUTH_FILE", tmp_path / "ytmusic_auth.json")
     monkeypatch.setattr(ytmusic_client_module, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
     return cache_db

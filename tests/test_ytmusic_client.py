@@ -1,75 +1,132 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
-from ytmusicapi import YTMusic
 from ytmusicapi.auth.types import AuthType
-from ytmusicapi.exceptions import YTMusicUserError
 
+from discogs2ytmusic import config as config_module
 from discogs2ytmusic import ytmusic_client
 
 
 @pytest.fixture
 def isolated_auth_file(tmp_path, monkeypatch):
-    """Redirect the saved-auth-headers path to a temp file, and no-op `ensure_dirs`
-    so `run_setup` never touches the real OS config/cache directories in a test."""
+    """Redirect the saved auth file and config (holding the OAuth client id/secret) to temp
+    paths, so tests never touch the real OS config/cache directories."""
     auth_file = tmp_path / "ytmusic_auth.json"
     monkeypatch.setattr(ytmusic_client, "YTMUSIC_AUTH_FILE", auth_file)
     monkeypatch.setattr(ytmusic_client, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
     return auth_file
 
 
-def _fake_headers_file(tmp_path: Path, headers: dict) -> Path:
-    path = tmp_path / "pasted_headers.txt"
-    path.write_text("\n".join(f"{k}: {v}" for k, v in headers.items()))
-    return path
+def _fake_token(**overrides: object) -> dict:
+    token = {
+        "scope": "https://www.googleapis.com/auth/youtube",
+        "token_type": "Bearer",
+        "access_token": "fake-access",
+        "refresh_token": "fake-refresh",
+        "expires_at": 9999999999,
+        "expires_in": 3600,
+    }
+    token.update(overrides)
+    return token
 
 
-def test_is_authenticated_reflects_whether_the_auth_file_exists(isolated_auth_file):
+def test_is_authenticated_is_false_when_no_file_exists(isolated_auth_file):
     assert ytmusic_client.is_authenticated() is False
-    isolated_auth_file.write_text("{}")
+
+
+def test_is_authenticated_is_false_for_a_leftover_pre_oauth_cookie_file(isolated_auth_file):
+    """A file saved by the old cookie-based auth this replaced (cookie + x-goog-authuser,
+    no OAuth token fields) must not read as "connected" — it needs a fresh OAuth sign-in."""
+    isolated_auth_file.write_text(json.dumps({"cookie": "SID=fake", "x-goog-authuser": "0"}))
+
+    assert ytmusic_client.is_authenticated() is False
+
+
+def test_is_authenticated_is_true_for_a_complete_oauth_token(isolated_auth_file):
+    isolated_auth_file.write_text(json.dumps(_fake_token()))
+
     assert ytmusic_client.is_authenticated() is True
 
 
-def test_run_setup_saves_headers_ytmusicapi_accepts_as_browser_auth(tmp_path, isolated_auth_file):
-    """Regression test for the "Sync to YT Music doesn't work" bug (#15): a saved auth file
-    with only cookie + x-goog-authuser (no `authorization`) makes ytmusicapi's
-    `determine_auth_type` fall through to expecting an OAuth token, so `YTMusic(path)` raises
-    immediately — before any request is even sent. `run_setup` must inject a marker so the
-    saved file is recognized as browser/cookie auth instead."""
-    headers_file = _fake_headers_file(
-        tmp_path,
-        {"cookie": "__Secure-3PAPISID=deadbeef; SID=fake", "x-goog-authuser": "0"},
+def test_save_and_load_oauth_client_round_trips(isolated_auth_file):
+    assert ytmusic_client.load_oauth_client() is None
+
+    ytmusic_client.save_oauth_client("cid", "secret")
+
+    assert ytmusic_client.load_oauth_client() == ("cid", "secret")
+
+
+def test_save_oauth_client_raises_value_error_when_a_value_is_missing(isolated_auth_file):
+    with pytest.raises(ValueError, match="required"):
+        ytmusic_client.save_oauth_client("cid", "")
+
+    assert ytmusic_client.load_oauth_client() is None
+
+
+def test_begin_oauth_flow_returns_a_device_code(isolated_auth_file, monkeypatch):
+    def _get_code(self):
+        return {"verification_url": "https://google.com/device", "user_code": "ABC-123", "device_code": "opaque"}
+
+    monkeypatch.setattr(ytmusic_client.OAuthCredentials, "get_code", _get_code)
+
+    code = ytmusic_client.begin_oauth_flow("cid", "secret")
+
+    assert code == ytmusic_client.DeviceCode(
+        verification_url="https://google.com/device", user_code="ABC-123", device_code="opaque"
     )
 
-    ytmusic_client.run_setup(from_file=headers_file)
+
+def test_begin_oauth_flow_wraps_a_bad_client_error(isolated_auth_file, monkeypatch):
+    from ytmusicapi.auth.oauth.exceptions import BadOAuthClient
+
+    def _get_code(self):
+        raise BadOAuthClient("bad client")
+
+    monkeypatch.setattr(ytmusic_client.OAuthCredentials, "get_code", _get_code)
+
+    with pytest.raises(ytmusic_client.YTMusicAuthError, match="bad client"):
+        ytmusic_client.begin_oauth_flow("cid", "secret")
+
+
+def test_complete_oauth_flow_saves_a_token_ytmusicapi_accepts_as_oauth_auth(isolated_auth_file, monkeypatch):
+    def _token_from_code(self, device_code):
+        assert device_code == "opaque"
+        return _fake_token()
+
+    monkeypatch.setattr(ytmusic_client.OAuthCredentials, "token_from_code", _token_from_code)
+
+    ytmusic_client.complete_oauth_flow("cid", "secret", "opaque")
 
     saved = json.loads(isolated_auth_file.read_text())
-    assert "authorization" in saved
-    assert "SAPISIDHASH" in saved["authorization"]
-
-    yt = YTMusic(str(isolated_auth_file))
-    assert yt.auth_type == AuthType.BROWSER
+    assert saved["access_token"] == "fake-access"
+    assert saved["refresh_token"] == "fake-refresh"
+    assert ytmusic_client.is_authenticated() is True
 
 
-def test_run_setup_aborts_when_cookie_or_authuser_missing(tmp_path, isolated_auth_file):
-    headers_file = _fake_headers_file(tmp_path, {"cookie": "SID=fake"})  # no x-goog-authuser
+def test_complete_oauth_flow_raises_a_clear_error_when_sign_in_is_not_finished_yet(isolated_auth_file, monkeypatch):
+    def _token_from_code(self, device_code):
+        return {"error": "authorization_pending"}
 
-    with pytest.raises(SystemExit):
-        ytmusic_client.run_setup(from_file=headers_file)
+    monkeypatch.setattr(ytmusic_client.OAuthCredentials, "token_from_code", _token_from_code)
+
+    with pytest.raises(ytmusic_client.YTMusicAuthError, match="Not finished yet"):
+        ytmusic_client.complete_oauth_flow("cid", "secret", "opaque")
 
     assert not isolated_auth_file.exists()
 
 
-def test_get_client_wraps_a_stale_pre_fix_auth_file_in_a_clear_error(isolated_auth_file):
-    """An auth file saved before the `_SAPISIDHASH_MARKER` fix (cookie + x-goog-authuser only,
-    no `authorization`) must fail with an actionable message, not a raw ytmusicapi traceback."""
-    isolated_auth_file.write_text(json.dumps({"cookie": "SID=fake", "x-goog-authuser": "0"}))
+def test_complete_oauth_flow_raises_on_other_device_flow_errors(isolated_auth_file, monkeypatch):
+    def _token_from_code(self, device_code):
+        return {"error": "expired_token"}
 
-    with pytest.raises(RuntimeError, match="Re-run"):
-        ytmusic_client.get_client(authenticated=True)
+    monkeypatch.setattr(ytmusic_client.OAuthCredentials, "token_from_code", _token_from_code)
+
+    with pytest.raises(ytmusic_client.YTMusicAuthError, match="expired_token"):
+        ytmusic_client.complete_oauth_flow("cid", "secret", "opaque")
 
 
 def test_get_client_requires_setup_first(isolated_auth_file):
@@ -77,9 +134,38 @@ def test_get_client_requires_setup_first(isolated_auth_file):
         ytmusic_client.get_client(authenticated=True)
 
 
+def test_get_client_requires_the_oauth_client_id_and_secret_too(isolated_auth_file):
+    """A token file can exist without a saved client id/secret (e.g. copied from another
+    machine) — refreshing it needs both, so this must fail with an actionable message rather
+    than an opaque error from deep inside ytmusicapi."""
+    isolated_auth_file.write_text(json.dumps(_fake_token()))
+
+    with pytest.raises(RuntimeError, match="missing its OAuth client"):
+        ytmusic_client.get_client(authenticated=True)
+
+
 def test_get_client_unauthenticated_never_touches_the_saved_auth_file(isolated_auth_file):
     yt = ytmusic_client.get_client(authenticated=False)
     assert yt.auth_type == AuthType.UNAUTHORIZED
+
+
+def test_get_client_builds_an_authenticated_oauth_client(isolated_auth_file):
+    isolated_auth_file.write_text(json.dumps(_fake_token()))
+    ytmusic_client.save_oauth_client("cid", "secret")
+
+    yt = ytmusic_client.get_client(authenticated=True)
+
+    assert yt.auth_type == AuthType.OAUTH_CUSTOM_CLIENT
+
+
+def test_get_client_resecures_the_auth_file_even_if_permissions_had_drifted(isolated_auth_file):
+    isolated_auth_file.write_text(json.dumps(_fake_token()))
+    isolated_auth_file.chmod(0o644)
+    ytmusic_client.save_oauth_client("cid", "secret")
+
+    ytmusic_client.get_client(authenticated=True)
+
+    assert (isolated_auth_file.stat().st_mode & 0o777) == 0o600
 
 
 class _FakePlaylistsClient:
@@ -145,57 +231,3 @@ def test_add_tracks_is_a_noop_for_an_empty_list():
     ytmusic_client.add_tracks(yt, "playlist-id", [])  # type: ignore[arg-type]
 
     assert yt.added == []
-
-
-def test_run_setup_raises_systemexit_when_ytmusicapi_rejects_the_headers(tmp_path, isolated_auth_file, monkeypatch):
-    def _blow_up(*a, **k):
-        raise YTMusicUserError("nope")
-
-    monkeypatch.setattr(ytmusic_client, "setup", _blow_up)
-    headers_file = _fake_headers_file(tmp_path, {"cookie": "__Secure-3PAPISID=deadbeef", "x-goog-authuser": "0"})
-
-    with pytest.raises(SystemExit):
-        ytmusic_client.run_setup(from_file=headers_file)
-
-
-def test_save_auth_headers_saves_headers_ytmusicapi_accepts_as_browser_auth(isolated_auth_file):
-    """`save_auth_headers` is the shared helper behind both `run_setup` (CLI) and the
-    Streamlit UI's auth form — same regression coverage as run_setup's version above."""
-    ytmusic_client.save_auth_headers("__Secure-3PAPISID=deadbeef; SID=fake", "0")
-
-    saved = json.loads(isolated_auth_file.read_text())
-    assert "authorization" in saved
-    assert "SAPISIDHASH" in saved["authorization"]
-
-    yt = YTMusic(str(isolated_auth_file))
-    assert yt.auth_type == AuthType.BROWSER
-
-
-def test_save_auth_headers_raises_value_error_when_a_value_is_missing(isolated_auth_file):
-    with pytest.raises(ValueError, match="required"):
-        ytmusic_client.save_auth_headers("SID=fake", "")
-
-    assert not isolated_auth_file.exists()
-
-
-def test_save_auth_headers_raises_auth_error_when_ytmusicapi_rejects_the_headers(isolated_auth_file, monkeypatch):
-    def _blow_up(*a, **k):
-        raise YTMusicUserError("nope")
-
-    monkeypatch.setattr(ytmusic_client, "setup", _blow_up)
-
-    with pytest.raises(ytmusic_client.YTMusicAuthError, match="nope"):
-        ytmusic_client.save_auth_headers("SID=fake", "0")
-
-
-def test_parse_headers_block_reads_cookie_and_authuser_from_a_full_header_dump():
-    text = "cookie: SID=fake\nx-goog-authuser: 1\nuser-agent: Mozilla/5.0\n"
-
-    cookie, authuser = ytmusic_client.parse_headers_block(text)
-
-    assert cookie == "SID=fake"
-    assert authuser == "1"
-
-
-def test_parse_headers_block_returns_empty_strings_when_keys_are_absent():
-    assert ytmusic_client.parse_headers_block("user-agent: Mozilla/5.0") == ("", "")

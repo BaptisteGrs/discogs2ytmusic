@@ -34,33 +34,31 @@ uv run discogs2ytmusic auth discogs --token YOUR_TOKEN
 
 ### 2. Connect YouTube Music
 
-No Google Cloud project needed — this reuses your logged-in browser session
-by pulling two values out of a request YT Music's own web app already makes:
+Authenticates via Google's OAuth device-code flow, scoped to YouTube only —
+not a copy of your whole browser session. It needs an OAuth client from your
+own (free) Google Cloud project, created once:
 
-1. Open https://music.youtube.com in your browser and make sure you're logged in.
-2. Open DevTools → **Network** tab.
-3. Click any request to `music.youtube.com` in the list (e.g. reload the page,
-   then click the request named `browse`).
-4. In its **Headers** panel, scroll to **Request Headers** and find the rows
-   for `cookie` (a long string of `name=value;` pairs) and `x-goog-authuser`
-   (usually just `0`).
-5. Run the command below and paste each value when prompted:
+1. Go to https://console.cloud.google.com and create a project (or reuse one
+   you already have).
+2. **APIs & Services → Library**: enable the **YouTube Data API v3**.
+3. **APIs & Services → Credentials → Create Credentials → OAuth client ID**,
+   type **TVs and Limited Input devices**.
+4. Copy the resulting **Client ID** and **Client Secret**.
 
 ```bash
 uv run discogs2ytmusic auth ytmusic
 ```
 
-Pasting a long cookie value into a terminal prompt can be fiddly. Instead you
-can save the two values to a text file and point the command at it:
+The command prints a URL and a short code; open the URL, sign in, and enter
+the code there, then press Enter back in the terminal. `--client-id`/
+`--client-secret` are only needed the first time (or to switch accounts) —
+later re-auths (e.g. after revoking access at
+https://myaccount.google.com/permissions) just need the bare command again.
 
-```
-cookie: SID=...; HSID=...; ...
-x-goog-authuser: 0
-```
-
-```bash
-uv run discogs2ytmusic auth ytmusic --from-file /path/to/that/file.txt
-```
+Since this is a personal-use OAuth client, Google shows an "unverified app"
+warning on the consent screen — that's expected, not a sign anything's
+broken; click through it. It's also capped at 100 linked Google accounts,
+which won't matter unless you're sharing one client across many users.
 
 The file is only read once during setup — delete it afterwards (the tool
 will remind you to).

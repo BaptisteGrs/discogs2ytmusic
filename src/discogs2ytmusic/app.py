@@ -509,12 +509,13 @@ def _render_ytmusic_nav_item(selected: bool) -> None:
 def _render_ytmusic_page() -> None:
     """Dedicated page to connect (or re-connect) a YT Music account.
 
-    A two-column guide: the DevTools steps on the left, connection status and the
-    paste-headers form on the right — so nothing scrolls out of view while copying values
-    back and forth between this page and the browser's DevTools panel. Submits through the
-    same `ytmusic_client.save_auth_headers` the CLI's `auth ytmusic` command uses, so both
-    write `YTMUSIC_AUTH_FILE` identically — this page is additive for the UI-only workflow,
-    not a replacement for the CLI command.
+    A two-column guide: the Google Cloud Console steps on the left, connection status and
+    the OAuth device-code flow on the right — so nothing scrolls out of view while copying
+    values back and forth. Drives the same `ytmusic_client.begin_oauth_flow`/
+    `complete_oauth_flow` the CLI's `auth ytmusic` command uses, split across two button
+    clicks (rather than the CLI's blocking `input()`) since a Streamlit rerun can't pause
+    mid-flow — the pending device code is kept in `st.session_state` between them. This page
+    is additive for the UI-only workflow, not a replacement for the CLI command.
     """
     st.subheader("YT Music")
     st.caption("Connect your account so matched tracks can sync to real playlists.")
@@ -522,8 +523,8 @@ def _render_ytmusic_page() -> None:
     left, right = st.columns([1, 1], gap="large")
 
     with left:
-        st.markdown("**How to get your header values**")
-        st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ytmusic_client.SETUP_STEPS, 1)))
+        st.markdown("**How to get your OAuth client**")
+        st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ytmusic_client.OAUTH_SETUP_STEPS, 1)))
 
     with right:
         if ytmusic_client.is_authenticated():
@@ -531,26 +532,51 @@ def _render_ytmusic_page() -> None:
         else:
             st.info("Not connected", icon=":material/link_off:")
 
-        cookie = st.text_input(
-            "cookie",
-            key="ytmusic_auth_cookie_input",
-            placeholder="__Secure-3PAPISID=…; SID=…",
-        )
-        authuser = st.text_input(
-            "x-goog-authuser",
-            key="ytmusic_auth_authuser_input",
-            placeholder="0",
-        )
-        if st.button("Save", key="ytmusic_auth_save"):
-            try:
-                ytmusic_client.save_auth_headers(cookie, authuser)
-            except ValueError as e:
-                st.error(str(e))
-            except ytmusic_client.YTMusicAuthError as e:
-                st.error(f"Could not authenticate: {e}")
-            else:
-                st.success("YT Music connected.")
-                st.rerun()
+        pending: ytmusic_client.DeviceCode | None = st.session_state.get("ytmusic_device_code")
+
+        if pending is None:
+            saved_client = ytmusic_client.load_oauth_client()
+            client_id = st.text_input(
+                "Client ID",
+                key="ytmusic_client_id_input",
+                value=saved_client[0] if saved_client else "",
+            )
+            client_secret = st.text_input(
+                "Client secret",
+                key="ytmusic_client_secret_input",
+                type="password",
+                value=saved_client[1] if saved_client else "",
+            )
+            if st.button("Connect", key="ytmusic_connect"):
+                try:
+                    ytmusic_client.save_oauth_client(client_id, client_secret)
+                    code = ytmusic_client.begin_oauth_flow(client_id, client_secret)
+                except (ValueError, ytmusic_client.YTMusicAuthError) as e:
+                    st.error(str(e))
+                else:
+                    st.session_state["ytmusic_device_code"] = code
+                    st.rerun()
+        else:
+            st.markdown(f"1. Open **[{pending.verification_url}]({pending.verification_url})**")
+            st.markdown(f"2. Enter this code: **`{pending.user_code}`**")
+            st.markdown("3. Finish signing in there, then come back and confirm below.")
+            confirm, cancel = st.columns(2)
+            with confirm:
+                if st.button("I've signed in", key="ytmusic_complete", type="primary"):
+                    saved_client = ytmusic_client.load_oauth_client()
+                    assert saved_client is not None, "saved by the Connect step above"
+                    try:
+                        ytmusic_client.complete_oauth_flow(*saved_client, pending.device_code)
+                    except ytmusic_client.YTMusicAuthError as e:
+                        st.error(str(e))
+                    else:
+                        del st.session_state["ytmusic_device_code"]
+                        st.success("YT Music connected.")
+                        st.rerun()
+            with cancel:
+                if st.button("Cancel", key="ytmusic_cancel"):
+                    del st.session_state["ytmusic_device_code"]
+                    st.rerun()
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:

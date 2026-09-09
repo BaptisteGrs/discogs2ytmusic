@@ -393,52 +393,127 @@ def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
 
     assert not at.exception
     assert at.main.subheader[0].value == "YT Music"
-    assert any("How to get your header values" in m.value for m in at.main.markdown)
-    assert any("music.youtube.com" in m.value for m in at.main.markdown)
+    assert any("How to get your OAuth client" in m.value for m in at.main.markdown)
+    assert any("console.cloud.google.com" in m.value for m in at.main.markdown)
     assert at.main.info[0].value == "Not connected"
-    assert at.text_input(key="ytmusic_auth_cookie_input")
-    assert at.text_input(key="ytmusic_auth_authuser_input")
-    assert at.button(key="ytmusic_auth_save")
+    assert at.text_input(key="ytmusic_client_id_input")
+    assert at.text_input(key="ytmusic_client_secret_input")
+    assert at.button(key="ytmusic_connect")
 
 
-def test_ytmusic_page_form_saves_valid_headers_and_flips_status_to_connected(isolated_cache):
+def test_ytmusic_page_connect_shows_the_device_code_step(isolated_cache, monkeypatch):
+    import discogs2ytmusic.app as app_module
+
+    device_code = app_module.ytmusic_client.DeviceCode(
+        verification_url="https://google.com/device", user_code="ABC-123", device_code="opaque"
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "begin_oauth_flow", lambda cid, secret: device_code)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.text_input(key="ytmusic_client_id_input").input("cid").run()
+    at.text_input(key="ytmusic_client_secret_input").input("secret").run()
+    at = at.button(key="ytmusic_connect").click().run()
+
+    assert not at.exception
+    assert any("ABC-123" in m.value for m in at.main.markdown)
+    assert any("https://google.com/device" in m.value for m in at.main.markdown)
+    assert at.button(key="ytmusic_complete")
+    assert "is-off" in _sidebar_pill(at)
+
+
+def test_ytmusic_page_connect_shows_error_when_google_rejects_the_client(isolated_cache, monkeypatch):
+    import discogs2ytmusic.app as app_module
+
+    def _reject(client_id: str, client_secret: str) -> app_module.ytmusic_client.DeviceCode:
+        raise app_module.ytmusic_client.YTMusicAuthError("nope")
+
+    monkeypatch.setattr(app_module.ytmusic_client, "begin_oauth_flow", _reject)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.text_input(key="ytmusic_client_id_input").input("cid").run()
+    at.text_input(key="ytmusic_client_secret_input").input("secret").run()
+    at = at.button(key="ytmusic_connect").click().run()
+
+    assert not at.exception
+    assert any("nope" in e.value for e in at.error)
+    assert "is-off" in _sidebar_pill(at)
+
+
+def test_ytmusic_page_confirming_sign_in_flips_status_to_connected(isolated_cache, monkeypatch):
     # The success message itself doesn't survive the st.rerun() that follows it (a fresh
     # script run has no memory of the prior run's elements) — same as every other
     # success-then-rerun action in this app, so what's checked here is the resulting state.
+    import discogs2ytmusic.app as app_module
+
+    device_code = app_module.ytmusic_client.DeviceCode(
+        verification_url="https://google.com/device", user_code="ABC-123", device_code="opaque"
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "begin_oauth_flow", lambda cid, secret: device_code)
+    completed = []
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "complete_oauth_flow",
+        lambda cid, secret, code: (
+            completed.append(code) or app_module.ytmusic_client.YTMUSIC_AUTH_FILE.write_text("{}")
+        ),
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: bool(completed))
+
     at = AppTest.from_file(APP_PATH).run()
     at = _open_ytmusic_page(at)
-    at.text_input(key="ytmusic_auth_cookie_input").input("__Secure-3PAPISID=deadbeef; SID=fake").run()
-    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
-    at.button(key="ytmusic_auth_save").click().run()
+    at.text_input(key="ytmusic_client_id_input").input("cid").run()
+    at.text_input(key="ytmusic_client_secret_input").input("secret").run()
+    at = at.button(key="ytmusic_connect").click().run()
+    at = at.button(key="ytmusic_complete").click().run()
 
     assert not at.exception
+    assert completed == ["opaque"]
     assert at.main.success[0].value == "Connected"
     assert "is-connected" in _sidebar_pill(at)
 
 
-def test_ytmusic_page_form_shows_error_when_values_missing(isolated_cache):
+def test_ytmusic_page_confirming_sign_in_before_finishing_shows_error(isolated_cache, monkeypatch):
+    import discogs2ytmusic.app as app_module
+
+    device_code = app_module.ytmusic_client.DeviceCode(
+        verification_url="https://google.com/device", user_code="ABC-123", device_code="opaque"
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "begin_oauth_flow", lambda cid, secret: device_code)
+
+    def _pending(cid: str, secret: str, code: str) -> None:
+        raise app_module.ytmusic_client.YTMusicAuthError("Not finished yet")
+
+    monkeypatch.setattr(app_module.ytmusic_client, "complete_oauth_flow", _pending)
+
     at = AppTest.from_file(APP_PATH).run()
     at = _open_ytmusic_page(at)
-    at.button(key="ytmusic_auth_save").click().run()
+    at.text_input(key="ytmusic_client_id_input").input("cid").run()
+    at.text_input(key="ytmusic_client_secret_input").input("secret").run()
+    at = at.button(key="ytmusic_connect").click().run()
+    at = at.button(key="ytmusic_complete").click().run()
 
     assert not at.exception
-    assert any("required" in e.value for e in at.error)
+    assert any("Not finished yet" in e.value for e in at.error)
     assert "is-off" in _sidebar_pill(at)
 
 
-def test_ytmusic_page_form_shows_error_when_ytmusicapi_rejects_headers(isolated_cache, monkeypatch):
+def test_ytmusic_page_cancel_returns_to_the_client_form(isolated_cache, monkeypatch):
     import discogs2ytmusic.app as app_module
 
-    def _reject(cookie: str, authuser: str) -> None:
-        raise app_module.ytmusic_client.YTMusicAuthError("nope")
-
-    monkeypatch.setattr(app_module.ytmusic_client, "save_auth_headers", _reject)
+    device_code = app_module.ytmusic_client.DeviceCode(
+        verification_url="https://google.com/device", user_code="ABC-123", device_code="opaque"
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "begin_oauth_flow", lambda cid, secret: device_code)
 
     at = AppTest.from_file(APP_PATH).run()
     at = _open_ytmusic_page(at)
-    at.text_input(key="ytmusic_auth_cookie_input").input("x").run()
-    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
-    at.button(key="ytmusic_auth_save").click().run()
+    at.text_input(key="ytmusic_client_id_input").input("cid").run()
+    at.text_input(key="ytmusic_client_secret_input").input("secret").run()
+    at = at.button(key="ytmusic_connect").click().run()
+    at = at.button(key="ytmusic_cancel").click().run()
 
     assert not at.exception
-    assert any("Could not authenticate: nope" in e.value for e in at.error)
+    assert at.text_input(key="ytmusic_client_id_input")
+    assert at.button(key="ytmusic_connect")

@@ -1,126 +1,181 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
+from dataclasses import dataclass
+from getpass import getpass
 from urllib.parse import parse_qs, urlparse
 
-from ytmusicapi import YTMusic, setup
-from ytmusicapi.exceptions import YTMusicUserError
+from ytmusicapi import OAuthCredentials, YTMusic
+from ytmusicapi.auth.oauth import OAuthToken
+from ytmusicapi.auth.oauth.exceptions import BadOAuthClient, UnauthorizedOAuthClient
+from ytmusicapi.auth.oauth.token import Token
+from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
 
-from .config import YTMUSIC_AUTH_FILE, ensure_dirs
+from .config import YTMUSIC_AUTH_FILE, Config, ensure_dirs, write_private_file
 
-SETUP_STEPS: tuple[str, ...] = (
-    "Open music.youtube.com in your browser, logged in",
-    "Open DevTools > Network",
-    "Click a request to a music.youtube.com API (e.g. 'browse')",
-    "Find 'cookie' and 'x-goog-authuser' under its Request Headers",
+OAUTH_SETUP_STEPS: tuple[str, ...] = (
+    "Go to console.cloud.google.com and create a project (or reuse one you already have)",
+    "APIs & Services > Library: enable the 'YouTube Data API v3'",
+    "APIs & Services > Credentials > Create Credentials > OAuth client ID, type 'TVs and Limited Input devices'",
+    "Copy the resulting Client ID and Client Secret",
 )
 
 # The CLI's interactive prompt prints this as one paragraph; the Streamlit UI renders
-# SETUP_STEPS itself as a numbered list — both read from the one list of steps.
-SETUP_INSTRUCTIONS = "To authenticate:\n" + "\n".join(f"{i}. {step}" for i, step in enumerate(SETUP_STEPS, 1)) + "\n"
-
-# ytmusicapi only classifies saved headers as browser/cookie auth (as opposed to defaulting
-# to expecting an OAuth token, and raising) if an `authorization` header containing this
-# marker is already present at load time — see ytmusicapi.auth.auth_parse.determine_auth_type.
-# The actual value doesn't matter: for real requests it recomputes a fresh SAPISIDHASH from
-# the cookie/origin on every call (ytmusicapi.YTMusicBase.headers), so this placeholder is
-# never sent anywhere — it only exists to make `determine_auth_type` pick the right branch.
-_SAPISIDHASH_MARKER = "SAPISIDHASH 0_0"
+# OAUTH_SETUP_STEPS itself as a numbered list — both read from the one list of steps.
+OAUTH_SETUP_INSTRUCTIONS = (
+    "To authenticate:\n" + "\n".join(f"{i}. {step}" for i, step in enumerate(OAUTH_SETUP_STEPS, 1)) + "\n"
+)
 
 
 class YTMusicAuthError(Exception):
-    """Raised when ytmusicapi rejects the cookie/x-goog-authuser headers being saved."""
+    """Raised when Google rejects an OAuth client, device code, or sign-in attempt."""
+
+
+@dataclass(frozen=True)
+class DeviceCode:
+    """A pending device-code sign-in: show `verification_url`/`user_code` to the user.
+
+    `device_code` is opaque (not shown to the user) — hand it back to `complete_oauth_flow`
+    once they've confirmed access in their browser.
+    """
+
+    verification_url: str
+    user_code: str
+    device_code: str
 
 
 def is_authenticated() -> bool:
-    """Whether YT Music auth headers have already been saved."""
-    return YTMUSIC_AUTH_FILE.exists()
+    """Whether a complete OAuth token has already been saved.
+
+    Checks the file actually holds every field an OAuth token needs (rather than just
+    existing), so a leftover file from the old cookie-based auth this replaced doesn't
+    read as "connected".
+    """
+    if not YTMUSIC_AUTH_FILE.exists():
+        return False
+    try:
+        data = json.loads(YTMUSIC_AUTH_FILE.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and all(key in data for key in Token.members())
 
 
-def save_auth_headers(cookie: str, authuser: str) -> None:
-    """Validate and persist YT Music `cookie`/`x-goog-authuser` header values.
+def save_oauth_client(client_id: str, client_secret: str) -> None:
+    """Persist the user's own Google OAuth client id/secret.
 
-    Shared by the CLI's `auth ytmusic` command and the Streamlit UI's auth form so both
-    write `YTMUSIC_AUTH_FILE` the same way, including the `_SAPISIDHASH_MARKER` needed for
-    ytmusicapi to recognize the saved file as browser/cookie auth (see the comment above).
-
-    Args:
-        cookie: The `cookie` request header value copied from a music.youtube.com request.
-        authuser: The `x-goog-authuser` request header value copied from the same request.
+    These identify the Google Cloud project the user created for this tool (see
+    `OAUTH_SETUP_STEPS`) — they're needed on every `get_client()` call, not just at initial
+    setup, because refreshing an expiring access token requires them.
 
     Raises:
         ValueError: if either value is empty.
-        YTMusicAuthError: if ytmusicapi rejects the resulting headers.
     """
-    if not cookie or not authuser:
-        raise ValueError("Both 'cookie' and 'x-goog-authuser' are required.")
+    if not client_id or not client_secret:
+        raise ValueError("Both 'client_id' and 'client_secret' are required.")
+    cfg = Config.load()
+    cfg.ytmusic_oauth_client_id = client_id
+    cfg.ytmusic_oauth_client_secret = client_secret
+    cfg.save()
 
-    ensure_dirs()
-    headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}\nauthorization: {_SAPISIDHASH_MARKER}"
+
+def load_oauth_client() -> tuple[str, str] | None:
+    """Return the saved `(client_id, client_secret)`, or None if none has been saved yet."""
+    cfg = Config.load()
+    if not cfg.ytmusic_oauth_client_id or not cfg.ytmusic_oauth_client_secret:
+        return None
+    return cfg.ytmusic_oauth_client_id, cfg.ytmusic_oauth_client_secret
+
+
+def begin_oauth_flow(client_id: str, client_secret: str) -> DeviceCode:
+    """Start the OAuth device-code flow: request a code for the user to confirm in a browser.
+
+    Raises:
+        YTMusicAuthError: if `client_id`/`client_secret` are rejected or the request fails.
+    """
+    credentials = OAuthCredentials(client_id, client_secret)
     try:
-        setup(filepath=str(YTMUSIC_AUTH_FILE), headers_raw=headers_raw)
-    except YTMusicUserError as e:
+        code = credentials.get_code()
+    except (BadOAuthClient, UnauthorizedOAuthClient, YTMusicServerError) as e:
         raise YTMusicAuthError(str(e)) from e
-    YTMUSIC_AUTH_FILE.chmod(0o600)  # contains a live session cookie — owner-read/write only
+    return DeviceCode(
+        verification_url=code["verification_url"],
+        user_code=code["user_code"],
+        device_code=code["device_code"],
+    )
 
 
-def run_setup(from_file: Path | None = None) -> None:
-    """One-time CLI setup: provide just the two request-header values that matter.
+def complete_oauth_flow(client_id: str, client_secret: str, device_code: str) -> None:
+    """Finish the device-code flow after the user has confirmed access in their browser.
 
-    ytmusicapi's own setup wants a full raw header block pasted in, but only
-    `cookie` and `x-goog-authuser` are actually required (everything else it
-    fills in with sane defaults) — so we only need those two, which is a much
-    smaller/easier thing to copy out of DevTools. They can be typed at an
-    interactive prompt, or read from a file (handy since pasting a long
-    cookie value into a terminal prompt is fiddly). The Streamlit UI offers
-    an equivalent form backed by the same `save_auth_headers`.
+    Raises:
+        YTMusicAuthError: if the user hasn't finished signing in yet (retry after they have),
+            the code expired, access was denied, or the request otherwise failed.
     """
-    if from_file is not None:
-        text = from_file.read_text()
-        cookie, authuser = parse_headers_block(text)
+    ensure_dirs()
+    credentials = OAuthCredentials(client_id, client_secret)
+    try:
+        raw = credentials.token_from_code(device_code)
+    except (BadOAuthClient, UnauthorizedOAuthClient, YTMusicServerError) as e:
+        raise YTMusicAuthError(str(e)) from e
+
+    error = raw.get("error")
+    if error == "authorization_pending":
+        raise YTMusicAuthError("Not finished yet — complete sign-in in the browser tab, then try again.")
+    if error:
+        raise YTMusicAuthError(f"Google rejected the sign-in: {error}")
+
+    token = OAuthToken(
+        scope=raw["scope"],
+        token_type=raw["token_type"],
+        access_token=raw["access_token"],
+        refresh_token=raw["refresh_token"],
+        expires_in=raw.get("refresh_token_expires_in", raw["expires_in"]),
+    )
+    token.update(raw)  # sets expires_at from expires_in relative to now
+    write_private_file(YTMUSIC_AUTH_FILE, token.as_json())
+
+
+def run_setup(client_id: str | None = None, client_secret: str | None = None) -> None:
+    """One-time (or repeat) CLI device-code sign-in.
+
+    `client_id`/`client_secret` identify the user's own Google Cloud OAuth client (see
+    `OAUTH_SETUP_STEPS`); once saved they're reused on subsequent calls so re-authenticating
+    (e.g. after revoking access at https://myaccount.google.com/permissions) only needs
+    `discogs2ytmusic auth ytmusic` with no arguments. The Streamlit UI offers an equivalent
+    flow, split across two button clicks (`begin_oauth_flow`/`complete_oauth_flow`) since it
+    can't block on terminal input like this can.
+    """
+    if client_id and client_secret:
+        save_oauth_client(client_id, client_secret)
     else:
-        print(SETUP_INSTRUCTIONS)
-        cookie = input("cookie: ").strip()
-        authuser = input("x-goog-authuser: ").strip()
+        saved = load_oauth_client()
+        if saved is None:
+            print(OAUTH_SETUP_INSTRUCTIONS)
+            client_id = input("client_id: ").strip()
+            client_secret = getpass("client_secret: ").strip()
+            if not client_id or not client_secret:
+                print("Both 'client_id' and 'client_secret' are required — aborting.")
+                raise SystemExit(1)
+            save_oauth_client(client_id, client_secret)
+        else:
+            client_id, client_secret = saved
 
     try:
-        save_auth_headers(cookie, authuser)
-    except ValueError as e:
-        print(
-            "Could not find both 'cookie' and 'x-goog-authuser' values"
-            + (f" in {from_file}" if from_file else "")
-            + " — aborting."
-        )
+        code = begin_oauth_flow(client_id, client_secret)
+    except YTMusicAuthError as e:
+        print(f"Could not start sign-in: {e}")
         raise SystemExit(1) from e
+
+    print(f"Go to {code.verification_url} and enter this code: {code.user_code}")
+    input("Press Enter once you've finished signing in there (Ctrl-C to abort)...")
+
+    try:
+        complete_oauth_flow(client_id, client_secret, code.device_code)
     except YTMusicAuthError as e:
         print(f"Could not authenticate: {e}")
         raise SystemExit(1) from e
 
     print(f"Saved YT Music auth to {YTMUSIC_AUTH_FILE}")
-    if from_file is not None:
-        print(f"You can now delete {from_file} — its contents were only needed for this one-time setup.")
-
-
-def parse_headers_block(text: str) -> tuple[str, str]:
-    """Pull cookie/x-goog-authuser values out of pasted header text.
-
-    Accepts either just the two lines we ask for (`cookie: ...` and
-    `x-goog-authuser: ...`), or a full raw header block copy-pasted from
-    DevTools — only those two keys are read, everything else is ignored.
-    """
-    cookie = ""
-    authuser = ""
-    for line in text.splitlines():
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        key = key.strip().lower()
-        value = value.strip()
-        if key == "cookie":
-            cookie = value
-        elif key == "x-goog-authuser":
-            authuser = value
-    return cookie, authuser
 
 
 def parse_video_id(value: str) -> str:
@@ -137,41 +192,64 @@ def parse_video_id(value: str) -> str:
     return video_id
 
 
+def _secure_auth_file() -> None:
+    """Re-apply owner-only permissions to the saved auth file.
+
+    `ytmusicapi`'s `RefreshingToken` silently rewrites this file (via plain `open(path, "w")`,
+    no chmod) whenever it refreshes an expiring access token — which can happen on any
+    authenticated request, not just at `get_client()`. Called after every operation that
+    might trigger that, so a refresh never leaves the file world-readable for longer than
+    the gap until the next call here.
+    """
+    if YTMUSIC_AUTH_FILE.exists():
+        YTMUSIC_AUTH_FILE.chmod(0o600)
+
+
 def get_client(authenticated: bool = True) -> YTMusic:
     """Build a YTMusic client.
 
     Args:
         authenticated: If True (needed to create/modify playlists), require and use the
-            saved auth headers. If False, use an anonymous client — enough for search.
+            saved OAuth token. If False, use an anonymous client — enough for search.
 
     Raises:
-        RuntimeError: if `authenticated` is True but `run_setup` hasn't been run yet, or the
-            saved auth file predates the `_SAPISIDHASH_MARKER` fix and needs to be regenerated.
+        RuntimeError: if `authenticated` is True but no OAuth token/client is saved yet, or
+            the saved token is missing/malformed and needs to be regenerated.
     """
-    if authenticated:
-        if not is_authenticated():
-            raise RuntimeError(
-                "Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic "
-                "(or use the app's YT Music page)."
-            )
-        try:
-            return YTMusic(str(YTMUSIC_AUTH_FILE))
-        except YTMusicUserError as e:
-            raise RuntimeError(
-                "Saved YT Music auth is missing or malformed (an older version of this tool could "
-                "save auth headers ytmusicapi can't use for writes). Re-run: discogs2ytmusic auth ytmusic "
-                "(or use the app's YT Music page)."
-            ) from e
-    return YTMusic()
+    if not authenticated:
+        return YTMusic()
+
+    if not is_authenticated():
+        raise RuntimeError(
+            "Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic (or use the app's YT Music page)."
+        )
+    client = load_oauth_client()
+    if client is None:
+        raise RuntimeError(
+            "Saved YT Music token is missing its OAuth client id/secret. Re-run: "
+            "discogs2ytmusic auth ytmusic (or use the app's YT Music page)."
+        )
+    client_id, client_secret = client
+    try:
+        yt = YTMusic(str(YTMUSIC_AUTH_FILE), oauth_credentials=OAuthCredentials(client_id, client_secret))
+    except YTMusicUserError as e:
+        raise RuntimeError(
+            "Saved YT Music auth is missing or malformed. Re-run: discogs2ytmusic auth ytmusic "
+            "(or use the app's YT Music page)."
+        ) from e
+    _secure_auth_file()
+    return yt
 
 
 def get_or_create_playlist(yt: YTMusic, name: str, description: str = "") -> str:
     """Return the id of the existing playlist named `name`, creating it if none exists."""
     existing = yt.get_library_playlists(limit=200)
+    _secure_auth_file()
     for pl in existing:
         if pl.get("title") == name:
             return pl["playlistId"]
     result = yt.create_playlist(name, description)
+    _secure_auth_file()
     if not isinstance(result, str):
         # ytmusicapi returns an error dict here instead of raising, on failure.
         raise RuntimeError(f"Failed to create playlist {name!r}: {result}")
@@ -188,3 +266,4 @@ def add_tracks(yt: YTMusic, playlist_id: str, video_ids: list[str]) -> None:
     for i in range(0, len(video_ids), CHUNK):
         chunk = video_ids[i : i + CHUNK]
         yt.add_playlist_items(playlist_id, chunk, duplicates=False)
+        _secure_auth_file()
