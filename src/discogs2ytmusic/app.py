@@ -368,16 +368,74 @@ _SIDEBAR_NAV_CSS = """
     color: #CC785C !important;
     font-weight: 500 !important;
 }
+.st-key-nav_ytmusic {
+    align-items: center !important;
+}
+.st-key-nav_ytmusic button {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0.2rem 0 !important;
+    min-height: 0 !important;
+    justify-content: flex-start !important;
+}
+.st-key-nav_ytmusic button > div {
+    justify-content: flex-start !important;
+}
+.st-key-nav_ytmusic button p {
+    color: #1F1E1D;
+    text-align: left !important;
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+.st-key-nav_ytmusic button:hover p {
+    color: #CC785C;
+}
+.yt-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 0.1rem 0.55rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.yt-status-pill::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+.yt-status-pill.is-connected {
+    background: #E9F3EC;
+    border: 1px solid #BFDCC7;
+    color: #2F6D42;
+}
+.yt-status-pill.is-connected::before {
+    background: #3A8451;
+}
+.yt-status-pill.is-off {
+    background: #FFFFFF;
+    border: 1px solid #E5E2D9;
+    color: #87837A;
+}
+.yt-status-pill.is-off::before {
+    background: transparent;
+    border: 1.4px solid #87837A;
+    width: 4px;
+    height: 4px;
+}
 </style>
 """
 
 
-def _nav_button(label: str, *, key: str, selected: bool, **button_kwargs: object) -> bool:
+def _nav_button(label: str, *, key: str, selected: bool, width: str = "stretch", **button_kwargs: object) -> bool:
     """Render a plain-text sidebar nav button, accent-colored via a scoped wrapper when selected."""
     if selected:
         with st.container(key="nav_selected"):
-            return st.button(label, key=key, type="tertiary", width="stretch", **button_kwargs)  # type: ignore[arg-type]
-    return st.button(label, key=key, type="tertiary", width="stretch", **button_kwargs)  # type: ignore[arg-type]
+            return st.button(label, key=key, type="tertiary", width=width, **button_kwargs)  # type: ignore[arg-type]
+    return st.button(label, key=key, type="tertiary", width=width, **button_kwargs)  # type: ignore[arg-type]
 
 
 def render_sidebar_nav() -> tuple[str, int | None]:
@@ -390,7 +448,8 @@ def render_sidebar_nav() -> tuple[str, int | None]:
 
     kind = st.session_state.get("nav_kind", "collection")
     playlist_id = st.session_state.get("nav_playlist_id")
-    if kind != "playlist" or playlist_id not in playlist_ids:
+    stale_playlist = kind == "playlist" and playlist_id not in playlist_ids
+    if stale_playlist or kind not in ("collection", "playlist", "ytmusic"):
         kind, playlist_id = "collection", None
 
     expanded = st.session_state.get("nav_playlists_expanded", True)
@@ -427,7 +486,71 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                         st.session_state["nav_playlist_id"] = p["id"]
                         st.rerun()
 
+        st.divider()
+        _render_ytmusic_nav_item(kind == "ytmusic")
+
     return kind, playlist_id
+
+
+def _render_ytmusic_nav_item(selected: bool) -> None:
+    """Sidebar nav row linking to the dedicated YT Music page, with a status pill showing
+    whether an account is currently connected."""
+    authenticated = ytmusic_client.is_authenticated()
+    with st.container(key="nav_ytmusic", horizontal=True, gap="small"):
+        if _nav_button("YT Music", key="nav_ytmusic_btn", selected=selected, width="content"):
+            st.session_state["nav_kind"] = "ytmusic"
+            st.session_state["nav_playlist_id"] = None
+            st.rerun()
+        pill_class = "is-connected" if authenticated else "is-off"
+        pill_text = "Connected" if authenticated else "Not connected"
+        st.markdown(f'<span class="yt-status-pill {pill_class}">{pill_text}</span>', unsafe_allow_html=True)
+
+
+def _render_ytmusic_page() -> None:
+    """Dedicated page to connect (or re-connect) a YT Music account.
+
+    A two-column guide: the DevTools steps on the left, connection status and the
+    paste-headers form on the right — so nothing scrolls out of view while copying values
+    back and forth between this page and the browser's DevTools panel. Submits through the
+    same `ytmusic_client.save_auth_headers` the CLI's `auth ytmusic` command uses, so both
+    write `YTMUSIC_AUTH_FILE` identically — this page is additive for the UI-only workflow,
+    not a replacement for the CLI command.
+    """
+    st.subheader("YT Music")
+    st.caption("Connect your account so matched tracks can sync to real playlists.")
+
+    left, right = st.columns([1, 1], gap="large")
+
+    with left:
+        st.markdown("**How to get your header values**")
+        st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ytmusic_client.SETUP_STEPS, 1)))
+
+    with right:
+        if ytmusic_client.is_authenticated():
+            st.success("Connected", icon=":material/check_circle:")
+        else:
+            st.info("Not connected", icon=":material/link_off:")
+
+        cookie = st.text_input(
+            "cookie",
+            key="ytmusic_auth_cookie_input",
+            placeholder="__Secure-3PAPISID=…; SID=…",
+        )
+        authuser = st.text_input(
+            "x-goog-authuser",
+            key="ytmusic_auth_authuser_input",
+            placeholder="0",
+        )
+        if st.button("Save", key="ytmusic_auth_save"):
+            try:
+                ytmusic_client.save_auth_headers(cookie, authuser)
+            except ValueError as e:
+                st.error(str(e))
+            except ytmusic_client.YTMusicAuthError as e:
+                st.error(f"Could not authenticate: {e}")
+            else:
+                st.success("YT Music connected.")
+                st.rerun()
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
@@ -577,7 +700,7 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
         if st.button("Yes, push to YT Music", key=f"confirm_sync_yes_{playlist_id}"):
             st.session_state[confirm_key] = False
             if not ytmusic_client.is_authenticated():
-                st.error("Not authenticated with YT Music. Run: `discogs2ytmusic auth ytmusic`")
+                st.error("Not authenticated with YT Music. Use the YT Music page (in the sidebar) to connect.")
                 return
             playlist_name = f"Discogs - {playlist['name']}"
             try:
@@ -653,6 +776,8 @@ def main() -> None:
             playlist = store.get_playlist(conn, playlist_id)
         assert playlist is not None  # render_sidebar_nav already dropped stale/deleted ids
         _render_playlist_detail(playlist)
+    elif kind == "ytmusic":
+        _render_ytmusic_page()
     else:
         render_collection_tab()
 

@@ -8,12 +8,16 @@ from ytmusicapi.exceptions import YTMusicUserError
 
 from .config import YTMUSIC_AUTH_FILE, ensure_dirs
 
-SETUP_INSTRUCTIONS = (
-    "To authenticate, open music.youtube.com in your browser while logged in,\n"
-    "open DevTools > Network, click a request to a *music.youtube.com* API\n"
-    "(e.g. 'browse'), open its Headers panel, and find these two values under\n"
-    "'Request Headers': cookie, and x-goog-authuser.\n"
+SETUP_STEPS: tuple[str, ...] = (
+    "Open music.youtube.com in your browser, logged in",
+    "Open DevTools > Network",
+    "Click a request to a music.youtube.com API (e.g. 'browse')",
+    "Find 'cookie' and 'x-goog-authuser' under its Request Headers",
 )
+
+# The CLI's interactive prompt prints this as one paragraph; the Streamlit UI renders
+# SETUP_STEPS itself as a numbered list — both read from the one list of steps.
+SETUP_INSTRUCTIONS = "To authenticate:\n" + "\n".join(f"{i}. {step}" for i, step in enumerate(SETUP_STEPS, 1)) + "\n"
 
 # ytmusicapi only classifies saved headers as browser/cookie auth (as opposed to defaulting
 # to expecting an OAuth token, and raising) if an `authorization` header containing this
@@ -24,53 +28,81 @@ SETUP_INSTRUCTIONS = (
 _SAPISIDHASH_MARKER = "SAPISIDHASH 0_0"
 
 
+class YTMusicAuthError(Exception):
+    """Raised when ytmusicapi rejects the cookie/x-goog-authuser headers being saved."""
+
+
 def is_authenticated() -> bool:
-    """Whether `run_setup` has already saved YT Music auth headers."""
+    """Whether YT Music auth headers have already been saved."""
     return YTMUSIC_AUTH_FILE.exists()
 
 
+def save_auth_headers(cookie: str, authuser: str) -> None:
+    """Validate and persist YT Music `cookie`/`x-goog-authuser` header values.
+
+    Shared by the CLI's `auth ytmusic` command and the Streamlit UI's auth form so both
+    write `YTMUSIC_AUTH_FILE` the same way, including the `_SAPISIDHASH_MARKER` needed for
+    ytmusicapi to recognize the saved file as browser/cookie auth (see the comment above).
+
+    Args:
+        cookie: The `cookie` request header value copied from a music.youtube.com request.
+        authuser: The `x-goog-authuser` request header value copied from the same request.
+
+    Raises:
+        ValueError: if either value is empty.
+        YTMusicAuthError: if ytmusicapi rejects the resulting headers.
+    """
+    if not cookie or not authuser:
+        raise ValueError("Both 'cookie' and 'x-goog-authuser' are required.")
+
+    ensure_dirs()
+    headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}\nauthorization: {_SAPISIDHASH_MARKER}"
+    try:
+        setup(filepath=str(YTMUSIC_AUTH_FILE), headers_raw=headers_raw)
+    except YTMusicUserError as e:
+        raise YTMusicAuthError(str(e)) from e
+    YTMUSIC_AUTH_FILE.chmod(0o600)  # contains a live session cookie — owner-read/write only
+
+
 def run_setup(from_file: Path | None = None) -> None:
-    """One-time setup: provide just the two request-header values that matter.
+    """One-time CLI setup: provide just the two request-header values that matter.
 
     ytmusicapi's own setup wants a full raw header block pasted in, but only
     `cookie` and `x-goog-authuser` are actually required (everything else it
     fills in with sane defaults) — so we only need those two, which is a much
     smaller/easier thing to copy out of DevTools. They can be typed at an
     interactive prompt, or read from a file (handy since pasting a long
-    cookie value into a terminal prompt is fiddly).
+    cookie value into a terminal prompt is fiddly). The Streamlit UI offers
+    an equivalent form backed by the same `save_auth_headers`.
     """
-    ensure_dirs()
-
     if from_file is not None:
         text = from_file.read_text()
-        cookie, authuser = _parse_headers_file(text)
+        cookie, authuser = parse_headers_block(text)
     else:
         print(SETUP_INSTRUCTIONS)
         cookie = input("cookie: ").strip()
         authuser = input("x-goog-authuser: ").strip()
 
-    if not cookie or not authuser:
+    try:
+        save_auth_headers(cookie, authuser)
+    except ValueError as e:
         print(
             "Could not find both 'cookie' and 'x-goog-authuser' values"
             + (f" in {from_file}" if from_file else "")
             + " — aborting."
         )
-        raise SystemExit(1)
-
-    headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}\nauthorization: {_SAPISIDHASH_MARKER}"
-    try:
-        setup(filepath=str(YTMUSIC_AUTH_FILE), headers_raw=headers_raw)
-    except YTMusicUserError as e:
+        raise SystemExit(1) from e
+    except YTMusicAuthError as e:
         print(f"Could not authenticate: {e}")
         raise SystemExit(1) from e
-    YTMUSIC_AUTH_FILE.chmod(0o600)  # contains a live session cookie — owner-read/write only
+
     print(f"Saved YT Music auth to {YTMUSIC_AUTH_FILE}")
     if from_file is not None:
         print(f"You can now delete {from_file} — its contents were only needed for this one-time setup.")
 
 
-def _parse_headers_file(text: str) -> tuple[str, str]:
-    """Pull cookie/x-goog-authuser values out of a file.
+def parse_headers_block(text: str) -> tuple[str, str]:
+    """Pull cookie/x-goog-authuser values out of pasted header text.
 
     Accepts either just the two lines we ask for (`cookie: ...` and
     `x-goog-authuser: ...`), or a full raw header block copy-pasted from
@@ -118,13 +150,17 @@ def get_client(authenticated: bool = True) -> YTMusic:
     """
     if authenticated:
         if not is_authenticated():
-            raise RuntimeError("Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic")
+            raise RuntimeError(
+                "Not authenticated with YT Music yet. Run: discogs2ytmusic auth ytmusic "
+                "(or use the app's YT Music page)."
+            )
         try:
             return YTMusic(str(YTMUSIC_AUTH_FILE))
         except YTMusicUserError as e:
             raise RuntimeError(
                 "Saved YT Music auth is missing or malformed (an older version of this tool could "
-                "save auth headers ytmusicapi can't use for writes). Re-run: discogs2ytmusic auth ytmusic"
+                "save auth headers ytmusicapi can't use for writes). Re-run: discogs2ytmusic auth ytmusic "
+                "(or use the app's YT Music page)."
             ) from e
     return YTMusic()
 

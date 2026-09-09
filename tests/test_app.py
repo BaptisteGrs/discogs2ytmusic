@@ -283,8 +283,9 @@ def test_sync_requires_confirmation_and_never_touches_ytmusic_without_it(isolate
     def _blow_up(*a, **k):
         raise AssertionError("should not touch YT Music without confirmation")
 
+    # is_authenticated is legitimately called on every render for the sidebar's connection
+    # status, so only the actual network-touching calls are guarded here.
     monkeypatch.setattr(app_module.ytmusic_client, "get_client", _blow_up)
-    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", _blow_up)
 
     at = AppTest.from_file(APP_PATH).run()
     at = _select_playlist(at, playlist_id)
@@ -349,3 +350,95 @@ def test_sync_with_no_matched_tracks_shows_no_button(isolated_cache, dummy_libra
 
     assert not at.exception
     assert any("No matched tracks" in c.value for c in at.main.caption)
+
+
+def _sidebar_pill(at: AppTest) -> str:
+    """The raw markdown source of the sidebar's YT Music status pill (a <span> with
+    unsafe_allow_html, so it's read back as markdown source, not rendered HTML)."""
+    matches = [m.value for m in at.sidebar.markdown if "<span" in m.value and "yt-status-pill" in m.value]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _open_ytmusic_page(at: AppTest) -> AppTest:
+    """Click the sidebar's YT Music nav item, making the dedicated connection page active."""
+    return at.button(key="nav_ytmusic_btn").click().run()
+
+
+def test_sidebar_shows_a_not_connected_pill_by_default(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    pill = _sidebar_pill(at)
+    assert "is-off" in pill
+    assert "Not connected" in pill
+
+
+def test_sidebar_shows_a_connected_pill_once_authenticated(isolated_cache, monkeypatch):
+    import discogs2ytmusic.app as app_module
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    pill = _sidebar_pill(at)
+    assert "is-connected" in pill
+    assert "Connected" in pill
+
+
+def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+
+    assert not at.exception
+    assert at.main.subheader[0].value == "YT Music"
+    assert any("How to get your header values" in m.value for m in at.main.markdown)
+    assert any("music.youtube.com" in m.value for m in at.main.markdown)
+    assert at.main.info[0].value == "Not connected"
+    assert at.text_input(key="ytmusic_auth_cookie_input")
+    assert at.text_input(key="ytmusic_auth_authuser_input")
+    assert at.button(key="ytmusic_auth_save")
+
+
+def test_ytmusic_page_form_saves_valid_headers_and_flips_status_to_connected(isolated_cache):
+    # The success message itself doesn't survive the st.rerun() that follows it (a fresh
+    # script run has no memory of the prior run's elements) — same as every other
+    # success-then-rerun action in this app, so what's checked here is the resulting state.
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.text_input(key="ytmusic_auth_cookie_input").input("__Secure-3PAPISID=deadbeef; SID=fake").run()
+    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
+    at.button(key="ytmusic_auth_save").click().run()
+
+    assert not at.exception
+    assert at.main.success[0].value == "Connected"
+    assert "is-connected" in _sidebar_pill(at)
+
+
+def test_ytmusic_page_form_shows_error_when_values_missing(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.button(key="ytmusic_auth_save").click().run()
+
+    assert not at.exception
+    assert any("required" in e.value for e in at.error)
+    assert "is-off" in _sidebar_pill(at)
+
+
+def test_ytmusic_page_form_shows_error_when_ytmusicapi_rejects_headers(isolated_cache, monkeypatch):
+    import discogs2ytmusic.app as app_module
+
+    def _reject(cookie: str, authuser: str) -> None:
+        raise app_module.ytmusic_client.YTMusicAuthError("nope")
+
+    monkeypatch.setattr(app_module.ytmusic_client, "save_auth_headers", _reject)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.text_input(key="ytmusic_auth_cookie_input").input("x").run()
+    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
+    at.button(key="ytmusic_auth_save").click().run()
+
+    assert not at.exception
+    assert any("Could not authenticate: nope" in e.value for e in at.error)

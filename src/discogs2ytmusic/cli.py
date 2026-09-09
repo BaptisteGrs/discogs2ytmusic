@@ -85,7 +85,10 @@ def auth_ytmusic(
         "(a file with lines like 'cookie: ...' and 'x-goog-authuser: 0').",
     ),
 ) -> None:
-    """Link your YT Music account (two values copied from a browser DevTools request)."""
+    """Link your YT Music account (two values copied from a browser DevTools request).
+
+    Also available in the Streamlit app's sidebar, for a UI-only workflow.
+    """
     ytmusic_client.run_setup(from_file=from_file)
 
 
