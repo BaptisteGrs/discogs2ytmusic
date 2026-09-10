@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
-from typing import Any
+from typing import Any, Literal, cast
 
 import pandas as pd
 import streamlit as st
@@ -10,7 +11,7 @@ from ytmusicapi.exceptions import YTMusicError
 
 from discogs2ytmusic import store, ytmusic_client
 from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
-from discogs2ytmusic.filters import PlaylistFilter, TrackRow, resolve_playlist_rows, resolve_rows
+from discogs2ytmusic.filters import BoolOp, PlaylistFilter, TagGroup, TrackRow, resolve_playlist_rows, resolve_rows
 
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
@@ -116,11 +117,38 @@ def _label_options(rows: list[TrackRow]) -> list[str]:
     return sorted(labels)
 
 
+def _channel_options(rows: list[TrackRow]) -> list[str]:
+    return sorted({r.channel for r in rows if r.channel})
+
+
 def _year_bounds(rows: list[TrackRow]) -> tuple[int, int]:
     years = [r.year for r in rows if r.year]
     if not years:
         return (1900, 2030)
     return (min(years), max(years))
+
+
+_TRACK_ROW_COLUMNS = [
+    "track_id",
+    "match_id",
+    "release_id",
+    "track_artist",
+    "release_artist",
+    "position",
+    "track_title",
+    "release_title",
+    "styles",
+    "genres",
+    "labels",
+    "year",
+    "matched",
+    "confidence",
+    "youtube_url",
+    "video_title",
+    "channel",
+    "locked",
+    "discogs_url",
+]
 
 
 def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> pd.DataFrame:
@@ -150,10 +178,15 @@ def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> 
         }
         for r in rows
     ]
+    columns = list(_TRACK_ROW_COLUMNS)
     if flag_column:
         for record in records:
             record[flag_column] = False
-    return pd.DataFrame(records)
+        columns.append(flag_column)
+    # Pass `columns=` explicitly so an empty row set still yields a dataframe with the
+    # expected columns (incl. `flag_column`) instead of a columnless one that crashes
+    # any code — e.g. `_selected_track_ids` — expecting them to be present.
+    return pd.DataFrame(records, columns=columns)
 
 
 def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
@@ -161,6 +194,95 @@ def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
     (the no-tracklist fallback row can't be added to a playlist)."""
     selected = edited_df[edited_df[flag_column] & edited_df["track_id"].notna()]
     return [int(tid) for tid in selected["track_id"]]
+
+
+def _collection_editor_key(rows: list[TrackRow]) -> str:
+    """Derive the Collection tab's `st.data_editor` key from the currently visible row set.
+
+    `st.data_editor` matches pending edits (including our "select" checkbox column) to
+    the previous render by row *position*, not row identity. Reusing one static key
+    across differently-filtered row sets lets a stale edit apply to the wrong row once
+    the filter changes what's visible, or throw once a previously-edited position no
+    longer exists in a narrower dataframe (#19). Keying on the row set's track_ids
+    forces a fresh widget — with no pending edits — whenever the visible rows change.
+    """
+    ids = ",".join(str(r.track_id) for r in rows)
+    digest = hashlib.sha1(ids.encode()).hexdigest()[:12]
+    return f"collection_editor_{digest}"
+
+
+def _tag_group_ids() -> list[int]:
+    """Stable per-group ids backing the Style filter's AND/OR group builder (#20).
+
+    Groups are addressed by an ever-incrementing id, not list position, so removing
+    one group can't shift another group's widget state (its picked tags/mode) onto
+    the wrong slot.
+    """
+    if "collection_tag_group_ids" not in st.session_state:
+        st.session_state["collection_tag_group_ids"] = [0]
+        st.session_state["collection_tag_group_next_id"] = 1
+    ids: list[int] = st.session_state["collection_tag_group_ids"]
+    return ids
+
+
+def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], BoolOp]:
+    """Render the Style filter's AND/OR group builder and return the resulting groups
+    and how they combine (see `PlaylistFilter.tag_groups`/`tag_groups_mode`).
+
+    Each group gets its own tag multiselect + and/or "match" mode; "+ Add style group"
+    appends another; a group beyond the first can be removed. Multiple groups only show
+    a combinator (AND/OR between groups) once there's more than one to combine.
+    """
+    group_ids = _tag_group_ids()
+    tag_groups: list[TagGroup] = []
+    for i, gid in enumerate(group_ids):
+        label_visibility: Literal["visible", "collapsed"] = "visible" if i == 0 else "collapsed"
+        tag_col, mode_col, remove_col = st.columns([3, 1, 1])
+        with tag_col:
+            selected = st.multiselect(
+                "Style", tag_options, key=f"collection_tag_group_{gid}", label_visibility=label_visibility
+            )
+        with mode_col:
+            mode = cast(
+                BoolOp,
+                st.selectbox(
+                    "Match",
+                    options=["or", "and"],
+                    format_func=lambda m: "any of" if m == "or" else "all of",
+                    key=f"collection_tag_group_mode_{gid}",
+                    label_visibility=label_visibility,
+                ),
+            )
+        with remove_col:
+            if i == 0:
+                st.write("")  # align with the labeled widgets in this row
+            if len(group_ids) > 1 and st.button("Remove", key=f"collection_tag_group_remove_{gid}"):
+                group_ids.remove(gid)
+                st.rerun()
+        if selected:
+            tag_groups.append(TagGroup(tags=selected, mode=mode))
+
+    add_col, combinator_col = st.columns([1, 3])
+    with add_col:
+        if st.button("+ Add style group", key="collection_tag_group_add"):
+            new_id = st.session_state["collection_tag_group_next_id"]
+            st.session_state["collection_tag_group_next_id"] = new_id + 1
+            group_ids.append(new_id)
+            st.rerun()
+    tag_groups_mode: BoolOp = "or"
+    if len(group_ids) > 1:
+        with combinator_col:
+            tag_groups_mode = cast(
+                BoolOp,
+                st.radio(
+                    "Combine style groups with",
+                    options=["or", "and"],
+                    format_func=lambda m: "Match ANY group (OR)" if m == "or" else "Match ALL groups (AND)",
+                    key="collection_tag_groups_mode",
+                    horizontal=True,
+                ),
+            )
+    return tag_groups, tag_groups_mode
 
 
 def render_collection_tab() -> None:
@@ -174,13 +296,16 @@ def render_collection_tab() -> None:
 
     tag_options = _tag_options(all_rows)
     label_options = _label_options(all_rows)
+    channel_options = _channel_options(all_rows)
     year_lo, year_hi = _year_bounds(all_rows)
+
+    tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options)
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
-        tags = st.multiselect("Style", tag_options, key="collection_tags")
-    with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
+    with col2:
+        channels = st.multiselect("Channel", channel_options, key="collection_channels")
     with col3:
         if year_lo < year_hi:
             year_range = st.slider(
@@ -193,14 +318,16 @@ def render_collection_tab() -> None:
         st.write("")  # vertical alignment with the widgets above
         matched_only = st.checkbox("Matched only", key="collection_matched_only")
 
-    narrowed = bool(tags or labels or matched_only or year_range != (year_lo, year_hi))
+    narrowed = bool(tag_groups or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
         PlaylistFilter(
-            tags=tags,
+            tag_groups=tag_groups,
+            tag_groups_mode=tag_groups_mode,
             labels=labels,
             year_min=year_range[0] if year_range[0] > year_lo else None,
             year_max=year_range[1] if year_range[1] < year_hi else None,
             matched_only=matched_only,
+            channels=channels,
         )
         if narrowed
         else None
@@ -210,33 +337,48 @@ def render_collection_tab() -> None:
         rows = resolve_rows(conn, filt)
 
     st.caption(f"{len(rows)} tracks ({sum(1 for r in rows if r.matched)} matched)")
+    select_all = st.checkbox(
+        f"Select all {len(rows)} filtered track(s)", key="collection_select_all", disabled=not rows
+    )
 
     df = _rows_to_dataframe(rows, flag_column="select")
+    if select_all:
+        df["select"] = True
+    editor_key = _collection_editor_key(rows)
+    # "Select all" overrides the per-row picks below rather than merely pre-checking them
+    # (disabling "select" while it's on), so the individual checkboxes can't be used to
+    # carve out exceptions from it — turn it off first to hand-pick a subset instead.
+    disabled_columns = [
+        "release_artist",
+        "position",
+        "track_title",
+        "release_title",
+        "discogs_url",
+        "styles",
+        "genres",
+        "labels",
+        "year",
+        "matched",
+        "confidence",
+        "video_title",
+        "channel",
+        "locked",
+    ]
+    if select_all:
+        disabled_columns.append("select")
     edited_df = st.data_editor(
         df,
-        key="collection_editor",
+        key=editor_key,
         hide_index=True,
         width="stretch",
         column_order=COLLECTION_COLUMNS,
-        disabled=[
-            "release_artist",
-            "position",
-            "track_title",
-            "release_title",
-            "discogs_url",
-            "styles",
-            "genres",
-            "labels",
-            "year",
-            "matched",
-            "confidence",
-            "video_title",
-            "channel",
-            "locked",
-        ],
+        disabled=disabled_columns,
         column_config={
             **SHARED_COLUMN_CONFIG,
-            "select": st.column_config.CheckboxColumn("", help="Select tracks to add to a playlist"),
+            "select": st.column_config.CheckboxColumn(
+                "",
+                help="All filtered tracks are selected" if select_all else "Select tracks to add to a playlist",
+            ),
         },
     )
 
@@ -248,15 +390,19 @@ def render_collection_tab() -> None:
         st.error(message)
     if n_artist or n_video:
         st.success(f"Saved {n_artist + n_video} correction(s).")
-        del st.session_state["collection_editor"]
+        del st.session_state[editor_key]
         st.rerun()
 
-    _render_add_to_playlist(edited_df)
+    if select_all:
+        selected_ids = [r.track_id for r in rows if r.track_id is not None]
+    else:
+        selected_ids = _selected_track_ids(edited_df, "select")
+    _render_add_to_playlist(selected_ids, editor_key)
 
 
-def _render_add_to_playlist(edited_df: pd.DataFrame) -> None:
-    """Checked rows in the Collection tab's "select" column -> add to an existing or new playlist."""
-    selected_ids = _selected_track_ids(edited_df, "select")
+def _render_add_to_playlist(selected_ids: list[int], editor_key: str) -> None:
+    """Checked rows in the Collection tab's "select" column (or every filtered track, if
+    "select all" is on) -> add to an existing or new playlist."""
 
     with store.connect() as conn:
         playlist_names = [p["name"] for p in store.list_playlists(conn)]
@@ -302,7 +448,7 @@ def _render_add_to_playlist(edited_df: pd.DataFrame) -> None:
         conn.commit()
 
     st.success(f"Added {added} track(s) to '{name}'.")
-    del st.session_state["collection_editor"]
+    del st.session_state[editor_key]
     st.rerun()
 
 
