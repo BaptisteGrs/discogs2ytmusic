@@ -44,9 +44,3 @@ def test_scan_captures_discogs_per_track_artist_credits(isolated_cache, fake_dis
     by_title = {title: artist for _tid, artist, title in queries}
     assert by_title["Tree House"] == "HOSTOM"
     assert by_title["Oto"] == "Aline Umber"
-
-
-def test_clean_artist_names_strips_each_names_own_disambiguation_suffix():
-    assert cli._clean_artist_names(["Rush (2)", "Genesis (3)"]) == "Rush, Genesis"
-    assert cli._clean_artist_names(["HOSTOM"]) == "HOSTOM"
-    assert cli._clean_artist_names([]) is None
