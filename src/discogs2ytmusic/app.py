@@ -10,7 +10,12 @@ from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicError
 
 from discogs2ytmusic import scan_engine, store, sync_engine, ytmusic_client
-from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
+from discogs2ytmusic.collection_edits import (
+    apply_artist_edits,
+    apply_genre_edits,
+    apply_style_edits,
+    apply_video_link_edits,
+)
 from discogs2ytmusic.config import Config
 from discogs2ytmusic.discogs import DiscogsClient, DiscogsError
 from discogs2ytmusic.filters import BoolOp, PlaylistFilter, TagGroup, TrackRow, resolve_playlist_rows, resolve_rows
@@ -77,10 +82,16 @@ SHARED_COLUMN_CONFIG: dict[str, Any] = {
     "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
     "matched": st.column_config.CheckboxColumn("Matched"),
     "channel": st.column_config.TextColumn("Channel", help="Uploader/channel of the matched YouTube video"),
+    "styles": st.column_config.TextColumn(
+        "Styles", help="Comma-separated. Edit to override this release's styles from Discogs"
+    ),
+    "genres": st.column_config.TextColumn(
+        "Genres", help="Comma-separated. Edit to override this release's genres from Discogs"
+    ),
     "locked": st.column_config.CheckboxColumn(
         "Locked",
         help=(
-            "A manual correction (artist or YouTube link) protects this row from being "
+            "A manual correction (one or more fields) protects this row from being "
             "overwritten by `scan --refresh` or `rematch`. Clear the correction "
             "(`fix-artist --clear` / `correct --clear`) to unlock it."
         ),
@@ -557,8 +568,6 @@ def render_collection_tab() -> None:
         "track_title",
         "release_title",
         "discogs_url",
-        "styles",
-        "genres",
         "labels",
         "year",
         "matched",
@@ -587,12 +596,15 @@ def render_collection_tab() -> None:
 
     with store.connect() as conn:
         n_artist = apply_artist_edits(conn, df, edited_df)
+        n_style = apply_style_edits(conn, df, edited_df)
+        n_genre = apply_genre_edits(conn, df, edited_df)
         n_video, errors = apply_video_link_edits(conn, df, edited_df)
 
     for message in errors:
         st.error(message)
-    if n_artist or n_video:
-        st.success(f"Saved {n_artist + n_video} correction(s).")
+    n_corrections = n_artist + n_style + n_genre + n_video
+    if n_corrections:
+        st.success(f"Saved {n_corrections} correction(s).")
         del st.session_state[editor_key]
         st.rerun()
 

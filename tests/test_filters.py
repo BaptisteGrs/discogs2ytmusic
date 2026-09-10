@@ -380,6 +380,36 @@ def test_resolve_rows_flags_a_no_tracklist_release_title_override_as_locked(isol
     assert rows[0].locked is True
 
 
+def test_resolve_rows_flags_a_styles_override_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.set_release_styles_override(conn, first["release_id"], ["Corrected Style"])
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    overridden = [r for r in rows if r.release_id == dummy_library[0]["release_id"]]
+    assert overridden
+    assert all(r.locked for r in overridden)
+    assert all(r.styles == ["Corrected Style"] for r in overridden)
+
+
+def test_resolve_rows_flags_a_genres_override_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.set_release_genres_override(conn, first["release_id"], ["Corrected Genre"])
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    overridden = [r for r in rows if r.release_id == dummy_library[0]["release_id"]]
+    assert overridden
+    assert all(r.locked for r in overridden)
+    assert all(r.genres == ["Corrected Genre"] for r in overridden)
+
+
 def test_resolve_rows_unmatched_untouched_track_is_not_locked(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)

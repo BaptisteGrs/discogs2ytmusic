@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS releases (
     labels TEXT NOT NULL DEFAULT '[]',   -- json list
     artist_override TEXT,   -- manual correction; NULL falls back to `artist`
     title_override TEXT,    -- manual correction; NULL falls back to `title`
+    styles_override TEXT,   -- manual correction; json list, NULL falls back to `styles`
+    genres_override TEXT,   -- manual correction; json list, NULL falls back to `genres`
     -- json list of {"uri", "title", "duration"} — Discogs' own embedded YouTube links
     videos TEXT NOT NULL DEFAULT '[]',
     fetched_at REAL NOT NULL
@@ -141,6 +143,10 @@ def _migrate_releases_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE releases ADD COLUMN title_override TEXT")
     if "videos" not in cols:
         conn.execute("ALTER TABLE releases ADD COLUMN videos TEXT NOT NULL DEFAULT '[]'")
+    if "styles_override" not in cols:
+        conn.execute("ALTER TABLE releases ADD COLUMN styles_override TEXT")
+    if "genres_override" not in cols:
+        conn.execute("ALTER TABLE releases ADD COLUMN genres_override TEXT")
     conn.commit()
 
 
@@ -214,9 +220,9 @@ def upsert_release(
     this for every release on every run, but only the (rarer) full tracklist
     fetch actually has fresh video data to offer.
 
-    Deliberately does not touch artist_override/title_override — a re-scan
-    (e.g. `scan --refresh`) must not wipe out manual corrections made via the
-    browsable UI.
+    Deliberately does not touch artist_override/title_override/styles_override/
+    genres_override — a re-scan (e.g. `scan --refresh`) must not wipe out manual
+    corrections made via the browsable UI.
     """
     videos_json = json.dumps(videos) if videos is not None else None
     conn.execute(
@@ -260,6 +266,34 @@ def effective_release_artist(release: sqlite3.Row) -> str:
 def effective_release_title(release: sqlite3.Row) -> str:
     """The title to use for a release: its manual override if set, else Discogs' own."""
     return release["title_override"] or release["title"]
+
+
+def set_release_styles_override(conn: sqlite3.Connection, release_id: int, styles: list[str] | None) -> None:
+    """Set (or, with `styles=None`, clear) the manual styles override for a release."""
+    conn.execute(
+        "UPDATE releases SET styles_override = ? WHERE release_id = ?",
+        (json.dumps(styles) if styles is not None else None, release_id),
+    )
+
+
+def set_release_genres_override(conn: sqlite3.Connection, release_id: int, genres: list[str] | None) -> None:
+    """Set (or, with `genres=None`, clear) the manual genres override for a release."""
+    conn.execute(
+        "UPDATE releases SET genres_override = ? WHERE release_id = ?",
+        (json.dumps(genres) if genres is not None else None, release_id),
+    )
+
+
+def effective_release_styles(release: sqlite3.Row) -> list[str]:
+    """The styles to use for a release: its manual override if set, else Discogs' own."""
+    override = release["styles_override"]
+    return json.loads(override) if override is not None else (json.loads(release["styles"]) or [])
+
+
+def effective_release_genres(release: sqlite3.Row) -> list[str]:
+    """The genres to use for a release: its manual override if set, else Discogs' own."""
+    override = release["genres_override"]
+    return json.loads(override) if override is not None else (json.loads(release["genres"]) or [])
 
 
 def replace_tracks(

@@ -198,6 +198,95 @@ def test_release_overrides_apply_to_effective_track_queries(isolated_cache, dumm
     assert all(artist == "Corrected Release Artist" for _tid, artist, _title in queries)
 
 
+def test_release_styles_and_genres_override_round_trip(isolated_cache, dummy_library):
+    release_id = dummy_library[0]["release_id"]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        assert store.effective_release_styles(release) == json.loads(release["styles"])
+        assert store.effective_release_genres(release) == json.loads(release["genres"])
+
+        store.set_release_styles_override(conn, release_id, ["Corrected Style"])
+        store.set_release_genres_override(conn, release_id, ["Corrected Genre"])
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        assert store.effective_release_styles(release) == ["Corrected Style"]
+        assert store.effective_release_genres(release) == ["Corrected Genre"]
+
+        store.set_release_styles_override(conn, release_id, None)
+        store.set_release_genres_override(conn, release_id, None)
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        assert store.effective_release_styles(release) == json.loads(release["styles"])
+        assert store.effective_release_genres(release) == json.loads(release["genres"])
+
+
+def test_upsert_release_preserves_styles_and_genres_override_across_a_rescan(isolated_cache, dummy_library):
+    """Regression coverage for the CLAUDE.md invariant: a manual correction must never be
+    silently clobbered by a rescan. `upsert_release` unconditionally overwrites the raw
+    `styles`/`genres` columns on every call (that's Discogs-sourced data, meant to refresh),
+    but must leave `styles_override`/`genres_override` alone."""
+    first = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.set_release_styles_override(conn, first["release_id"], ["My Style"])
+        store.set_release_genres_override(conn, first["release_id"], ["My Genre"])
+
+    with store.connect() as conn:
+        # Re-scan with fresh (different) Discogs-sourced styles/genres, as `scan --refresh` would.
+        store.upsert_release(
+            conn,
+            first["release_id"],
+            first["artist"],
+            first["title"],
+            ["Some New Discogs Style"],
+            ["Some New Discogs Genre"],
+            year=first.get("year"),
+            labels=first.get("labels", []),
+        )
+
+    with store.connect() as conn:
+        release = store.get_release(conn, first["release_id"])
+
+    assert json.loads(release["styles"]) == ["Some New Discogs Style"]  # Discogs-sourced value did refresh
+    assert store.effective_release_styles(release) == ["My Style"]  # override still wins
+    assert store.effective_release_genres(release) == ["My Genre"]
+
+
+def test_releases_table_migrates_in_styles_and_genres_override_columns(isolated_cache, dummy_library):
+    """Caches created before styles_override/genres_override existed must upgrade in place,
+    following the same PRAGMA table_info guard pattern as the other release override columns."""
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE releases (
+            release_id INTEGER PRIMARY KEY,
+            artist TEXT NOT NULL,
+            title TEXT NOT NULL,
+            styles TEXT NOT NULL,
+            genres TEXT NOT NULL,
+            fetched_at REAL NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO releases (release_id, artist, title, styles, genres, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (1, "Old Artist", "Old Title", "[]", "[]", 1700000000.0),
+    )
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(releases)")}
+        release = store.get_release(conn, 1)
+
+    assert {"styles_override", "genres_override"} <= cols
+    assert release["styles_override"] is None
+    assert release["genres_override"] is None
+
+
 def test_scan_captures_year_and_labels(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
