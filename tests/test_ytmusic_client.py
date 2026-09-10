@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from ytmusicapi import YTMusic
 from ytmusicapi.auth.types import AuthType
-from ytmusicapi.exceptions import YTMusicUserError
+from ytmusicapi.exceptions import YTMusicError, YTMusicUserError
 
 from discogs2ytmusic import ytmusic_client
 
@@ -91,10 +91,12 @@ class _FakePlaylistsClient:
         existing: list[dict] | None = None,
         create_result: str | dict = "new-playlist-id",
         playlist_tracks: list[dict] | None = None,
+        add_result: str | dict | None = None,
     ):
         self.existing = existing or []
         self.create_result = create_result
         self.playlist_tracks = playlist_tracks or []
+        self.add_result = add_result if add_result is not None else {"status": "STATUS_SUCCEEDED"}
         self.created: list[tuple[str, str]] = []
         self.added: list[tuple[str, list[str]]] = []
         self.removed: list[tuple[str, list[dict]]] = []
@@ -106,8 +108,9 @@ class _FakePlaylistsClient:
         self.created.append((name, description))
         return self.create_result
 
-    def add_playlist_items(self, playlist_id: str, video_ids: list[str], duplicates: bool = False) -> None:
+    def add_playlist_items(self, playlist_id: str, video_ids: list[str], duplicates: bool = False) -> str | dict:
         self.added.append((playlist_id, video_ids))
+        return self.add_result
 
     def get_playlist(self, playlist_id: str, limit: int | None = 100) -> dict:
         return {"id": playlist_id, "tracks": self.playlist_tracks}
@@ -170,6 +173,25 @@ def test_add_tracks_is_a_noop_for_an_empty_list():
     ytmusic_client.add_tracks(yt, "playlist-id", [])  # type: ignore[arg-type]
 
     assert yt.added == []
+
+
+def test_add_tracks_dedupes_before_sending():
+    """A duplicate video id in the request (e.g. two Discogs tracks matched to the same YouTube
+    video) makes YT Music reject the whole chunk with duplicates=False — dedupe first so one
+    repeated match can't block every other track in its chunk from being added."""
+    yt = _FakePlaylistsClient()
+
+    ytmusic_client.add_tracks(yt, "playlist-id", ["v1", "v2", "v1", "v3"])  # type: ignore[arg-type]
+
+    assert yt.added == [("playlist-id", ["v1", "v2", "v3"])]
+
+
+def test_add_tracks_raises_when_ytmusic_reports_failure():
+    """ytmusicapi returns an error response here instead of raising, on failure."""
+    yt = _FakePlaylistsClient(add_result={"error": "SERVER_ERROR"})
+
+    with pytest.raises(YTMusicError, match="rejected adding tracks"):
+        ytmusic_client.add_tracks(yt, "playlist-id", ["v1"])  # type: ignore[arg-type]
 
 
 def test_get_playlist_tracks_returns_the_tracks_key_with_no_page_limit():

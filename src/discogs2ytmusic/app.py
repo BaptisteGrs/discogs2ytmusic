@@ -727,6 +727,15 @@ def _diff_and_sync_ytmusic(yt: YTMusic, ytmusic_id: str, video_ids: list[str]) -
     return to_remove
 
 
+# ytmusicapi's `get_playlist` (used by `get_playlist_tracks`) doesn't raise a clean YTMusicError
+# for a deleted/invalid playlist id — the browse response it gets back is just missing the keys
+# a real playlist's response would have, and its internal `nav()` helper raises a bare KeyError
+# (or IndexError, depending on the exact shape) instead. Both need to be treated the same as a
+# YTMusicError for the stale-id recovery below to actually trigger on this failure mode.
+_YTMUSIC_MISSING_PLAYLIST_ERRORS: tuple[type[Exception], ...] = (YTMusicError, KeyError, IndexError)
+_YTMUSIC_PUSH_ERRORS: tuple[type[Exception], ...] = (RuntimeError, *_YTMUSIC_MISSING_PLAYLIST_ERRORS)
+
+
 def _push_to_ytmusic(
     yt: YTMusic, playlist: sqlite3.Row, playlist_id: int, playlist_name: str, video_ids: list[str]
 ) -> list[dict[str, Any]]:
@@ -754,7 +763,7 @@ def _push_to_ytmusic(
 
     try:
         return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
-    except YTMusicError:
+    except _YTMUSIC_MISSING_PLAYLIST_ERRORS:
         if not existing_id:
             raise
         with store.connect() as conn:
@@ -790,7 +799,7 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
             found_id = ytmusic_client.find_playlist(yt, playlist_name)
             if found_id is not None:
                 stray_count = len(_stray_remote_tracks(ytmusic_client.get_playlist_tracks(yt, found_id), video_ids))
-        except RuntimeError:
+        except _YTMUSIC_PUSH_ERRORS:
             pass  # surfaced again, more clearly, if the user proceeds and it still fails
 
     needs_extra_confirm = stray_count > 0
@@ -816,7 +825,7 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
             try:
                 yt = ytmusic_client.get_client(authenticated=True)
                 to_remove = _push_to_ytmusic(yt, playlist, playlist_id, playlist_name, video_ids)
-            except (RuntimeError, YTMusicError) as e:
+            except _YTMUSIC_PUSH_ERRORS as e:
                 _mark_ytmusic_auth_suspect()
                 st.error(
                     f"YT Music rejected the request: {e}\n\n"

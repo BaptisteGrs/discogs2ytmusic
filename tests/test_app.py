@@ -410,6 +410,59 @@ def test_sync_recovers_from_a_stale_saved_playlist_id(isolated_cache, dummy_libr
     assert "is-connected" in _sidebar_pill(at)
 
 
+def test_sync_recovers_from_a_deleted_playlist_raising_a_bare_keyerror(isolated_cache, dummy_library, monkeypatch):
+    """A playlist deleted on the YT Music side doesn't raise a clean YTMusicError when fetched —
+    ytmusicapi's `get_playlist` hits a malformed-for-this-case browse response and its internal
+    `nav()` helper raises a bare KeyError instead. That must still trigger the same stale-id
+    recovery as a YTMusicError, not crash the app."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+        store.set_playlist_ytmusic_id(conn, playlist_id, "deleted-id")
+        conn.commit()
+
+    import discogs2ytmusic.app as app_module
+
+    created = []
+    pushed = {}
+
+    def _get_playlist_tracks(yt, pid):
+        if pid == "deleted-id":
+            raise KeyError("Unable to find 'contents' using path [...] on {...}, exception: 'contents'")
+        return []
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", _get_playlist_tracks)
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": (created.append(name) or "fresh-id", True),
+    )
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "add_tracks",
+        lambda yt, pid, video_ids: pushed.setdefault(pid, []).extend(video_ids),
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert not at.error
+    assert created == ["Discogs - My Favorites"]
+    assert pushed == {"fresh-id": ["vid1"]}
+    with store.connect() as conn:
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist["ytmusic_playlist_id"] == "fresh-id"
+
+
 def test_sync_removes_remote_tracks_no_longer_present_locally(isolated_cache, dummy_library, monkeypatch):
     """A playlist already linked to YT Music (ytmusic_playlist_id saved) should have stray
     remote tracks removed on sync, with no extra confirmation step needed."""

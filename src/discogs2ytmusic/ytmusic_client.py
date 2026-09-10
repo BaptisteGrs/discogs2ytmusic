@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ytmusicapi import YTMusic, setup
-from ytmusicapi.exceptions import YTMusicUserError
+from ytmusicapi.exceptions import YTMusicError, YTMusicUserError
 
 from .config import YTMUSIC_AUTH_FILE, ensure_dirs
 
@@ -194,15 +194,27 @@ def get_or_create_playlist(yt: YTMusic, name: str, description: str = "") -> tup
 
 
 def add_tracks(yt: YTMusic, playlist_id: str, video_ids: list[str]) -> None:
-    """Add videos to a playlist, chunked to stay under YT Music's request size limits."""
+    """Add videos to a playlist, chunked to stay under YT Music's request size limits.
+
+    Raises:
+        YTMusicError: If YT Music rejects a chunk (e.g. `add_playlist_items` returns an error
+            response instead of raising) — surfaced instead of silently dropping tracks.
+    """
     if not video_ids:
         return
-    # YT Music silently ignores duplicates already in the playlist, but chunk
-    # to stay well under request size limits for large collections.
+    # With duplicates=False, ytmusicapi's own docs say a duplicate anywhere in the request
+    # makes YT Music reject the *whole* chunk rather than just skip that one video — so a video
+    # matched twice locally (e.g. two Discogs tracks resolved to the same YouTube video) would
+    # silently block every other track in its chunk from being added. Dedupe first: sending the
+    # same video twice in one call is meaningless anyway.
+    deduped = list(dict.fromkeys(video_ids))
     CHUNK = 50
-    for i in range(0, len(video_ids), CHUNK):
-        chunk = video_ids[i : i + CHUNK]
-        yt.add_playlist_items(playlist_id, chunk, duplicates=False)
+    for i in range(0, len(deduped), CHUNK):
+        chunk = deduped[i : i + CHUNK]
+        result = yt.add_playlist_items(playlist_id, chunk, duplicates=False)
+        status = result.get("status", "") if isinstance(result, dict) else ""
+        if "SUCCEEDED" not in status:
+            raise YTMusicError(f"YT Music rejected adding tracks to playlist {playlist_id!r}: {result}")
 
 
 def get_playlist_tracks(yt: YTMusic, playlist_id: str) -> list[dict[str, Any]]:
