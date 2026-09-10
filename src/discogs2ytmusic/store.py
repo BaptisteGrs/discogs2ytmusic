@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS tracks (
     -- Discogs' own per-track artist credit (compilations/VA releases only; NULL
     -- when it's just the release artist)
     discogs_artist TEXT,
+    -- manual per-track corrections; json list, NULL falls back to the release's
+    -- effective styles/genres (Discogs only reports these per-release, so a
+    -- multi-style release has no way to say which track is which without this)
+    styles_override TEXT,
+    genres_override TEXT,
     FOREIGN KEY (release_id) REFERENCES releases(release_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
@@ -117,7 +122,8 @@ def _migrate_matches_table(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_tracks_table(conn: sqlite3.Connection) -> None:
-    """One-time upgrade for caches created before `tracks` had search_artist/discogs_artist columns."""
+    """One-time upgrade for caches created before `tracks` had search_artist/discogs_artist/
+    styles_override/genres_override columns."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}
     if not cols:
         return
@@ -125,6 +131,10 @@ def _migrate_tracks_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tracks ADD COLUMN search_artist TEXT")
     if "discogs_artist" not in cols:
         conn.execute("ALTER TABLE tracks ADD COLUMN discogs_artist TEXT")
+    if "styles_override" not in cols:
+        conn.execute("ALTER TABLE tracks ADD COLUMN styles_override TEXT")
+    if "genres_override" not in cols:
+        conn.execute("ALTER TABLE tracks ADD COLUMN genres_override TEXT")
     conn.commit()
 
 
@@ -269,7 +279,11 @@ def effective_release_title(release: sqlite3.Row) -> str:
 
 
 def set_release_styles_override(conn: sqlite3.Connection, release_id: int, styles: list[str] | None) -> None:
-    """Set (or, with `styles=None`, clear) the manual styles override for a release."""
+    """Set (or, with `styles=None`, clear) the manual styles override for a release.
+
+    Used for the no-tracklist fallback row (no individual tracks to attach a per-track
+    override to) — see `set_track_styles_override` for the normal, per-track path.
+    """
     conn.execute(
         "UPDATE releases SET styles_override = ? WHERE release_id = ?",
         (json.dumps(styles) if styles is not None else None, release_id),
@@ -277,7 +291,11 @@ def set_release_styles_override(conn: sqlite3.Connection, release_id: int, style
 
 
 def set_release_genres_override(conn: sqlite3.Connection, release_id: int, genres: list[str] | None) -> None:
-    """Set (or, with `genres=None`, clear) the manual genres override for a release."""
+    """Set (or, with `genres=None`, clear) the manual genres override for a release.
+
+    Used for the no-tracklist fallback row (no individual tracks to attach a per-track
+    override to) — see `set_track_genres_override` for the normal, per-track path.
+    """
     conn.execute(
         "UPDATE releases SET genres_override = ? WHERE release_id = ?",
         (json.dumps(genres) if genres is not None else None, release_id),
@@ -285,15 +303,58 @@ def set_release_genres_override(conn: sqlite3.Connection, release_id: int, genre
 
 
 def effective_release_styles(release: sqlite3.Row) -> list[str]:
-    """The styles to use for a release: its manual override if set, else Discogs' own."""
+    """The styles to use for a release absent any per-track override: its own manual
+    override if set, else Discogs' own. See `effective_track_styles` for the version
+    that also accounts for a per-track correction."""
     override = release["styles_override"]
     return json.loads(override) if override is not None else (json.loads(release["styles"]) or [])
 
 
 def effective_release_genres(release: sqlite3.Row) -> list[str]:
-    """The genres to use for a release: its manual override if set, else Discogs' own."""
+    """The genres to use for a release absent any per-track override: its own manual
+    override if set, else Discogs' own. See `effective_track_genres` for the version
+    that also accounts for a per-track correction."""
     override = release["genres_override"]
     return json.loads(override) if override is not None else (json.loads(release["genres"]) or [])
+
+
+def set_track_styles_override(conn: sqlite3.Connection, track_id: int, styles: list[str] | None) -> None:
+    """Set (or, with `styles=None`, clear) the manual styles override for one track.
+
+    Discogs only reports styles per-release, so a release tagged e.g. "Tech House,
+    Downtempo, Breaks" gives no way to know which track is which — this lets a user
+    correct that per track instead of only for the whole release.
+    """
+    conn.execute(
+        "UPDATE tracks SET styles_override = ? WHERE id = ?",
+        (json.dumps(styles) if styles is not None else None, track_id),
+    )
+
+
+def set_track_genres_override(conn: sqlite3.Connection, track_id: int, genres: list[str] | None) -> None:
+    """Set (or, with `genres=None`, clear) the manual genres override for one track."""
+    conn.execute(
+        "UPDATE tracks SET genres_override = ? WHERE id = ?",
+        (json.dumps(genres) if genres is not None else None, track_id),
+    )
+
+
+def effective_track_styles(track: sqlite3.Row | None, release: sqlite3.Row) -> list[str]:
+    """The styles to use for a track: its own manual override if set, else the release's
+    effective styles (`effective_release_styles`). `track=None` (the no-tracklist
+    fallback row) always falls back to the release."""
+    if track is not None and track["styles_override"] is not None:
+        return json.loads(track["styles_override"])
+    return effective_release_styles(release)
+
+
+def effective_track_genres(track: sqlite3.Row | None, release: sqlite3.Row) -> list[str]:
+    """The genres to use for a track: its own manual override if set, else the release's
+    effective genres (`effective_release_genres`). `track=None` (the no-tracklist
+    fallback row) always falls back to the release."""
+    if track is not None and track["genres_override"] is not None:
+        return json.loads(track["genres_override"])
+    return effective_release_genres(release)
 
 
 def replace_tracks(
@@ -303,8 +364,9 @@ def replace_tracks(
     per-track artist credit (see the `tracks.discogs_artist` column comment), or None.
 
     Upserts by matching each new (position, title) pair against an existing track rather
-    than deleting and reinserting everything, so `search_artist` — a manual per-track
-    correction — survives a `scan --refresh` instead of being silently wiped. A track whose
+    than deleting and reinserting everything, so `search_artist`/`styles_override`/
+    `genres_override` — manual per-track corrections — survive a `scan --refresh` instead
+    of being silently wiped. A track whose
     (position, title) no longer appears in the new tracklist is removed; a genuinely new one
     is inserted. Ties among duplicate (position, title) pairs on the same release (rare, but
     seen in real Discogs data) are broken by original order.

@@ -48,39 +48,51 @@ def _split_comma_list(value: str) -> list[str]:
 
 
 def apply_style_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame) -> int:
-    """Diff the `styles` column and persist changes as release-level style overrides.
+    """Diff the `styles` column and persist changes as style overrides.
 
-    Styles are release-level only (unlike artist, there's no per-track split), so every
-    edit resolves through `release_id` regardless of whether the row has a `track_id`.
-    Clearing the cell reverts to Discogs' own styles. Returns the number of rows updated.
+    A track-backed row gets a per-track override, since Discogs only reports styles
+    per-release and a multi-style release otherwise has no way to say which track is
+    which (e.g. "Tech House, Downtempo, Breaks" across 4 tracks). A release with no
+    tracklist on file (track_id is None) falls back to the release-level override
+    instead. Clearing the cell reverts to the inherited (release, or Discogs') styles.
+    Returns the number of rows updated.
     """
     count = 0
     for idx in original.index:
         old_val, new_val = _str(original.at[idx, "styles"]), _str(edited.at[idx, "styles"])
         if new_val == old_val:
             continue
-        release_id = _int_or_none(original.at[idx, "release_id"])
-        assert release_id is not None  # every row has a release_id
-        store.set_release_styles_override(conn, release_id, _split_comma_list(new_val) or None)
+        override = _split_comma_list(new_val) or None
+        track_id = _int_or_none(original.at[idx, "track_id"])
+        if track_id is not None:
+            store.set_track_styles_override(conn, track_id, override)
+        else:
+            release_id = _int_or_none(original.at[idx, "release_id"])
+            assert release_id is not None  # every row has a release_id
+            store.set_release_styles_override(conn, release_id, override)
         count += 1
     return count
 
 
 def apply_genre_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame) -> int:
-    """Diff the `genres` column and persist changes as release-level genre overrides.
+    """Diff the `genres` column and persist changes as genre overrides.
 
-    Genres are release-level only (unlike artist, there's no per-track split), so every
-    edit resolves through `release_id` regardless of whether the row has a `track_id`.
-    Clearing the cell reverts to Discogs' own genres. Returns the number of rows updated.
+    Same per-track/release-fallback split as `apply_style_edits` — see its docstring.
+    Returns the number of rows updated.
     """
     count = 0
     for idx in original.index:
         old_val, new_val = _str(original.at[idx, "genres"]), _str(edited.at[idx, "genres"])
         if new_val == old_val:
             continue
-        release_id = _int_or_none(original.at[idx, "release_id"])
-        assert release_id is not None  # every row has a release_id
-        store.set_release_genres_override(conn, release_id, _split_comma_list(new_val) or None)
+        override = _split_comma_list(new_val) or None
+        track_id = _int_or_none(original.at[idx, "track_id"])
+        if track_id is not None:
+            store.set_track_genres_override(conn, track_id, override)
+        else:
+            release_id = _int_or_none(original.at[idx, "release_id"])
+            assert release_id is not None  # every row has a release_id
+            store.set_release_genres_override(conn, release_id, override)
         count += 1
     return count
 

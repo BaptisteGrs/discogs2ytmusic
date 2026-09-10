@@ -105,13 +105,51 @@ def test_apply_artist_edits_unchanged_rows_are_noop(isolated_cache, dummy_librar
 # --- apply_style_edits / apply_genre_edits ---
 
 
-def test_apply_style_edits_sets_release_override(isolated_cache, dummy_library):
+def test_apply_style_edits_sets_track_override(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+
+    original = _df(
+        [{"track_id": track_id, "release_id": release["release_id"], "styles": ", ".join(release["styles"])}]
+    )
+    edited = _df(
+        [{"track_id": track_id, "release_id": release["release_id"], "styles": "Corrected Style, Another Style"}]
+    )
+
+    with store.connect() as conn:
+        count = collection_edits.apply_style_edits(conn, original, edited)
+        track = store.get_track(conn, track_id)
+
+    assert count == 1
+    assert json.loads(track["styles_override"]) == ["Corrected Style", "Another Style"]
+
+
+def test_apply_style_edits_clearing_reverts_to_release_styles(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+        store.set_track_styles_override(conn, track_id, ["Temporary Style"])
+
+    original = _df([{"track_id": track_id, "release_id": release["release_id"], "styles": "Temporary Style"}])
+    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "styles": "  "}])
+
+    with store.connect() as conn:
+        collection_edits.apply_style_edits(conn, original, edited)
+        track = store.get_track(conn, track_id)
+
+    assert track["styles_override"] is None
+
+
+def test_apply_style_edits_falls_back_to_release_override_with_no_track_id(isolated_cache, dummy_library):
     release = dummy_library[0]
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
-    original = _df([{"release_id": release["release_id"], "styles": ", ".join(release["styles"])}])
-    edited = _df([{"release_id": release["release_id"], "styles": "Corrected Style, Another Style"}])
+    original = _df([{"track_id": None, "release_id": release["release_id"], "styles": ", ".join(release["styles"])}])
+    edited = _df([{"track_id": None, "release_id": release["release_id"], "styles": "Corrected Style, Another Style"}])
 
     with store.connect() as conn:
         count = collection_edits.apply_style_edits(conn, original, edited)
@@ -123,30 +161,13 @@ def test_apply_style_edits_sets_release_override(isolated_cache, dummy_library):
     assert json.loads(row[0]) == ["Corrected Style", "Another Style"]
 
 
-def test_apply_style_edits_clearing_reverts_to_discogs_styles(isolated_cache, dummy_library):
-    release = dummy_library[0]
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-        store.set_release_styles_override(conn, release["release_id"], ["Temporary Style"])
-
-    original = _df([{"release_id": release["release_id"], "styles": "Temporary Style"}])
-    edited = _df([{"release_id": release["release_id"], "styles": "  "}])
-
-    with store.connect() as conn:
-        collection_edits.apply_style_edits(conn, original, edited)
-        row = conn.execute(
-            "SELECT styles_override FROM releases WHERE release_id = ?", (release["release_id"],)
-        ).fetchone()
-
-    assert row[0] is None
-
-
 def test_apply_style_edits_unchanged_rows_are_noop(isolated_cache, dummy_library):
     release = dummy_library[0]
     with store.connect() as conn:
         _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
 
-    df = _df([{"release_id": release["release_id"], "styles": ", ".join(release["styles"])}])
+    df = _df([{"track_id": track_id, "release_id": release["release_id"], "styles": ", ".join(release["styles"])}])
 
     with store.connect() as conn:
         count = collection_edits.apply_style_edits(conn, df, df.copy())
@@ -154,13 +175,49 @@ def test_apply_style_edits_unchanged_rows_are_noop(isolated_cache, dummy_library
     assert count == 0
 
 
-def test_apply_genre_edits_sets_release_override(isolated_cache, dummy_library):
+def test_apply_genre_edits_sets_track_override(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+
+    original = _df(
+        [{"track_id": track_id, "release_id": release["release_id"], "genres": ", ".join(release["genres"])}]
+    )
+    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "genres": "Corrected Genre"}])
+
+    with store.connect() as conn:
+        count = collection_edits.apply_genre_edits(conn, original, edited)
+        track = store.get_track(conn, track_id)
+
+    assert count == 1
+    assert json.loads(track["genres_override"]) == ["Corrected Genre"]
+
+
+def test_apply_genre_edits_clearing_reverts_to_release_genres(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+        store.set_track_genres_override(conn, track_id, ["Temporary Genre"])
+
+    original = _df([{"track_id": track_id, "release_id": release["release_id"], "genres": "Temporary Genre"}])
+    edited = _df([{"track_id": track_id, "release_id": release["release_id"], "genres": ""}])
+
+    with store.connect() as conn:
+        collection_edits.apply_genre_edits(conn, original, edited)
+        track = store.get_track(conn, track_id)
+
+    assert track["genres_override"] is None
+
+
+def test_apply_genre_edits_falls_back_to_release_override_with_no_track_id(isolated_cache, dummy_library):
     release = dummy_library[0]
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
-    original = _df([{"release_id": release["release_id"], "genres": ", ".join(release["genres"])}])
-    edited = _df([{"release_id": release["release_id"], "genres": "Corrected Genre"}])
+    original = _df([{"track_id": None, "release_id": release["release_id"], "genres": ", ".join(release["genres"])}])
+    edited = _df([{"track_id": None, "release_id": release["release_id"], "genres": "Corrected Genre"}])
 
     with store.connect() as conn:
         count = collection_edits.apply_genre_edits(conn, original, edited)
@@ -170,24 +227,6 @@ def test_apply_genre_edits_sets_release_override(isolated_cache, dummy_library):
 
     assert count == 1
     assert json.loads(row[0]) == ["Corrected Genre"]
-
-
-def test_apply_genre_edits_clearing_reverts_to_discogs_genres(isolated_cache, dummy_library):
-    release = dummy_library[0]
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-        store.set_release_genres_override(conn, release["release_id"], ["Temporary Genre"])
-
-    original = _df([{"release_id": release["release_id"], "genres": "Temporary Genre"}])
-    edited = _df([{"release_id": release["release_id"], "genres": ""}])
-
-    with store.connect() as conn:
-        collection_edits.apply_genre_edits(conn, original, edited)
-        row = conn.execute(
-            "SELECT genres_override FROM releases WHERE release_id = ?", (release["release_id"],)
-        ).fetchone()
-
-    assert row[0] is None
 
 
 # --- apply_video_link_edits ---

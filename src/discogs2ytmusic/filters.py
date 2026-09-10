@@ -164,12 +164,12 @@ class TrackRow:
 def _build_track_row(
     conn: sqlite3.Connection,
     release: sqlite3.Row,
-    track_id: int | None,
+    track: sqlite3.Row | None,
     artist: str,
     title: str,
-    position: str | None,
-    artist_overridden: bool,
 ) -> TrackRow:
+    track_id = track["id"] if track is not None else None
+    position = track["position"] if track is not None else None
     match = store.get_match(conn, artist, title)
     video_id = match["video_id"] if match else None
     searched_at = None
@@ -184,8 +184,8 @@ def _build_track_row(
         track_title=title,
         position=position,
         release_title=store.effective_release_title(release),
-        styles=store.effective_release_styles(release),
-        genres=store.effective_release_genres(release),
+        styles=store.effective_track_styles(track, release),
+        genres=store.effective_track_genres(track, release),
         labels=json.loads(release["labels"]) or [],
         year=release["year"],
         discogs_url=release_url(release["release_id"]),
@@ -198,12 +198,14 @@ def _build_track_row(
         score=match["score"] if match is not None else None,
         channel=(match["channel"] if match is not None else None) or "",
         searched_at=searched_at,
-        locked=artist_overridden
+        locked=(track is not None and bool(track["search_artist"]))
         or source == "manual"
         or bool(release["artist_override"])
         or bool(release["title_override"])
         or bool(release["styles_override"])
-        or bool(release["genres_override"]),
+        or bool(release["genres_override"])
+        or (track is not None and bool(track["styles_override"]))
+        or (track is not None and bool(track["genres_override"])),
     )
 
 
@@ -216,18 +218,10 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
     for release, tracks in store.iter_releases_with_tracks(conn):
         if filt is not None and not release_matches(release, filt):
             continue
-        positions = {t["id"]: t["position"] for t in tracks}
-        artist_overridden = {t["id"]: bool(t["search_artist"]) for t in tracks}
+        tracks_by_id = {t["id"]: t for t in tracks}
         for track_id, artist, title in store.effective_track_queries(release, tracks):
-            row = _build_track_row(
-                conn,
-                release,
-                track_id,
-                artist,
-                title,
-                positions.get(track_id) if track_id is not None else None,
-                artist_overridden.get(track_id, False),
-            )
+            track = tracks_by_id.get(track_id) if track_id is not None else None
+            row = _build_track_row(conn, release, track, artist, title)
             if filt is not None and filt.matched_only and not row.video_id:
                 continue
             if filt is not None and filt.channels and row.channel not in filt.channels:
@@ -249,7 +243,5 @@ def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[Tr
         if release is None:
             continue
         [(_, artist, title)] = store.effective_track_queries(release, [track])
-        rows.append(
-            _build_track_row(conn, release, track_id, artist, title, track["position"], bool(track["search_artist"]))
-        )
+        rows.append(_build_track_row(conn, release, track, artist, title))
     return rows
