@@ -16,12 +16,16 @@ YTMUSIC_AUTH_FILE = CONFIG_DIR / "ytmusic_auth.json"
 CACHE_DB = CACHE_DIR / "cache.sqlite3"
 
 
+DEFAULT_PLAYLIST_NAME_PREFIX = "Discogs"
+
+
 @dataclass
 class Config:
-    """Persisted Discogs credentials, stored as JSON at `CONFIG_FILE`."""
+    """Persisted Discogs credentials and app preferences, stored as JSON at `CONFIG_FILE`."""
 
     discogs_token: str | None = None
     discogs_username: str | None = None
+    playlist_name_prefix: str = DEFAULT_PLAYLIST_NAME_PREFIX
 
     @classmethod
     def load(cls) -> Config:
@@ -32,6 +36,9 @@ class Config:
         return cls(
             discogs_token=data.get("discogs_token"),
             discogs_username=data.get("discogs_username"),
+            # Missing on any config file saved before this field existed — default keeps
+            # pushed playlist names byte-for-byte identical to the old hardcoded "Discogs - ...".
+            playlist_name_prefix=data.get("playlist_name_prefix", DEFAULT_PLAYLIST_NAME_PREFIX),
         )
 
     def save(self) -> None:
@@ -42,6 +49,7 @@ class Config:
                 {
                     "discogs_token": self.discogs_token,
                     "discogs_username": self.discogs_username,
+                    "playlist_name_prefix": self.playlist_name_prefix,
                 },
                 indent=2,
             )

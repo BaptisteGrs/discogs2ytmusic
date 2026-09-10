@@ -879,6 +879,32 @@ def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_
     assert playlist["ytmusic_playlist_id"] == "ytmusic-playlist-id"
 
 
+def test_confirming_sync_uses_the_configured_playlist_name_prefix(isolated_cache, dummy_library, monkeypatch):
+    from discogs2ytmusic.config import Config
+
+    Config(playlist_name_prefix="My Vinyl").save()
+
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    import discogs2ytmusic.app as app_module
+
+    created_names, _pushed, _removed = _patch_sync_happy_path(monkeypatch, app_module)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert created_names == ["My Vinyl - My Favorites"]
+
+
 def test_sync_recovers_from_a_stale_saved_playlist_id(isolated_cache, dummy_library, monkeypatch):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -1218,6 +1244,8 @@ def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
     assert at.text_input(key="ytmusic_auth_cookie_input")
     assert at.text_input(key="ytmusic_auth_authuser_input")
     assert at.button(key="ytmusic_auth_save")
+    assert at.text_input(key="playlist_name_prefix_input").value == "Discogs"
+    assert at.button(key="playlist_name_prefix_save")
 
 
 def test_ytmusic_page_form_saves_valid_headers_and_flips_status_to_connected(isolated_cache):
@@ -1261,3 +1289,15 @@ def test_ytmusic_page_form_shows_error_when_ytmusicapi_rejects_headers(isolated_
 
     assert not at.exception
     assert any("Could not authenticate: nope" in e.value for e in at.error)
+
+
+def test_ytmusic_page_saves_a_custom_playlist_name_prefix(isolated_cache):
+    from discogs2ytmusic.config import Config
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.text_input(key="playlist_name_prefix_input").input("My Vinyl").run()
+    at.button(key="playlist_name_prefix_save").click().run()
+
+    assert not at.exception
+    assert Config.load().playlist_name_prefix == "My Vinyl"
