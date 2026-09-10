@@ -686,6 +686,30 @@ def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_li
     assert any("Not yet pushed to YT Music" in c.value for c in at.main.caption)
 
 
+def test_playlist_detail_shows_a_bold_link_to_the_pushed_playlist(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+        store.set_playlist_ytmusic_id(conn, playlist_id, "abc123")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    linked_markdown = [m.value for m in at.main.markdown if "1 track(s), 1 matched" in m.value]
+    assert len(linked_markdown) == 1
+    assert 'href="https://music.youtube.com/playlist?list=abc123"' in linked_markdown[0]
+    assert 'target="_blank"' in linked_markdown[0]
+    assert 'rel="noopener"' in linked_markdown[0]
+    assert "font-weight: 700" in linked_markdown[0]
+    assert "Linked to YT Music playlist" in linked_markdown[0]
+    assert not any("1 track(s), 1 matched" in c.value for c in at.main.caption)
+
+
 def test_playlist_search_excludes_tracks_already_in_the_playlist(isolated_cache, dummy_library):
     multi_track_release = next(r for r in dummy_library if len(r["tracklist"]) > 1)
 

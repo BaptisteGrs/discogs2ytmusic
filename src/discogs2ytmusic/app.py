@@ -1004,17 +1004,23 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     if st.session_state.get(f"confirm_delete_{playlist_id}"):
         _render_delete_confirmation(playlist)
 
+    track_summary = f"{len(rows)} track(s), {matched} matched"
+    ytmusic_playlist_id = playlist["ytmusic_playlist_id"]
+    if ytmusic_playlist_id:
+        playlist_url = f"https://music.youtube.com/playlist?list={ytmusic_playlist_id}"
+        st.markdown(
+            f'<div style="font-size: 0.875rem; color: rgba(49, 51, 63, 0.6); margin-bottom: 0.5rem;">'
+            f"{track_summary} · "
+            f'<a href="{playlist_url}" target="_blank" rel="noopener" style="font-weight: 700;">'
+            f"Linked to YT Music playlist</a></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption(track_summary)
+
     pushed_at = playlist["pushed_at"]
     pushed_caption = f"Pushed to YT Music {_relative_time(pushed_at)}" if pushed_at else "Not yet pushed to YT Music"
-    st.caption(
-        f"{len(rows)} track(s), {matched} matched"
-        + (
-            f" · linked to YT Music playlist `{playlist['ytmusic_playlist_id']}`"
-            if playlist["ytmusic_playlist_id"]
-            else ""
-        )
-        + f" · {pushed_caption} · Last modified {_relative_time(playlist['updated_at'])}"
-    )
+    st.caption(f"{pushed_caption} · Last modified {_relative_time(playlist['updated_at'])}")
 
     if rows:
         df = _playlist_dataframe(rows)
