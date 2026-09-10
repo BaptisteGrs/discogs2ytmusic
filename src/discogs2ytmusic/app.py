@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from ytmusicapi import YTMusic
+from ytmusicapi.exceptions import YTMusicError
 
 from discogs2ytmusic import store, ytmusic_client
 from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
@@ -492,10 +494,30 @@ def render_sidebar_nav() -> tuple[str, int | None]:
     return kind, playlist_id
 
 
+def _ytmusic_connected() -> bool:
+    """Whether YT Music should be shown as connected: auth headers are saved, and no YT Music
+    call this session has failed in a way that suggests that saved session has gone stale
+    (see `_mark_ytmusic_auth_suspect`)."""
+    return ytmusic_client.is_authenticated() and not st.session_state.get("ytmusic_auth_suspect", False)
+
+
+def _mark_ytmusic_auth_suspect() -> None:
+    """Flag the saved YT Music session as suspect after a failed request, so the sidebar pill
+    and YT Music page drop to "Not connected" until the user re-saves fresh headers — a failure
+    this shape (once past the auth-file-exists check) usually means the cookie/x-goog-authuser
+    session has expired or rotated, not a one-off network blip.
+
+    The sidebar itself has already rendered earlier in this same script run, so the pill picks
+    this up starting the *next* rerun rather than instantly — deliberately not forcing an
+    st.rerun() here, since that would blow away the st.error() explaining what just failed.
+    """
+    st.session_state["ytmusic_auth_suspect"] = True
+
+
 def _render_ytmusic_nav_item(selected: bool) -> None:
     """Sidebar nav row linking to the dedicated YT Music page, with a status pill showing
     whether an account is currently connected."""
-    authenticated = ytmusic_client.is_authenticated()
+    authenticated = _ytmusic_connected()
     with st.container(key="nav_ytmusic", horizontal=True, gap="small"):
         if _nav_button("YT Music", key="nav_ytmusic_btn", selected=selected, width="content"):
             st.session_state["nav_kind"] = "ytmusic"
@@ -526,7 +548,7 @@ def _render_ytmusic_page() -> None:
         st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ytmusic_client.SETUP_STEPS, 1)))
 
     with right:
-        if ytmusic_client.is_authenticated():
+        if _ytmusic_connected():
             st.success("Connected", icon=":material/check_circle:")
         else:
             st.info("Not connected", icon=":material/link_off:")
@@ -549,6 +571,7 @@ def _render_ytmusic_page() -> None:
             except ytmusic_client.YTMusicAuthError as e:
                 st.error(f"Could not authenticate: {e}")
             else:
+                st.session_state["ytmusic_auth_suspect"] = False
                 st.success("YT Music connected.")
                 st.rerun()
 
@@ -686,6 +709,42 @@ def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
             st.rerun()
 
 
+def _push_to_ytmusic(
+    yt: YTMusic, playlist: sqlite3.Row, playlist_id: int, playlist_name: str, video_ids: list[str]
+) -> None:
+    """Create (or reuse) `playlist_name`'s linked YT Music playlist and push `video_ids` to it.
+
+    If a playlist id was already saved locally but YT Music rejects writes to it — e.g. it was
+    deleted on the YT Music side, or the id was never valid in the first place (cookie-based
+    auth can "succeed" on `create_playlist` without a playlist actually existing server-side) —
+    forget the stale id and create a fresh playlist once, rather than failing on the same bad id
+    forever. Re-raises if that retry also fails, or if there was no saved id to blame.
+    """
+    existing_id = playlist["ytmusic_playlist_id"]
+    with store.connect() as conn:
+        if existing_id:
+            ytmusic_id = existing_id
+        else:
+            ytmusic_id = ytmusic_client.get_or_create_playlist(
+                yt, playlist_name, description="Curated from the Discogs collection app"
+            )
+            store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
+        conn.commit()
+
+    try:
+        ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
+    except YTMusicError:
+        if not existing_id:
+            raise
+        with store.connect() as conn:
+            ytmusic_id = ytmusic_client.get_or_create_playlist(
+                yt, playlist_name, description="Curated from the Discogs collection app"
+            )
+            store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
+            conn.commit()
+        ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
+
+
 def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     playlist_id = playlist["id"]
     video_ids = [r.video_id for r in rows if r.video_id]
@@ -699,25 +758,21 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
     with col1:
         if st.button("Yes, push to YT Music", key=f"confirm_sync_yes_{playlist_id}"):
             st.session_state[confirm_key] = False
-            if not ytmusic_client.is_authenticated():
+            if not _ytmusic_connected():
                 st.error("Not authenticated with YT Music. Use the YT Music page (in the sidebar) to connect.")
                 return
             playlist_name = f"Discogs - {playlist['name']}"
             try:
                 yt = ytmusic_client.get_client(authenticated=True)
-                with store.connect() as conn:
-                    existing_id = playlist["ytmusic_playlist_id"]
-                    if existing_id:
-                        ytmusic_id = existing_id
-                    else:
-                        ytmusic_id = ytmusic_client.get_or_create_playlist(
-                            yt, playlist_name, description="Curated from the Discogs collection app"
-                        )
-                        store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
-                    conn.commit()
-                ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
-            except RuntimeError as e:
-                st.error(str(e))
+                _push_to_ytmusic(yt, playlist, playlist_id, playlist_name, video_ids)
+            except (RuntimeError, YTMusicError) as e:
+                _mark_ytmusic_auth_suspect()
+                st.error(
+                    f"YT Music rejected the request: {e}\n\n"
+                    "This usually means the saved cookie/x-goog-authuser session has expired or "
+                    "rotated. Re-connect on the YT Music page (in the sidebar) with a fresh copy "
+                    "of those two header values and try again."
+                )
                 return
             st.success(f"Pushed {len(video_ids)} track(s) to '{playlist_name}'.")
             st.rerun()
