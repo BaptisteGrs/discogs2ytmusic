@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 from discogs2ytmusic import collection_edits, store
@@ -98,6 +100,94 @@ def test_apply_artist_edits_unchanged_rows_are_noop(isolated_cache, dummy_librar
         count = collection_edits.apply_artist_edits(conn, df, df.copy())
 
     assert count == 0
+
+
+# --- apply_style_edits / apply_genre_edits ---
+
+
+def test_apply_style_edits_sets_release_override(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    original = _df([{"release_id": release["release_id"], "styles": ", ".join(release["styles"])}])
+    edited = _df([{"release_id": release["release_id"], "styles": "Corrected Style, Another Style"}])
+
+    with store.connect() as conn:
+        count = collection_edits.apply_style_edits(conn, original, edited)
+        row = conn.execute(
+            "SELECT styles_override FROM releases WHERE release_id = ?", (release["release_id"],)
+        ).fetchone()
+
+    assert count == 1
+    assert json.loads(row[0]) == ["Corrected Style", "Another Style"]
+
+
+def test_apply_style_edits_clearing_reverts_to_discogs_styles(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.set_release_styles_override(conn, release["release_id"], ["Temporary Style"])
+
+    original = _df([{"release_id": release["release_id"], "styles": "Temporary Style"}])
+    edited = _df([{"release_id": release["release_id"], "styles": "  "}])
+
+    with store.connect() as conn:
+        collection_edits.apply_style_edits(conn, original, edited)
+        row = conn.execute(
+            "SELECT styles_override FROM releases WHERE release_id = ?", (release["release_id"],)
+        ).fetchone()
+
+    assert row[0] is None
+
+
+def test_apply_style_edits_unchanged_rows_are_noop(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    df = _df([{"release_id": release["release_id"], "styles": ", ".join(release["styles"])}])
+
+    with store.connect() as conn:
+        count = collection_edits.apply_style_edits(conn, df, df.copy())
+
+    assert count == 0
+
+
+def test_apply_genre_edits_sets_release_override(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    original = _df([{"release_id": release["release_id"], "genres": ", ".join(release["genres"])}])
+    edited = _df([{"release_id": release["release_id"], "genres": "Corrected Genre"}])
+
+    with store.connect() as conn:
+        count = collection_edits.apply_genre_edits(conn, original, edited)
+        row = conn.execute(
+            "SELECT genres_override FROM releases WHERE release_id = ?", (release["release_id"],)
+        ).fetchone()
+
+    assert count == 1
+    assert json.loads(row[0]) == ["Corrected Genre"]
+
+
+def test_apply_genre_edits_clearing_reverts_to_discogs_genres(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.set_release_genres_override(conn, release["release_id"], ["Temporary Genre"])
+
+    original = _df([{"release_id": release["release_id"], "genres": "Temporary Genre"}])
+    edited = _df([{"release_id": release["release_id"], "genres": ""}])
+
+    with store.connect() as conn:
+        collection_edits.apply_genre_edits(conn, original, edited)
+        row = conn.execute(
+            "SELECT genres_override FROM releases WHERE release_id = ?", (release["release_id"],)
+        ).fetchone()
+
+    assert row[0] is None
 
 
 # --- apply_video_link_edits ---

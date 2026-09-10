@@ -156,8 +156,8 @@ class TrackRow:
     score: float | None
     channel: str | None
     searched_at: str | None
-    # A manual correction (artist override and/or picked video) protects this row from
-    # scan/sync overwrites.
+    # A manual correction (artist/title/style/genre override and/or picked video)
+    # protects this row from scan/sync overwrites.
     locked: bool
 
 
@@ -184,8 +184,8 @@ def _build_track_row(
         track_title=title,
         position=position,
         release_title=store.effective_release_title(release),
-        styles=json.loads(release["styles"]) or [],
-        genres=json.loads(release["genres"]) or [],
+        styles=store.effective_release_styles(release),
+        genres=store.effective_release_genres(release),
         labels=json.loads(release["labels"]) or [],
         year=release["year"],
         discogs_url=release_url(release["release_id"]),
@@ -201,7 +201,9 @@ def _build_track_row(
         locked=artist_overridden
         or source == "manual"
         or bool(release["artist_override"])
-        or bool(release["title_override"]),
+        or bool(release["title_override"])
+        or bool(release["styles_override"])
+        or bool(release["genres_override"]),
     )
 
 
