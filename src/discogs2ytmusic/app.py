@@ -98,6 +98,34 @@ SHARED_COLUMN_CONFIG: dict[str, Any] = {
 
 _NEW_PLAYLIST_SENTINEL = "+ Create new playlist"
 
+# Shared "pill" button style: small, rounded, icon+text buttons placed close together in a
+# horizontal container (see `_render_playlist_detail`'s Sync/Delete row and
+# `render_collection_tab`'s Scan/Sync matches/Rematch row). Keyed by `st.container(key=...)`
+# rather than a generic class so each button can still get its own color override (e.g. delete).
+_ACTION_PILL_CSS = """
+<style>
+.st-key-scan_pill button,
+.st-key-sync_matches_pill button,
+.st-key-rematch_pill button,
+.st-key-sync_pill button,
+.st-key-delete_pill button {
+    border-radius: 999px !important;
+    padding: 0.3rem 0.9rem !important;
+    min-height: 0 !important;
+    font-size: 0.85rem !important;
+}
+.st-key-delete_pill button {
+    border-color: #E5E2D9 !important;
+    color: #AF3029 !important;
+}
+.st-key-delete_pill button:hover {
+    border-color: #E3B6AE !important;
+    color: #AF3029 !important;
+    background-color: #FBEEEC !important;
+}
+</style>
+"""
+
 
 def _all_rows() -> list[TrackRow]:
     with store.connect() as conn:
@@ -291,18 +319,26 @@ def _run_rematch(include_manual: bool) -> bool:
 
 
 def _render_scan_button() -> None:
-    clicked = st.button("Scan", key="scan_button", help="Re-fetch your collection and tracklists from Discogs")
+    with st.container(key="scan_pill", width="content"):
+        clicked = st.button(
+            "Scan",
+            key="scan_button",
+            icon=":material/cloud_sync:",
+            help="Re-fetch your collection and tracklists from Discogs",
+        )
     if clicked and _run_scan(refresh=True):
         st.session_state.pop("collection_editor", None)
         st.rerun()
 
 
 def _render_sync_matches_button() -> None:
-    clicked = st.button(
-        "Sync matches",
-        key="sync_matches_button",
-        help="Match any unmatched tracks against YouTube/YT Music (doesn't touch your YT Music account)",
-    )
+    with st.container(key="sync_matches_pill", width="content"):
+        clicked = st.button(
+            "Sync matches",
+            key="sync_matches_button",
+            icon=":material/search:",
+            help="Match any unmatched tracks against YouTube/YT Music (doesn't touch your YT Music account)",
+        )
     if clicked and _run_sync_matches():
         st.session_state.pop("collection_editor", None)
         st.rerun()
@@ -311,11 +347,14 @@ def _render_sync_matches_button() -> None:
 def _render_rematch_button() -> None:
     if st.session_state.get("confirm_rematch"):
         return
-    if st.button(
-        "Rematch",
-        key="rematch_button",
-        help="Clear cached matches and re-match everything from scratch (slow; preserves manual corrections)",
-    ):
+    with st.container(key="rematch_pill", width="content"):
+        clicked = st.button(
+            "Rematch",
+            key="rematch_button",
+            icon=":material/restart_alt:",
+            help="Clear cached matches and re-match everything from scratch (slow; preserves manual corrections)",
+        )
+    if clicked:
         st.session_state["confirm_rematch"] = True
         st.rerun()
 
@@ -442,14 +481,13 @@ def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], B
 
 def render_collection_tab() -> None:
     """Render the browsable/editable table of every cached track and its YouTube match."""
-    st.header("My Discogs Collection")
-
-    action_col1, action_col2, action_col3 = st.columns(3)
-    with action_col1:
+    st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
+    title_col, actions_col = st.columns([1, 1], vertical_alignment="center")
+    with title_col:
+        st.header("My Discogs Collection")
+    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
         _render_scan_button()
-    with action_col2:
         _render_sync_matches_button()
-    with action_col3:
         _render_rematch_button()
     if st.session_state.get("confirm_rematch"):
         _render_rematch_confirmation()
@@ -894,8 +932,8 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
 
     matched = sum(1 for r in rows if r.matched)
 
-    st.markdown(_PLAYLIST_ACTION_CSS, unsafe_allow_html=True)
-    title_col, actions_col = st.columns([3, 2])
+    st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
+    title_col, actions_col = st.columns([3, 2], vertical_alignment="center")
     with title_col:
         st.subheader(playlist["name"])
     with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
@@ -973,28 +1011,6 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
                 st.success(f"Added {added} track(s).")
                 del st.session_state[f"playlist_search_editor_{playlist_id}"]
                 st.rerun()
-
-
-_PLAYLIST_ACTION_CSS = """
-<style>
-.st-key-sync_pill button,
-.st-key-delete_pill button {
-    border-radius: 999px !important;
-    padding: 0.3rem 0.9rem !important;
-    min-height: 0 !important;
-    font-size: 0.85rem !important;
-}
-.st-key-delete_pill button {
-    border-color: #E5E2D9 !important;
-    color: #AF3029 !important;
-}
-.st-key-delete_pill button:hover {
-    border-color: #E3B6AE !important;
-    color: #AF3029 !important;
-    background-color: #FBEEEC !important;
-}
-</style>
-"""
 
 
 def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
