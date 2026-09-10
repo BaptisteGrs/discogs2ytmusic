@@ -72,6 +72,38 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
     assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
 
 
+def test_app_search_box_narrows_the_table_by_release_title(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    yoyaku_release = next(r for r in dummy_library if r["title"] == "Yoyaku Barcelona 2025")
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="collection_search").input("yoyaku").run()
+
+    assert not at.exception
+    assert at.main.caption[0].value == f"{len(yoyaku_release['tracklist'])} tracks (0 matched)"
+
+
+def test_app_search_box_matches_case_insensitively_and_combines_with_tag_filter(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    query, tag = "DAN", "House"
+    with store.connect() as conn:
+        tag_filtered = filters.resolve_rows(conn, filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=[tag])]))
+    expected = filters.filter_rows_by_query(tag_filtered, query)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="collection_search").input(query).run()
+    at.multiselect(key="collection_tag_group_0").select(tag).run()
+
+    assert not at.exception
+    # The search box and the structured Style filter should narrow together (AND), not
+    # one overriding the other.
+    assert at.main.caption[0].value == f"{len(expected)} tracks (0 matched)"
+    assert expected  # sanity: fixture actually produces a non-trivial combination, else this proves nothing
+
+
 def test_select_all_checkbox_label_reflects_the_current_filtered_count(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -913,6 +945,32 @@ def test_pushed_at_is_recorded_again_on_a_resync_of_an_already_linked_playlist(
     assert any("Pushed to YT Music" in c.value for c in at.main.caption)
 
 
+def test_confirming_sync_uses_the_configured_playlist_name_prefix(isolated_cache, dummy_library, monkeypatch):
+    from discogs2ytmusic.config import Config
+
+    Config(playlist_name_prefix="My Vinyl").save()
+
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    import discogs2ytmusic.app as app_module
+
+    created_names, _pushed, _removed = _patch_sync_happy_path(monkeypatch, app_module)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert created_names == ["My Vinyl - My Favorites"]
+
+
 def test_sync_recovers_from_a_stale_saved_playlist_id(isolated_cache, dummy_library, monkeypatch):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -1252,6 +1310,8 @@ def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
     assert at.text_input(key="ytmusic_auth_cookie_input")
     assert at.text_input(key="ytmusic_auth_authuser_input")
     assert at.button(key="ytmusic_auth_save")
+    assert at.text_input(key="playlist_name_prefix_input").value == "Discogs"
+    assert at.button(key="playlist_name_prefix_save")
 
 
 def test_ytmusic_page_form_saves_valid_headers_and_flips_status_to_connected(isolated_cache):
@@ -1295,3 +1355,15 @@ def test_ytmusic_page_form_shows_error_when_ytmusicapi_rejects_headers(isolated_
 
     assert not at.exception
     assert any("Could not authenticate: nope" in e.value for e in at.error)
+
+
+def test_ytmusic_page_saves_a_custom_playlist_name_prefix(isolated_cache):
+    from discogs2ytmusic.config import Config
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.text_input(key="playlist_name_prefix_input").input("My Vinyl").run()
+    at.button(key="playlist_name_prefix_save").click().run()
+
+    assert not at.exception
+    assert Config.load().playlist_name_prefix == "My Vinyl"
