@@ -29,15 +29,36 @@ def _seed(conn, dummy_library):
 
 def test_playlist_filter_json_round_trip():
     filt = filters.PlaylistFilter(
-        tags=["Electro", "Tech House"], labels=["Warp"], year_min=1990, year_max=2010, matched_only=True
+        tag_groups=[
+            filters.TagGroup(tags=["Electro", "Tech House"], mode="or"),
+            filters.TagGroup(tags=["Vinyl Only", "Reissue"], mode="and"),
+        ],
+        tag_groups_mode="and",
+        labels=["Warp"],
+        year_min=1990,
+        year_max=2010,
+        matched_only=True,
+        channels=["Warp Records"],
     )
     restored = filters.PlaylistFilter.from_json(filt.to_json())
     assert restored == filt
 
 
 def test_playlist_filter_from_json_fills_in_missing_keys():
-    filt = filters.PlaylistFilter.from_json('{"tags": ["House"]}')
-    assert filt == filters.PlaylistFilter(tags=["House"])
+    filt = filters.PlaylistFilter.from_json('{"tag_groups": [{"tags": ["House"]}]}')
+    assert filt == filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=["House"])])
+
+
+def test_playlist_filter_from_json_migrates_the_pre_20_flat_tags_list_to_one_or_group():
+    """`playlist_defs.filter_json` rows saved before #20 store a flat `tags: [...]` list —
+    it should load as a single OR group, reproducing the old flat-list-of-tags behavior."""
+    filt = filters.PlaylistFilter.from_json('{"tags": ["Acid", "House"]}')
+    assert filt == filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=["Acid", "House"], mode="or")])
+
+
+def test_playlist_filter_from_json_migrates_an_empty_legacy_tags_list_to_no_groups():
+    filt = filters.PlaylistFilter.from_json('{"tags": []}')
+    assert filt == filters.PlaylistFilter()
 
 
 # --- release_matches (unit-level, plain dicts stand in for sqlite3.Row) ---
@@ -53,16 +74,56 @@ def _release(styles=(), genres=(), labels=(), year=None):
     }
 
 
+def _tag_filter(*groups: filters.TagGroup, mode: filters.BoolOp = "or") -> filters.PlaylistFilter:
+    return filters.PlaylistFilter(tag_groups=list(groups), tag_groups_mode=mode)
+
+
 def test_release_matches_tag_against_either_style_or_genre():
     release = _release(styles=["Tech House"], genres=["Electronic"])
-    assert filters.release_matches(release, filters.PlaylistFilter(tags=["Tech House"]))
-    assert filters.release_matches(release, filters.PlaylistFilter(tags=["Electronic"]))
-    assert not filters.release_matches(release, filters.PlaylistFilter(tags=["Techno"]))
+    assert filters.release_matches(release, _tag_filter(filters.TagGroup(tags=["Tech House"])))
+    assert filters.release_matches(release, _tag_filter(filters.TagGroup(tags=["Electronic"])))
+    assert not filters.release_matches(release, _tag_filter(filters.TagGroup(tags=["Techno"])))
 
 
-def test_release_matches_tags_are_case_insensitive_and_or_together():
+def test_release_matches_tags_within_a_group_are_case_insensitive_and_or_together():
     release = _release(styles=["tech house"])
-    assert filters.release_matches(release, filters.PlaylistFilter(tags=["Electro", "Tech House"]))
+    assert filters.release_matches(release, _tag_filter(filters.TagGroup(tags=["Electro", "Tech House"])))
+
+
+def test_release_matches_and_mode_group_requires_every_tag():
+    release = _release(styles=["Tech House", "Electro"])
+    assert filters.release_matches(release, _tag_filter(filters.TagGroup(tags=["Tech House", "Electro"], mode="and")))
+    assert not filters.release_matches(
+        release, _tag_filter(filters.TagGroup(tags=["Tech House", "Techno"], mode="and"))
+    )
+
+
+def test_release_matches_combines_groups_with_or_by_default():
+    release = _release(styles=["Acid"])
+    filt = _tag_filter(
+        filters.TagGroup(tags=["House"], mode="or"),
+        filters.TagGroup(tags=["Acid"], mode="or"),
+    )
+    assert filters.release_matches(release, filt)
+
+
+def test_release_matches_combines_groups_with_and_when_requested():
+    release = _release(styles=["Acid"])  # satisfies the second group only
+    filt = _tag_filter(
+        filters.TagGroup(tags=["House"], mode="or"),
+        filters.TagGroup(tags=["Acid"], mode="or"),
+        mode="and",
+    )
+    assert not filters.release_matches(release, filt)
+
+    release_both = _release(styles=["House", "Acid"])
+    assert filters.release_matches(release_both, filt)
+
+
+def test_release_matches_an_empty_group_contributes_nothing():
+    release = _release(styles=["House"])
+    filt = _tag_filter(filters.TagGroup(tags=[]), filters.TagGroup(tags=["House"]))
+    assert filters.release_matches(release, filt)
 
 
 def test_release_matches_label():
@@ -107,11 +168,43 @@ def test_resolve_rows_tags_filters_to_matching_styles(isolated_cache, dummy_libr
         _seed(conn, dummy_library)
 
     with store.connect() as conn:
-        rows = filters.resolve_rows(conn, filters.PlaylistFilter(tags=["Acid", "House"]))
+        rows = filters.resolve_rows(conn, _tag_filter(filters.TagGroup(tags=["Acid", "House"])))
 
     expected_releases = {r["release_id"] for r in dummy_library if set(r["styles"]) & {"Acid", "House"}}
     assert {r.release_id for r in rows} == expected_releases
     assert len(rows) == len({(r.release_id, r.track_id) for r in rows})  # one row per track, no duplicates
+
+
+def test_resolve_rows_and_mode_tag_group_requires_every_tag_in_the_group(isolated_cache, dummy_library):
+    """Every fixture release is genre-tagged "Electronic", so an AND group of
+    ["House", "Electronic"] should behave just like a plain "House" style filter."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(
+            conn, filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=["House", "Electronic"], mode="and")])
+        )
+
+    expected_releases = {r["release_id"] for r in dummy_library if "House" in r["styles"]}
+    assert {r.release_id for r in rows} == expected_releases
+    assert expected_releases  # sanity: fixture actually has at least one match, else this test proves nothing
+
+
+def test_resolve_rows_tag_groups_mode_and_requires_every_group_to_match(isolated_cache, dummy_library):
+    """No single fixture release is tagged both House and Techno, so an AND-combined
+    House group and Techno group should match nothing."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    filt = filters.PlaylistFilter(
+        tag_groups=[filters.TagGroup(tags=["House"]), filters.TagGroup(tags=["Techno"])],
+        tag_groups_mode="and",
+    )
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn, filt)
+
+    assert rows == []
 
 
 def test_resolve_rows_year_range_matches_fixture(isolated_cache, dummy_library):
@@ -134,6 +227,31 @@ def test_resolve_rows_label_filter(isolated_cache, dummy_library):
         rows = filters.resolve_rows(conn, filters.PlaylistFilter(labels=["Yoyaku"]))
 
     assert {r.release_id for r in rows} == {target["release_id"]}
+
+
+def test_resolve_rows_channel_filter_excludes_other_channels_and_unmatched(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first, second = dummy_library[0], dummy_library[1]
+        store.save_match(
+            conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0, channel="Yoyaku"
+        )
+        store.save_match(
+            conn,
+            second["artist"],
+            second["tracklist"][0]["title"],
+            "vid2",
+            "Video",
+            "ytmusic",
+            90.0,
+            channel="Other Uploader",
+        )
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn, filters.PlaylistFilter(channels=["Yoyaku"]))
+
+    assert len(rows) == 1
+    assert rows[0].video_id == "vid1"
 
 
 def test_resolve_rows_matched_only_excludes_unmatched_tracks(isolated_cache, dummy_library):
@@ -244,7 +362,9 @@ def test_resolve_rows_combines_criteria_with_and(isolated_cache, dummy_library):
         _seed(conn, dummy_library)
 
     with store.connect() as conn:
-        rows = filters.resolve_rows(conn, filters.PlaylistFilter(tags=["Acid"], year_min=2020))
+        rows = filters.resolve_rows(
+            conn, filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=["Acid"])], year_min=2020)
+        )
 
     expected_releases = {r["release_id"] for r in dummy_library if "Acid" in r["styles"] and r["year"] >= 2020}
     assert {r.release_id for r in rows} == expected_releases

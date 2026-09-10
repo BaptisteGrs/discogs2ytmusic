@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
-from typing import Any
+from typing import Any, Literal, cast
 
 import pandas as pd
 import streamlit as st
+from ytmusicapi import YTMusic
+from ytmusicapi.exceptions import YTMusicError
 
 from discogs2ytmusic import scan_engine, store, sync_engine, ytmusic_client
 from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
 from discogs2ytmusic.config import Config
 from discogs2ytmusic.discogs import DiscogsClient, DiscogsError
-from discogs2ytmusic.filters import PlaylistFilter, TrackRow, resolve_playlist_rows, resolve_rows
+from discogs2ytmusic.filters import BoolOp, PlaylistFilter, TagGroup, TrackRow, resolve_playlist_rows, resolve_rows
 
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
@@ -116,11 +119,38 @@ def _label_options(rows: list[TrackRow]) -> list[str]:
     return sorted(labels)
 
 
+def _channel_options(rows: list[TrackRow]) -> list[str]:
+    return sorted({r.channel for r in rows if r.channel})
+
+
 def _year_bounds(rows: list[TrackRow]) -> tuple[int, int]:
     years = [r.year for r in rows if r.year]
     if not years:
         return (1900, 2030)
     return (min(years), max(years))
+
+
+_TRACK_ROW_COLUMNS = [
+    "track_id",
+    "match_id",
+    "release_id",
+    "track_artist",
+    "release_artist",
+    "position",
+    "track_title",
+    "release_title",
+    "styles",
+    "genres",
+    "labels",
+    "year",
+    "matched",
+    "confidence",
+    "youtube_url",
+    "video_title",
+    "channel",
+    "locked",
+    "discogs_url",
+]
 
 
 def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> pd.DataFrame:
@@ -150,10 +180,15 @@ def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> 
         }
         for r in rows
     ]
+    columns = list(_TRACK_ROW_COLUMNS)
     if flag_column:
         for record in records:
             record[flag_column] = False
-    return pd.DataFrame(records)
+        columns.append(flag_column)
+    # Pass `columns=` explicitly so an empty row set still yields a dataframe with the
+    # expected columns (incl. `flag_column`) instead of a columnless one that crashes
+    # any code — e.g. `_selected_track_ids` — expecting them to be present.
+    return pd.DataFrame(records, columns=columns)
 
 
 def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
@@ -316,6 +351,95 @@ def _render_rematch_confirmation() -> None:
             st.rerun()
 
 
+def _collection_editor_key(rows: list[TrackRow]) -> str:
+    """Derive the Collection tab's `st.data_editor` key from the currently visible row set.
+
+    `st.data_editor` matches pending edits (including our "select" checkbox column) to
+    the previous render by row *position*, not row identity. Reusing one static key
+    across differently-filtered row sets lets a stale edit apply to the wrong row once
+    the filter changes what's visible, or throw once a previously-edited position no
+    longer exists in a narrower dataframe (#19). Keying on the row set's track_ids
+    forces a fresh widget — with no pending edits — whenever the visible rows change.
+    """
+    ids = ",".join(str(r.track_id) for r in rows)
+    digest = hashlib.sha1(ids.encode()).hexdigest()[:12]
+    return f"collection_editor_{digest}"
+
+
+def _tag_group_ids() -> list[int]:
+    """Stable per-group ids backing the Style filter's AND/OR group builder (#20).
+
+    Groups are addressed by an ever-incrementing id, not list position, so removing
+    one group can't shift another group's widget state (its picked tags/mode) onto
+    the wrong slot.
+    """
+    if "collection_tag_group_ids" not in st.session_state:
+        st.session_state["collection_tag_group_ids"] = [0]
+        st.session_state["collection_tag_group_next_id"] = 1
+    ids: list[int] = st.session_state["collection_tag_group_ids"]
+    return ids
+
+
+def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], BoolOp]:
+    """Render the Style filter's AND/OR group builder and return the resulting groups
+    and how they combine (see `PlaylistFilter.tag_groups`/`tag_groups_mode`).
+
+    Each group gets its own tag multiselect + and/or "match" mode; "+ Add style group"
+    appends another; a group beyond the first can be removed. Multiple groups only show
+    a combinator (AND/OR between groups) once there's more than one to combine.
+    """
+    group_ids = _tag_group_ids()
+    tag_groups: list[TagGroup] = []
+    for i, gid in enumerate(group_ids):
+        label_visibility: Literal["visible", "collapsed"] = "visible" if i == 0 else "collapsed"
+        tag_col, mode_col, remove_col = st.columns([3, 1, 1])
+        with tag_col:
+            selected = st.multiselect(
+                "Style", tag_options, key=f"collection_tag_group_{gid}", label_visibility=label_visibility
+            )
+        with mode_col:
+            mode = cast(
+                BoolOp,
+                st.selectbox(
+                    "Match",
+                    options=["or", "and"],
+                    format_func=lambda m: "any of" if m == "or" else "all of",
+                    key=f"collection_tag_group_mode_{gid}",
+                    label_visibility=label_visibility,
+                ),
+            )
+        with remove_col:
+            if i == 0:
+                st.write("")  # align with the labeled widgets in this row
+            if len(group_ids) > 1 and st.button("Remove", key=f"collection_tag_group_remove_{gid}"):
+                group_ids.remove(gid)
+                st.rerun()
+        if selected:
+            tag_groups.append(TagGroup(tags=selected, mode=mode))
+
+    add_col, combinator_col = st.columns([1, 3])
+    with add_col:
+        if st.button("+ Add style group", key="collection_tag_group_add"):
+            new_id = st.session_state["collection_tag_group_next_id"]
+            st.session_state["collection_tag_group_next_id"] = new_id + 1
+            group_ids.append(new_id)
+            st.rerun()
+    tag_groups_mode: BoolOp = "or"
+    if len(group_ids) > 1:
+        with combinator_col:
+            tag_groups_mode = cast(
+                BoolOp,
+                st.radio(
+                    "Combine style groups with",
+                    options=["or", "and"],
+                    format_func=lambda m: "Match ANY group (OR)" if m == "or" else "Match ALL groups (AND)",
+                    key="collection_tag_groups_mode",
+                    horizontal=True,
+                ),
+            )
+    return tag_groups, tag_groups_mode
+
+
 def render_collection_tab() -> None:
     """Render the browsable/editable table of every cached track and its YouTube match."""
     st.header("My Discogs Collection")
@@ -337,13 +461,16 @@ def render_collection_tab() -> None:
 
     tag_options = _tag_options(all_rows)
     label_options = _label_options(all_rows)
+    channel_options = _channel_options(all_rows)
     year_lo, year_hi = _year_bounds(all_rows)
+
+    tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options)
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
-        tags = st.multiselect("Style", tag_options, key="collection_tags")
-    with col2:
         labels = st.multiselect("Label", label_options, key="collection_labels")
+    with col2:
+        channels = st.multiselect("Channel", channel_options, key="collection_channels")
     with col3:
         if year_lo < year_hi:
             year_range = st.slider(
@@ -356,14 +483,16 @@ def render_collection_tab() -> None:
         st.write("")  # vertical alignment with the widgets above
         matched_only = st.checkbox("Matched only", key="collection_matched_only")
 
-    narrowed = bool(tags or labels or matched_only or year_range != (year_lo, year_hi))
+    narrowed = bool(tag_groups or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
         PlaylistFilter(
-            tags=tags,
+            tag_groups=tag_groups,
+            tag_groups_mode=tag_groups_mode,
             labels=labels,
             year_min=year_range[0] if year_range[0] > year_lo else None,
             year_max=year_range[1] if year_range[1] < year_hi else None,
             matched_only=matched_only,
+            channels=channels,
         )
         if narrowed
         else None
@@ -373,33 +502,48 @@ def render_collection_tab() -> None:
         rows = resolve_rows(conn, filt)
 
     st.caption(f"{len(rows)} tracks ({sum(1 for r in rows if r.matched)} matched)")
+    select_all = st.checkbox(
+        f"Select all {len(rows)} filtered track(s)", key="collection_select_all", disabled=not rows
+    )
 
     df = _rows_to_dataframe(rows, flag_column="select")
+    if select_all:
+        df["select"] = True
+    editor_key = _collection_editor_key(rows)
+    # "Select all" overrides the per-row picks below rather than merely pre-checking them
+    # (disabling "select" while it's on), so the individual checkboxes can't be used to
+    # carve out exceptions from it — turn it off first to hand-pick a subset instead.
+    disabled_columns = [
+        "release_artist",
+        "position",
+        "track_title",
+        "release_title",
+        "discogs_url",
+        "styles",
+        "genres",
+        "labels",
+        "year",
+        "matched",
+        "confidence",
+        "video_title",
+        "channel",
+        "locked",
+    ]
+    if select_all:
+        disabled_columns.append("select")
     edited_df = st.data_editor(
         df,
-        key="collection_editor",
+        key=editor_key,
         hide_index=True,
         width="stretch",
         column_order=COLLECTION_COLUMNS,
-        disabled=[
-            "release_artist",
-            "position",
-            "track_title",
-            "release_title",
-            "discogs_url",
-            "styles",
-            "genres",
-            "labels",
-            "year",
-            "matched",
-            "confidence",
-            "video_title",
-            "channel",
-            "locked",
-        ],
+        disabled=disabled_columns,
         column_config={
             **SHARED_COLUMN_CONFIG,
-            "select": st.column_config.CheckboxColumn("", help="Select tracks to add to a playlist"),
+            "select": st.column_config.CheckboxColumn(
+                "",
+                help="All filtered tracks are selected" if select_all else "Select tracks to add to a playlist",
+            ),
         },
     )
 
@@ -411,15 +555,19 @@ def render_collection_tab() -> None:
         st.error(message)
     if n_artist or n_video:
         st.success(f"Saved {n_artist + n_video} correction(s).")
-        del st.session_state["collection_editor"]
+        del st.session_state[editor_key]
         st.rerun()
 
-    _render_add_to_playlist(edited_df)
+    if select_all:
+        selected_ids = [r.track_id for r in rows if r.track_id is not None]
+    else:
+        selected_ids = _selected_track_ids(edited_df, "select")
+    _render_add_to_playlist(selected_ids, editor_key)
 
 
-def _render_add_to_playlist(edited_df: pd.DataFrame) -> None:
-    """Checked rows in the Collection tab's "select" column -> add to an existing or new playlist."""
-    selected_ids = _selected_track_ids(edited_df, "select")
+def _render_add_to_playlist(selected_ids: list[int], editor_key: str) -> None:
+    """Checked rows in the Collection tab's "select" column (or every filtered track, if
+    "select all" is on) -> add to an existing or new playlist."""
 
     with store.connect() as conn:
         playlist_names = [p["name"] for p in store.list_playlists(conn)]
@@ -465,7 +613,7 @@ def _render_add_to_playlist(edited_df: pd.DataFrame) -> None:
         conn.commit()
 
     st.success(f"Added {added} track(s) to '{name}'.")
-    del st.session_state["collection_editor"]
+    del st.session_state[editor_key]
     st.rerun()
 
 
@@ -657,10 +805,30 @@ def render_sidebar_nav() -> tuple[str, int | None]:
     return kind, playlist_id
 
 
+def _ytmusic_connected() -> bool:
+    """Whether YT Music should be shown as connected: auth headers are saved, and no YT Music
+    call this session has failed in a way that suggests that saved session has gone stale
+    (see `_mark_ytmusic_auth_suspect`)."""
+    return ytmusic_client.is_authenticated() and not st.session_state.get("ytmusic_auth_suspect", False)
+
+
+def _mark_ytmusic_auth_suspect() -> None:
+    """Flag the saved YT Music session as suspect after a failed request, so the sidebar pill
+    and YT Music page drop to "Not connected" until the user re-saves fresh headers — a failure
+    this shape (once past the auth-file-exists check) usually means the cookie/x-goog-authuser
+    session has expired or rotated, not a one-off network blip.
+
+    The sidebar itself has already rendered earlier in this same script run, so the pill picks
+    this up starting the *next* rerun rather than instantly — deliberately not forcing an
+    st.rerun() here, since that would blow away the st.error() explaining what just failed.
+    """
+    st.session_state["ytmusic_auth_suspect"] = True
+
+
 def _render_ytmusic_nav_item(selected: bool) -> None:
     """Sidebar nav row linking to the dedicated YT Music page, with a status pill showing
     whether an account is currently connected."""
-    authenticated = ytmusic_client.is_authenticated()
+    authenticated = _ytmusic_connected()
     with st.container(key="nav_ytmusic", horizontal=True, gap="small"):
         if _nav_button("YT Music", key="nav_ytmusic_btn", selected=selected, width="content"):
             st.session_state["nav_kind"] = "ytmusic"
@@ -691,7 +859,7 @@ def _render_ytmusic_page() -> None:
         st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ytmusic_client.SETUP_STEPS, 1)))
 
     with right:
-        if ytmusic_client.is_authenticated():
+        if _ytmusic_connected():
             st.success("Connected", icon=":material/check_circle:")
         else:
             st.info("Not connected", icon=":material/link_off:")
@@ -714,6 +882,7 @@ def _render_ytmusic_page() -> None:
             except ytmusic_client.YTMusicAuthError as e:
                 st.error(f"Could not authenticate: {e}")
             else:
+                st.session_state["ytmusic_auth_suspect"] = False
                 st.success("YT Music connected.")
                 st.rerun()
 
@@ -851,44 +1020,155 @@ def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
             st.rerun()
 
 
+def _duplicate_video_groups(rows: list[TrackRow]) -> list[list[TrackRow]]:
+    """Group matched rows that share the same YouTube video id — usually two different Discogs
+    tracks accidentally matched to the same video, worth a second look before syncing (a shared
+    video id can also make YT Music reject a whole add request if left undeduped downstream)."""
+    by_video: dict[str, list[TrackRow]] = {}
+    for r in rows:
+        if r.video_id:
+            by_video.setdefault(r.video_id, []).append(r)
+    return [group for group in by_video.values() if len(group) > 1]
+
+
+def _stray_remote_tracks(remote_tracks: list[dict[str, Any]], video_ids: list[str]) -> list[dict[str, Any]]:
+    """Remote playlist tracks whose video id isn't in the local track set — these get removed."""
+    local = set(video_ids)
+    return [t for t in remote_tracks if t.get("videoId") not in local]
+
+
+def _diff_and_sync_ytmusic(yt: YTMusic, ytmusic_id: str, video_ids: list[str]) -> list[dict[str, Any]]:
+    """Push tracks missing on `ytmusic_id`, remove remote tracks no longer present locally, and
+    return the removed tracks."""
+    remote_tracks = ytmusic_client.get_playlist_tracks(yt, ytmusic_id)
+    remote_video_ids = {t["videoId"] for t in remote_tracks if t.get("videoId")}
+    to_add = [v for v in video_ids if v not in remote_video_ids]
+    to_remove = _stray_remote_tracks(remote_tracks, video_ids)
+    ytmusic_client.add_tracks(yt, ytmusic_id, to_add)
+    ytmusic_client.remove_tracks(yt, ytmusic_id, to_remove)
+    return to_remove
+
+
+# ytmusicapi's `get_playlist` (used by `get_playlist_tracks`) doesn't raise a clean YTMusicError
+# for a deleted/invalid playlist id — the browse response it gets back is just missing the keys
+# a real playlist's response would have, and its internal `nav()` helper raises a bare KeyError
+# (or IndexError, depending on the exact shape) instead. Both need to be treated the same as a
+# YTMusicError for the stale-id recovery below to actually trigger on this failure mode.
+_YTMUSIC_MISSING_PLAYLIST_ERRORS: tuple[type[Exception], ...] = (YTMusicError, KeyError, IndexError)
+_YTMUSIC_PUSH_ERRORS: tuple[type[Exception], ...] = (RuntimeError, *_YTMUSIC_MISSING_PLAYLIST_ERRORS)
+
+
+def _push_to_ytmusic(
+    yt: YTMusic, playlist: sqlite3.Row, playlist_id: int, playlist_name: str, video_ids: list[str]
+) -> list[dict[str, Any]]:
+    """Create (or reuse) `playlist_name`'s linked YT Music playlist, then diff `video_ids`
+    against what's actually on it — pushing what's missing and removing remote tracks no longer
+    present locally — and return the removed tracks.
+
+    If a playlist id was already saved locally but YT Music rejects requests against it — e.g. it
+    was deleted on the YT Music side, or the id was never valid in the first place (cookie-based
+    auth can "succeed" on `create_playlist` without a playlist actually existing server-side) —
+    forget the stale id, create a fresh playlist once, and retry the diff against it, rather than
+    failing on the same bad id forever. Re-raises if that retry also fails, or if there was no
+    saved id to blame.
+    """
+    existing_id = playlist["ytmusic_playlist_id"]
+    with store.connect() as conn:
+        if existing_id:
+            ytmusic_id = existing_id
+        else:
+            ytmusic_id, _created = ytmusic_client.get_or_create_playlist(
+                yt, playlist_name, description="Curated from the Discogs collection app"
+            )
+            store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
+        conn.commit()
+
+    try:
+        return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
+    except _YTMUSIC_MISSING_PLAYLIST_ERRORS:
+        if not existing_id:
+            raise
+        with store.connect() as conn:
+            ytmusic_id, _created = ytmusic_client.get_or_create_playlist(
+                yt, playlist_name, description="Curated from the Discogs collection app"
+            )
+            store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
+            conn.commit()
+        return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
+
+
 def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     playlist_id = playlist["id"]
     video_ids = [r.video_id for r in rows if r.video_id]
     confirm_key = f"confirm_sync_{playlist_id}"
+    extra_confirm_key = f"confirm_sync_extra_{playlist_id}"
+    playlist_name = f"Discogs - {playlist['name']}"
+    already_linked = bool(playlist["ytmusic_playlist_id"])
 
     st.warning(
         "This will create (or update) a real playlist on your YT Music account "
-        f"named 'Discogs - {playlist['name']}' with these {len(video_ids)} track(s)."
+        f"named '{playlist_name}' with these {len(video_ids)} track(s)."
     )
+
+    for group in _duplicate_video_groups(rows):
+        names = ", ".join(f"{r.track_artist} - {r.track_title}" for r in group)
+        st.warning(f"Same YouTube video matched to {len(group)} tracks: {names}.")
+
+    # Only the *first* link to a playlist can silently attach to a pre-existing YT Music
+    # playlist that happens to share the generated name — once ytmusic_playlist_id is saved,
+    # later syncs know exactly which remote playlist they're diffing against, so no need to
+    # re-check every render.
+    stray_count = 0
+    if not already_linked and _ytmusic_connected():
+        try:
+            yt = ytmusic_client.get_client(authenticated=True)
+            found_id = ytmusic_client.find_playlist(yt, playlist_name)
+            if found_id is not None:
+                stray_count = len(_stray_remote_tracks(ytmusic_client.get_playlist_tracks(yt, found_id), video_ids))
+        except _YTMUSIC_PUSH_ERRORS:
+            pass  # surfaced again, more clearly, if the user proceeds and it still fails
+
+    needs_extra_confirm = stray_count > 0
+    if needs_extra_confirm:
+        st.warning(
+            f"Found an existing YT Music playlist '{playlist_name}' with {stray_count} track(s) "
+            "not in your local playlist — syncing will remove them."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Yes, push to YT Music", key=f"confirm_sync_yes_{playlist_id}"):
+        awaiting_extra_confirm = needs_extra_confirm and not st.session_state.get(extra_confirm_key, False)
+        label = "Yes, remove them and push" if awaiting_extra_confirm else "Yes, push to YT Music"
+        if st.button(label, key=f"confirm_sync_yes_{playlist_id}"):
+            if awaiting_extra_confirm:
+                st.session_state[extra_confirm_key] = True
+                st.rerun()
             st.session_state[confirm_key] = False
-            if not ytmusic_client.is_authenticated():
+            st.session_state.pop(extra_confirm_key, None)
+            if not _ytmusic_connected():
                 st.error("Not authenticated with YT Music. Use the YT Music page (in the sidebar) to connect.")
                 return
-            playlist_name = f"Discogs - {playlist['name']}"
             try:
                 yt = ytmusic_client.get_client(authenticated=True)
-                with store.connect() as conn:
-                    existing_id = playlist["ytmusic_playlist_id"]
-                    if existing_id:
-                        ytmusic_id = existing_id
-                    else:
-                        ytmusic_id = ytmusic_client.get_or_create_playlist(
-                            yt, playlist_name, description="Curated from the Discogs collection app"
-                        )
-                        store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
-                    conn.commit()
-                ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
-            except RuntimeError as e:
-                st.error(str(e))
+                to_remove = _push_to_ytmusic(yt, playlist, playlist_id, playlist_name, video_ids)
+            except _YTMUSIC_PUSH_ERRORS as e:
+                _mark_ytmusic_auth_suspect()
+                st.error(
+                    f"YT Music rejected the request: {e}\n\n"
+                    "This usually means the saved cookie/x-goog-authuser session has expired or "
+                    "rotated. Re-connect on the YT Music page (in the sidebar) with a fresh copy "
+                    "of those two header values and try again."
+                )
                 return
-            st.success(f"Pushed {len(video_ids)} track(s) to '{playlist_name}'.")
+            summary = f"Synced {len(video_ids)} track(s) to '{playlist_name}'"
+            if to_remove:
+                summary += f", removed {len(to_remove)} track(s) no longer in the playlist"
+            st.success(summary + ".")
             st.rerun()
     with col2:
         if st.button("Cancel", key=f"confirm_sync_no_{playlist_id}"):
             st.session_state[confirm_key] = False
+            st.session_state.pop(extra_confirm_key, None)
             st.rerun()
 
 

@@ -328,7 +328,7 @@ def push_style_playlists(
             if existing_id:
                 playlist_id = existing_id
             else:
-                playlist_id = ytmusic_client.get_or_create_playlist(
+                playlist_id, _created = ytmusic_client.get_or_create_playlist(
                     yt, playlist_name, description=f"Auto-generated from Discogs collection (style: {s})"
                 )
                 store.set_playlist_def_ytmusic_id(conn, def_id, playlist_id)
