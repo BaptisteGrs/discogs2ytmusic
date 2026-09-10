@@ -91,6 +91,20 @@ def auth_ytmusic(
     ytmusic_client.run_setup(from_file=from_file)
 
 
+@app.command(name="set-playlist-prefix")
+def set_playlist_prefix(
+    prefix: str = typer.Argument(..., help="Prefix used when naming playlists pushed to YT Music."),
+) -> None:
+    """Set the prefix used when naming playlists pushed to YT Music (default: "Discogs").
+
+    Also available in the Streamlit app, on the YT Music connection page.
+    """
+    cfg = Config.load()
+    cfg.playlist_name_prefix = prefix
+    cfg.save()
+    console.print(f"[green]Playlist name prefix set to '{prefix}'.[/green]")
+
+
 def _load_discogs_client() -> tuple[DiscogsClient, str]:
     cfg = Config.load()
     if not cfg.discogs_token or not cfg.discogs_username:

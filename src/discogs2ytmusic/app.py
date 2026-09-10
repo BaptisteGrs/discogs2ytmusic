@@ -886,6 +886,9 @@ def _render_ytmusic_page() -> None:
     same `ytmusic_client.save_auth_headers` the CLI's `auth ytmusic` command uses, so both
     write `YTMUSIC_AUTH_FILE` identically — this page is additive for the UI-only workflow,
     not a replacement for the CLI command.
+
+    Also hosts a minimal text input for `Config.playlist_name_prefix` — a deliberately
+    unstyled placement until a real Settings page exists (tracked separately in #46).
     """
     st.subheader("YT Music")
     st.caption("Connect your account so matched tracks can sync to real playlists.")
@@ -923,6 +926,22 @@ def _render_ytmusic_page() -> None:
                 st.session_state["ytmusic_auth_suspect"] = False
                 st.success("YT Music connected.")
                 st.rerun()
+
+        st.divider()
+        st.markdown("**Pushed playlist name**")
+        # Minimal, unstyled placement for now — a proper Settings page (and any visual
+        # redesign around it) is tracked separately in #46, not part of this feature.
+        cfg = Config.load()
+        prefix = st.text_input(
+            "Prefix",
+            value=cfg.playlist_name_prefix,
+            key="playlist_name_prefix_input",
+            help="Pushed playlists are named '<prefix> - <playlist name>'.",
+        )
+        if st.button("Save prefix", key="playlist_name_prefix_save"):
+            cfg.playlist_name_prefix = prefix
+            cfg.save()
+            st.success("Playlist name prefix saved.")
 
 
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
@@ -1118,7 +1137,7 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
     video_ids = [r.video_id for r in rows if r.video_id]
     confirm_key = f"confirm_sync_{playlist_id}"
     extra_confirm_key = f"confirm_sync_extra_{playlist_id}"
-    playlist_name = f"Discogs - {playlist['name']}"
+    playlist_name = f"{Config.load().playlist_name_prefix} - {playlist['name']}"
     already_linked = bool(playlist["ytmusic_playlist_id"])
 
     st.warning(
