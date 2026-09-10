@@ -709,6 +709,17 @@ def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
             st.rerun()
 
 
+def _duplicate_video_groups(rows: list[TrackRow]) -> list[list[TrackRow]]:
+    """Group matched rows that share the same YouTube video id — usually two different Discogs
+    tracks accidentally matched to the same video, worth a second look before syncing (a shared
+    video id can also make YT Music reject a whole add request if left undeduped downstream)."""
+    by_video: dict[str, list[TrackRow]] = {}
+    for r in rows:
+        if r.video_id:
+            by_video.setdefault(r.video_id, []).append(r)
+    return [group for group in by_video.values() if len(group) > 1]
+
+
 def _stray_remote_tracks(remote_tracks: list[dict[str, Any]], video_ids: list[str]) -> list[dict[str, Any]]:
     """Remote playlist tracks whose video id isn't in the local track set — these get removed."""
     local = set(video_ids)
@@ -787,6 +798,10 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
         "This will create (or update) a real playlist on your YT Music account "
         f"named '{playlist_name}' with these {len(video_ids)} track(s)."
     )
+
+    for group in _duplicate_video_groups(rows):
+        names = ", ".join(f"{r.track_artist} - {r.track_title}" for r in group)
+        st.warning(f"Same YouTube video matched to {len(group)} tracks: {names}.")
 
     # Only the *first* link to a playlist can silently attach to a pre-existing YT Music
     # playlist that happens to share the generated name — once ytmusic_playlist_id is saved,

@@ -298,6 +298,55 @@ def test_sync_requires_confirmation_and_never_touches_ytmusic_without_it(isolate
     assert not at.exception
 
 
+def test_sync_confirmation_warns_when_two_tracks_share_the_same_video(isolated_cache, dummy_library, monkeypatch):
+    """Two different Discogs tracks matched to the same YouTube video is usually a mismatch worth
+    a second look — and, left undeduped, can make YT Music reject a whole add request — so the
+    sync confirmation should call it out before the user proceeds."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first, second = dummy_library[0], dummy_library[1]
+        track_ids = []
+        for release in (first, second):
+            track_ids.append(
+                conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+            )
+            store.save_match(
+                conn, release["artist"], release["tracklist"][0]["title"], "shared-vid", "Video", "ytmusic", 90.0
+            )
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, track_ids)
+
+    import discogs2ytmusic.app as app_module
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: False)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+
+    assert not at.exception
+    warning = next(w.value for w in at.warning if "Same YouTube video" in w.value)
+    assert f"{first['artist']} - {first['tracklist'][0]['title']}" in warning
+    assert f"{second['artist']} - {second['tracklist'][0]['title']}" in warning
+
+
+def test_sync_confirmation_has_no_duplicate_video_warning_when_all_matches_are_distinct(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert not any("Same YouTube video" in w.value for w in at.warning)
+
+
 def _patch_sync_happy_path(
     monkeypatch,
     app_module,
