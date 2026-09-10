@@ -1026,6 +1026,9 @@ def test_sync_recovers_from_a_deleted_playlist_raising_a_bare_keyerror(isolated_
         "add_tracks",
         lambda yt, pid, video_ids: pushed.setdefault(pid, []).extend(video_ids),
     )
+    # The KeyError is retried a few times (see _get_playlist_tracks_with_retry) before the
+    # stale-id recovery kicks in — skip the real sleeps so the test isn't slow.
+    monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
 
     at = AppTest.from_file(APP_PATH).run()
     at = _select_playlist(at, playlist_id)
@@ -1039,6 +1042,84 @@ def test_sync_recovers_from_a_deleted_playlist_raising_a_bare_keyerror(isolated_
     with store.connect() as conn:
         playlist = store.get_playlist(conn, playlist_id)
     assert playlist["ytmusic_playlist_id"] == "fresh-id"
+
+
+def test_sync_retries_a_transient_keyerror_on_playlist_read_then_succeeds(isolated_cache, dummy_library, monkeypatch):
+    """A freshly created playlist can be briefly un-queryable (see
+    _get_playlist_tracks_with_retry) — a KeyError that clears up within a couple of retries
+    should not fail the sync at all."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    import discogs2ytmusic.app as app_module
+
+    calls = {"n": 0}
+
+    def _get_playlist_tracks(yt, pid):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise KeyError("Unable to find 'contents' using path [...] on {...}, exception: 'contents'")
+        return []
+
+    created_names, pushed, _removed = _patch_sync_happy_path(monkeypatch, app_module)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", _get_playlist_tracks)
+    monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert not at.error
+    assert created_names == ["Discogs - My Favorites"]
+    assert pushed == {"ytmusic-playlist-id": ["vid1"]}
+
+
+def test_first_time_sync_bare_keyerror_does_not_flag_the_session_as_suspect(isolated_cache, dummy_library, monkeypatch):
+    """A first-time sync (no saved ytmusic_playlist_id) has no stale id to blame, so a
+    persistent KeyError from a not-yet-queryable new playlist just fails the sync — it must not
+    be misread as an expired/rotated cookie (see issue #53)."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    import discogs2ytmusic.app as app_module
+
+    def _get_playlist_tracks(yt, pid):
+        raise KeyError("Unable to find 'contents' using path [...] on {...}, exception: 'contents'")
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "find_playlist", lambda yt, name: None)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", _get_playlist_tracks)
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": ("fresh-id", True),
+    )
+    monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert any("unexpected response" in e.value for e in at.error)
+    assert not any("cookie" in e.value for e in at.error)
+
+    at.run()
+    assert "is-connected" in _sidebar_pill(at)
 
 
 def test_sync_removes_remote_tracks_no_longer_present_locally(isolated_cache, dummy_library, monkeypatch):
