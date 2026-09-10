@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections import defaultdict
 
 import pytest
@@ -774,3 +775,71 @@ def test_set_playlist_ytmusic_id(isolated_cache):
         playlist = store.get_playlist(conn, playlist_id)
 
     assert playlist["ytmusic_playlist_id"] == "PL123"
+
+
+def test_set_playlist_ytmusic_id_does_not_bump_updated_at(isolated_cache):
+    """Linking to YT Music is not a content edit — `updated_at` should reflect add/remove
+    track calls only, not linking (see `set_playlist_pushed_at` for tracking pushes)."""
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        before = store.get_playlist(conn, playlist_id)["updated_at"]
+
+        store.set_playlist_ytmusic_id(conn, playlist_id, "PL123")
+
+        after = store.get_playlist(conn, playlist_id)["updated_at"]
+
+    assert after == before
+
+
+def test_set_playlist_pushed_at_records_a_timestamp(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        assert store.get_playlist(conn, playlist_id)["pushed_at"] is None
+
+        store.set_playlist_pushed_at(conn, playlist_id)
+
+        playlist = store.get_playlist(conn, playlist_id)
+
+    assert playlist["pushed_at"] is not None
+    assert playlist["pushed_at"] <= time.time()
+
+
+def test_set_playlist_pushed_at_does_not_bump_updated_at(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        before = store.get_playlist(conn, playlist_id)["updated_at"]
+
+        store.set_playlist_pushed_at(conn, playlist_id)
+
+        after = store.get_playlist(conn, playlist_id)["updated_at"]
+
+    assert after == before
+
+
+def test_playlists_table_migrates_in_pushed_at_column(isolated_cache):
+    """Curated-playlist caches created before `pushed_at` existed must upgrade in place."""
+    now = 1700000000.0
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            ytmusic_playlist_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO playlists (name, ytmusic_playlist_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("Old Playlist", "PL-old", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Old Playlist")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(playlists)")}
+
+    assert "pushed_at" in cols
+    assert playlist["pushed_at"] is None
+    assert playlist["ytmusic_playlist_id"] == "PL-old"  # pre-existing data preserved
