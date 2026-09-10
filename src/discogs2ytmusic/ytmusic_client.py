@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ytmusicapi import YTMusic, setup
-from ytmusicapi.exceptions import YTMusicUserError
+from ytmusicapi.exceptions import YTMusicError, YTMusicUserError
 
 from .config import YTMUSIC_AUTH_FILE, ensure_dirs
 
@@ -165,26 +166,86 @@ def get_client(authenticated: bool = True) -> YTMusic:
     return YTMusic()
 
 
-def get_or_create_playlist(yt: YTMusic, name: str, description: str = "") -> str:
-    """Return the id of the existing playlist named `name`, creating it if none exists."""
+def find_playlist(yt: YTMusic, name: str) -> str | None:
+    """Return the id of the library playlist named `name`, or None if no such playlist exists."""
     existing = yt.get_library_playlists(limit=200)
     for pl in existing:
         if pl.get("title") == name:
-            return pl["playlistId"]
+            return str(pl["playlistId"])
+    return None
+
+
+def get_or_create_playlist(yt: YTMusic, name: str, description: str = "") -> tuple[str, bool]:
+    """Return (playlist id, created) for the playlist named `name`, creating it if none exists.
+
+    `created` is False when an existing playlist matching `name` was reused instead of a new one
+    being made. Callers that treat the local track set as ground truth (see the Streamlit UI's
+    sync confirmation) use this to warn before removing tracks from a pre-existing remote
+    playlist that happens to share the generated name.
+    """
+    found = find_playlist(yt, name)
+    if found is not None:
+        return found, False
     result = yt.create_playlist(name, description)
     if not isinstance(result, str):
         # ytmusicapi returns an error dict here instead of raising, on failure.
         raise RuntimeError(f"Failed to create playlist {name!r}: {result}")
-    return result
+    return result, True
 
 
 def add_tracks(yt: YTMusic, playlist_id: str, video_ids: list[str]) -> None:
-    """Add videos to a playlist, chunked to stay under YT Music's request size limits."""
+    """Add videos to a playlist, chunked to stay under YT Music's request size limits.
+
+    Raises:
+        YTMusicError: If YT Music rejects a chunk (e.g. `add_playlist_items` returns an error
+            response instead of raising) — surfaced instead of silently dropping tracks.
+    """
     if not video_ids:
         return
-    # YT Music silently ignores duplicates already in the playlist, but chunk
-    # to stay well under request size limits for large collections.
+    # A video matched twice locally (e.g. two Discogs tracks resolved to the same YouTube video)
+    # is meaningless to send twice in one call — dedupe first.
+    deduped = list(dict.fromkeys(video_ids))
+    # duplicates=False doesn't silently skip a video already on the playlist: confirmed against a
+    # real account, YT Music instead rejects the *entire* chunk with STATUS_FAILED and hands back
+    # an interactive "Duplicates" confirm-dialog payload instead of adding anything — including
+    # the genuinely-new videos in the same chunk. This can trigger even for a video our own diff
+    # (`get_playlist_tracks`) didn't think was already there yet (e.g. a stale read right after a
+    # previous add). duplicates=True skips that dedup check server-side, so the request always
+    # goes through; the cost is a rare literal duplicate entry if a video really was already
+    # present, which is a minor, visible, user-fixable annoyance next to every other track in the
+    # same chunk silently failing to sync.
     CHUNK = 50
-    for i in range(0, len(video_ids), CHUNK):
-        chunk = video_ids[i : i + CHUNK]
-        yt.add_playlist_items(playlist_id, chunk, duplicates=False)
+    for i in range(0, len(deduped), CHUNK):
+        chunk = deduped[i : i + CHUNK]
+        result = yt.add_playlist_items(playlist_id, chunk, duplicates=True)
+        status = result.get("status", "") if isinstance(result, dict) else ""
+        if "SUCCEEDED" not in status:
+            raise YTMusicError(f"YT Music rejected adding tracks to playlist {playlist_id!r}: {result}")
+
+
+def get_playlist_tracks(yt: YTMusic, playlist_id: str) -> list[dict[str, Any]]:
+    """Return every track currently on a YT Music playlist (all pages, no limit).
+
+    Each item includes `videoId` and `setVideoId` — `remove_tracks` needs both to identify
+    which occurrence of a track to remove.
+    """
+    playlist = yt.get_playlist(playlist_id, limit=None)
+    tracks: list[dict[str, Any]] = playlist.get("tracks", [])
+    return tracks
+
+
+def remove_tracks(yt: YTMusic, playlist_id: str, tracks: list[dict[str, Any]]) -> None:
+    """Remove tracks from a playlist, chunked to stay under YT Music's request size limits.
+
+    Args:
+        yt: Authenticated YTMusic client.
+        playlist_id: The playlist to remove tracks from.
+        tracks: Track items as returned by `get_playlist_tracks` — each must include `videoId`
+            and `setVideoId` (YT Music needs both to identify the exact occurrence to remove).
+    """
+    if not tracks:
+        return
+    CHUNK = 50
+    for i in range(0, len(tracks), CHUNK):
+        chunk = tracks[i : i + CHUNK]
+        yt.remove_playlist_items(playlist_id, chunk)

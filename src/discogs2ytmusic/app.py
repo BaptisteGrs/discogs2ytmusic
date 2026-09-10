@@ -709,63 +709,138 @@ def _render_sync_button(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
             st.rerun()
 
 
+def _duplicate_video_groups(rows: list[TrackRow]) -> list[list[TrackRow]]:
+    """Group matched rows that share the same YouTube video id — usually two different Discogs
+    tracks accidentally matched to the same video, worth a second look before syncing (a shared
+    video id can also make YT Music reject a whole add request if left undeduped downstream)."""
+    by_video: dict[str, list[TrackRow]] = {}
+    for r in rows:
+        if r.video_id:
+            by_video.setdefault(r.video_id, []).append(r)
+    return [group for group in by_video.values() if len(group) > 1]
+
+
+def _stray_remote_tracks(remote_tracks: list[dict[str, Any]], video_ids: list[str]) -> list[dict[str, Any]]:
+    """Remote playlist tracks whose video id isn't in the local track set — these get removed."""
+    local = set(video_ids)
+    return [t for t in remote_tracks if t.get("videoId") not in local]
+
+
+def _diff_and_sync_ytmusic(yt: YTMusic, ytmusic_id: str, video_ids: list[str]) -> list[dict[str, Any]]:
+    """Push tracks missing on `ytmusic_id`, remove remote tracks no longer present locally, and
+    return the removed tracks."""
+    remote_tracks = ytmusic_client.get_playlist_tracks(yt, ytmusic_id)
+    remote_video_ids = {t["videoId"] for t in remote_tracks if t.get("videoId")}
+    to_add = [v for v in video_ids if v not in remote_video_ids]
+    to_remove = _stray_remote_tracks(remote_tracks, video_ids)
+    ytmusic_client.add_tracks(yt, ytmusic_id, to_add)
+    ytmusic_client.remove_tracks(yt, ytmusic_id, to_remove)
+    return to_remove
+
+
+# ytmusicapi's `get_playlist` (used by `get_playlist_tracks`) doesn't raise a clean YTMusicError
+# for a deleted/invalid playlist id — the browse response it gets back is just missing the keys
+# a real playlist's response would have, and its internal `nav()` helper raises a bare KeyError
+# (or IndexError, depending on the exact shape) instead. Both need to be treated the same as a
+# YTMusicError for the stale-id recovery below to actually trigger on this failure mode.
+_YTMUSIC_MISSING_PLAYLIST_ERRORS: tuple[type[Exception], ...] = (YTMusicError, KeyError, IndexError)
+_YTMUSIC_PUSH_ERRORS: tuple[type[Exception], ...] = (RuntimeError, *_YTMUSIC_MISSING_PLAYLIST_ERRORS)
+
+
 def _push_to_ytmusic(
     yt: YTMusic, playlist: sqlite3.Row, playlist_id: int, playlist_name: str, video_ids: list[str]
-) -> None:
-    """Create (or reuse) `playlist_name`'s linked YT Music playlist and push `video_ids` to it.
+) -> list[dict[str, Any]]:
+    """Create (or reuse) `playlist_name`'s linked YT Music playlist, then diff `video_ids`
+    against what's actually on it — pushing what's missing and removing remote tracks no longer
+    present locally — and return the removed tracks.
 
-    If a playlist id was already saved locally but YT Music rejects writes to it — e.g. it was
-    deleted on the YT Music side, or the id was never valid in the first place (cookie-based
+    If a playlist id was already saved locally but YT Music rejects requests against it — e.g. it
+    was deleted on the YT Music side, or the id was never valid in the first place (cookie-based
     auth can "succeed" on `create_playlist` without a playlist actually existing server-side) —
-    forget the stale id and create a fresh playlist once, rather than failing on the same bad id
-    forever. Re-raises if that retry also fails, or if there was no saved id to blame.
+    forget the stale id, create a fresh playlist once, and retry the diff against it, rather than
+    failing on the same bad id forever. Re-raises if that retry also fails, or if there was no
+    saved id to blame.
     """
     existing_id = playlist["ytmusic_playlist_id"]
     with store.connect() as conn:
         if existing_id:
             ytmusic_id = existing_id
         else:
-            ytmusic_id = ytmusic_client.get_or_create_playlist(
+            ytmusic_id, _created = ytmusic_client.get_or_create_playlist(
                 yt, playlist_name, description="Curated from the Discogs collection app"
             )
             store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
         conn.commit()
 
     try:
-        ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
-    except YTMusicError:
+        return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
+    except _YTMUSIC_MISSING_PLAYLIST_ERRORS:
         if not existing_id:
             raise
         with store.connect() as conn:
-            ytmusic_id = ytmusic_client.get_or_create_playlist(
+            ytmusic_id, _created = ytmusic_client.get_or_create_playlist(
                 yt, playlist_name, description="Curated from the Discogs collection app"
             )
             store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
             conn.commit()
-        ytmusic_client.add_tracks(yt, ytmusic_id, video_ids)
+        return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
 
 
 def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
     playlist_id = playlist["id"]
     video_ids = [r.video_id for r in rows if r.video_id]
     confirm_key = f"confirm_sync_{playlist_id}"
+    extra_confirm_key = f"confirm_sync_extra_{playlist_id}"
+    playlist_name = f"Discogs - {playlist['name']}"
+    already_linked = bool(playlist["ytmusic_playlist_id"])
 
     st.warning(
         "This will create (or update) a real playlist on your YT Music account "
-        f"named 'Discogs - {playlist['name']}' with these {len(video_ids)} track(s)."
+        f"named '{playlist_name}' with these {len(video_ids)} track(s)."
     )
+
+    for group in _duplicate_video_groups(rows):
+        names = ", ".join(f"{r.track_artist} - {r.track_title}" for r in group)
+        st.warning(f"Same YouTube video matched to {len(group)} tracks: {names}.")
+
+    # Only the *first* link to a playlist can silently attach to a pre-existing YT Music
+    # playlist that happens to share the generated name — once ytmusic_playlist_id is saved,
+    # later syncs know exactly which remote playlist they're diffing against, so no need to
+    # re-check every render.
+    stray_count = 0
+    if not already_linked and _ytmusic_connected():
+        try:
+            yt = ytmusic_client.get_client(authenticated=True)
+            found_id = ytmusic_client.find_playlist(yt, playlist_name)
+            if found_id is not None:
+                stray_count = len(_stray_remote_tracks(ytmusic_client.get_playlist_tracks(yt, found_id), video_ids))
+        except _YTMUSIC_PUSH_ERRORS:
+            pass  # surfaced again, more clearly, if the user proceeds and it still fails
+
+    needs_extra_confirm = stray_count > 0
+    if needs_extra_confirm:
+        st.warning(
+            f"Found an existing YT Music playlist '{playlist_name}' with {stray_count} track(s) "
+            "not in your local playlist — syncing will remove them."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Yes, push to YT Music", key=f"confirm_sync_yes_{playlist_id}"):
+        awaiting_extra_confirm = needs_extra_confirm and not st.session_state.get(extra_confirm_key, False)
+        label = "Yes, remove them and push" if awaiting_extra_confirm else "Yes, push to YT Music"
+        if st.button(label, key=f"confirm_sync_yes_{playlist_id}"):
+            if awaiting_extra_confirm:
+                st.session_state[extra_confirm_key] = True
+                st.rerun()
             st.session_state[confirm_key] = False
+            st.session_state.pop(extra_confirm_key, None)
             if not _ytmusic_connected():
                 st.error("Not authenticated with YT Music. Use the YT Music page (in the sidebar) to connect.")
                 return
-            playlist_name = f"Discogs - {playlist['name']}"
             try:
                 yt = ytmusic_client.get_client(authenticated=True)
-                _push_to_ytmusic(yt, playlist, playlist_id, playlist_name, video_ids)
-            except (RuntimeError, YTMusicError) as e:
+                to_remove = _push_to_ytmusic(yt, playlist, playlist_id, playlist_name, video_ids)
+            except _YTMUSIC_PUSH_ERRORS as e:
                 _mark_ytmusic_auth_suspect()
                 st.error(
                     f"YT Music rejected the request: {e}\n\n"
@@ -774,11 +849,15 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
                     "of those two header values and try again."
                 )
                 return
-            st.success(f"Pushed {len(video_ids)} track(s) to '{playlist_name}'.")
+            summary = f"Synced {len(video_ids)} track(s) to '{playlist_name}'"
+            if to_remove:
+                summary += f", removed {len(to_remove)} track(s) no longer in the playlist"
+            st.success(summary + ".")
             st.rerun()
     with col2:
         if st.button("Cancel", key=f"confirm_sync_no_{playlist_id}"):
             st.session_state[confirm_key] = False
+            st.session_state.pop(extra_confirm_key, None)
             st.rerun()
 
 

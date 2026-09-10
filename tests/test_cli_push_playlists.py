@@ -68,7 +68,7 @@ def test_push_style_playlists_apply_with_yes_creates_playlists(isolated_cache, d
     monkeypatch.setattr(
         cli.ytmusic_client,
         "get_or_create_playlist",
-        lambda yt, name, description="": created.append(name) or f"playlist::{name}",
+        lambda yt, name, description="": (created.append(name) or f"playlist::{name}", True),
     )
     monkeypatch.setattr(
         cli.ytmusic_client,

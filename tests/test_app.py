@@ -298,6 +298,89 @@ def test_sync_requires_confirmation_and_never_touches_ytmusic_without_it(isolate
     assert not at.exception
 
 
+def test_sync_confirmation_warns_when_two_tracks_share_the_same_video(isolated_cache, dummy_library, monkeypatch):
+    """Two different Discogs tracks matched to the same YouTube video is usually a mismatch worth
+    a second look — and, left undeduped, can make YT Music reject a whole add request — so the
+    sync confirmation should call it out before the user proceeds."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first, second = dummy_library[0], dummy_library[1]
+        track_ids = []
+        for release in (first, second):
+            track_ids.append(
+                conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+            )
+            store.save_match(
+                conn, release["artist"], release["tracklist"][0]["title"], "shared-vid", "Video", "ytmusic", 90.0
+            )
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, track_ids)
+
+    import discogs2ytmusic.app as app_module
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: False)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+
+    assert not at.exception
+    warning = next(w.value for w in at.warning if "Same YouTube video" in w.value)
+    assert f"{first['artist']} - {first['tracklist'][0]['title']}" in warning
+    assert f"{second['artist']} - {second['tracklist'][0]['title']}" in warning
+
+
+def test_sync_confirmation_has_no_duplicate_video_warning_when_all_matches_are_distinct(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert not any("Same YouTube video" in w.value for w in at.warning)
+
+
+def _patch_sync_happy_path(
+    monkeypatch,
+    app_module,
+    found_playlist_id: str | None = None,
+    remote_tracks: list[dict] | None = None,
+    created_playlist_id: str = "ytmusic-playlist-id",
+    created: bool = True,
+) -> tuple[list, dict, list]:
+    """Wire up fakes for a full sync round-trip and return (created_names, pushed, removed)."""
+    created_names: list[str] = []
+    pushed: dict[str, list[str]] = {}
+    removed: list[tuple[str, list[dict]]] = []
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "find_playlist", lambda yt, name: found_playlist_id)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", lambda yt, playlist_id: remote_tracks or [])
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": (created_names.append(name) or created_playlist_id, created),
+    )
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "add_tracks",
+        lambda yt, playlist_id, video_ids: pushed.setdefault(playlist_id, []).extend(video_ids),
+    )
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "remove_tracks",
+        lambda yt, playlist_id, tracks: removed.append((playlist_id, tracks)) if tracks else None,
+    )
+    return created_names, pushed, removed
+
+
 def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_library, monkeypatch):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -309,20 +392,7 @@ def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_
 
     import discogs2ytmusic.app as app_module
 
-    created = []
-    pushed = {}
-    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
-    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
-    monkeypatch.setattr(
-        app_module.ytmusic_client,
-        "get_or_create_playlist",
-        lambda yt, name, description="": created.append(name) or "ytmusic-playlist-id",
-    )
-    monkeypatch.setattr(
-        app_module.ytmusic_client,
-        "add_tracks",
-        lambda yt, playlist_id, video_ids: pushed.setdefault(playlist_id, []).extend(video_ids),
-    )
+    created_names, pushed, removed = _patch_sync_happy_path(monkeypatch, app_module)
 
     at = AppTest.from_file(APP_PATH).run()
     at = _select_playlist(at, playlist_id)
@@ -330,8 +400,9 @@ def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_
     at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
 
     assert not at.exception
-    assert created == ["Discogs - My Favorites"]
+    assert created_names == ["Discogs - My Favorites"]
     assert pushed == {"ytmusic-playlist-id": ["vid1"]}
+    assert removed == []
     with store.connect() as conn:
         playlist = store.get_playlist(conn, playlist_id)
     assert playlist["ytmusic_playlist_id"] == "ytmusic-playlist-id"
@@ -362,10 +433,11 @@ def test_sync_recovers_from_a_stale_saved_playlist_id(isolated_cache, dummy_libr
 
     monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
     monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", lambda yt, playlist_id: [])
     monkeypatch.setattr(
         app_module.ytmusic_client,
         "get_or_create_playlist",
-        lambda yt, name, description="": created.append(name) or "fresh-id",
+        lambda yt, name, description="": (created.append(name) or "fresh-id", True),
     )
     monkeypatch.setattr(app_module.ytmusic_client, "add_tracks", _add_tracks)
 
@@ -387,6 +459,140 @@ def test_sync_recovers_from_a_stale_saved_playlist_id(isolated_cache, dummy_libr
     assert "is-connected" in _sidebar_pill(at)
 
 
+def test_sync_recovers_from_a_deleted_playlist_raising_a_bare_keyerror(isolated_cache, dummy_library, monkeypatch):
+    """A playlist deleted on the YT Music side doesn't raise a clean YTMusicError when fetched —
+    ytmusicapi's `get_playlist` hits a malformed-for-this-case browse response and its internal
+    `nav()` helper raises a bare KeyError instead. That must still trigger the same stale-id
+    recovery as a YTMusicError, not crash the app."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+        store.set_playlist_ytmusic_id(conn, playlist_id, "deleted-id")
+        conn.commit()
+
+    import discogs2ytmusic.app as app_module
+
+    created = []
+    pushed = {}
+
+    def _get_playlist_tracks(yt, pid):
+        if pid == "deleted-id":
+            raise KeyError("Unable to find 'contents' using path [...] on {...}, exception: 'contents'")
+        return []
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", _get_playlist_tracks)
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": (created.append(name) or "fresh-id", True),
+    )
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "add_tracks",
+        lambda yt, pid, video_ids: pushed.setdefault(pid, []).extend(video_ids),
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert not at.error
+    assert created == ["Discogs - My Favorites"]
+    assert pushed == {"fresh-id": ["vid1"]}
+    with store.connect() as conn:
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist["ytmusic_playlist_id"] == "fresh-id"
+
+
+def test_sync_removes_remote_tracks_no_longer_present_locally(isolated_cache, dummy_library, monkeypatch):
+    """A playlist already linked to YT Music (ytmusic_playlist_id saved) should have stray
+    remote tracks removed on sync, with no extra confirmation step needed."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+        store.set_playlist_ytmusic_id(conn, playlist_id, "already-linked-id")
+
+    import discogs2ytmusic.app as app_module
+
+    stray_track = {"videoId": "stray-vid", "setVideoId": "set-1"}
+    created_names, pushed, removed = _patch_sync_happy_path(
+        monkeypatch, app_module, remote_tracks=[{"videoId": "vid1", "setVideoId": "set-0"}, stray_track]
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+
+    # Already linked — no eager pre-existing-playlist check, so no extra warning/confirmation.
+    assert not any("Found an existing" in w.value for w in at.warning)
+
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert created_names == []  # never called get_or_create_playlist — already linked
+    assert pushed == {"already-linked-id": []}  # vid1 already remote, nothing new to add
+    assert removed == [("already-linked-id", [stray_track])]
+
+
+def test_sync_warns_and_requires_a_second_confirmation_for_a_pre_existing_playlist(
+    isolated_cache, dummy_library, monkeypatch
+):
+    """First-time sync attaching to a pre-existing YT Music playlist (same generated name) that
+    already has tracks not in the local playlist must warn and require a second confirmation
+    before those tracks get removed."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    import discogs2ytmusic.app as app_module
+
+    stray_track = {"videoId": "stray-vid", "setVideoId": "set-1"}
+    created_names, pushed, removed = _patch_sync_happy_path(
+        monkeypatch,
+        app_module,
+        found_playlist_id="pre-existing-id",
+        remote_tracks=[stray_track],
+        created_playlist_id="pre-existing-id",
+        created=False,
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert any("Found an existing" in w.value for w in at.warning)
+
+    # First click only acknowledges the extra warning — nothing pushed/removed yet.
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+    assert pushed == {}
+    assert removed == []
+
+    # Second click actually performs the sync.
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert created_names == ["Discogs - My Favorites"]  # get_or_create_playlist attaches to pre-existing-id
+    assert pushed == {"pre-existing-id": ["vid1"]}
+    assert removed == [("pre-existing-id", [stray_track])]
+
+
 def test_failed_sync_flips_the_sidebar_pill_to_not_connected(isolated_cache, dummy_library, monkeypatch):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -405,8 +611,12 @@ def test_failed_sync_flips_the_sidebar_pill_to_not_connected(isolated_cache, dum
 
     monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
     monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "find_playlist", lambda yt, name: None)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", lambda yt, playlist_id: [])
     monkeypatch.setattr(
-        app_module.ytmusic_client, "get_or_create_playlist", lambda yt, name, description="": "ytmusic-playlist-id"
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": ("ytmusic-playlist-id", True),
     )
     monkeypatch.setattr(app_module.ytmusic_client, "add_tracks", _blow_up)
 
@@ -446,8 +656,12 @@ def test_reconnecting_after_a_failed_sync_clears_the_not_connected_pill(isolated
 
     monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
     monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(app_module.ytmusic_client, "find_playlist", lambda yt, name: None)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", lambda yt, playlist_id: [])
     monkeypatch.setattr(
-        app_module.ytmusic_client, "get_or_create_playlist", lambda yt, name, description="": "ytmusic-playlist-id"
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": ("ytmusic-playlist-id", True),
     )
     monkeypatch.setattr(
         app_module.ytmusic_client,
