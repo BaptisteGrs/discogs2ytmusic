@@ -268,6 +268,70 @@ def test_resolve_rows_matched_only_excludes_unmatched_tracks(isolated_cache, dum
     assert rows[0].video_id == "vid1"
 
 
+# --- filter_rows_by_query ---
+
+
+def test_filter_rows_by_query_matches_track_artist_case_insensitively(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        rows = filters.resolve_rows(conn)
+
+    narrowed = filters.filter_rows_by_query(rows, "DANNII")
+
+    assert {r.track_artist for r in narrowed} == {"Dannii Minogue"}
+
+
+def test_filter_rows_by_query_matches_track_title(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        rows = filters.resolve_rows(conn)
+
+    narrowed = filters.filter_rows_by_query(rows, "sydney")
+
+    assert [r.track_title for r in narrowed] == ["Sydney 23"]
+
+
+def test_filter_rows_by_query_matches_release_title_even_when_artist_and_title_dont(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        rows = filters.resolve_rows(conn)
+
+    narrowed = filters.filter_rows_by_query(rows, "yoyaku")
+
+    yoyaku_release = next(r for r in dummy_library if r["title"] == "Yoyaku Barcelona 2025")
+    assert narrowed
+    assert {r.release_title for r in narrowed} == {"Yoyaku Barcelona 2025"}
+    assert len(narrowed) == len(yoyaku_release["tracklist"])
+
+
+def test_filter_rows_by_query_matches_across_multiple_fields(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        rows = filters.resolve_rows(conn)
+
+    # "dan" is a substring of both an artist name (Dannii Minogue) and a different artist's
+    # first name (Dan Ghenacia) — a single query should catch both.
+    narrowed = filters.filter_rows_by_query(rows, "dan")
+
+    assert {r.track_artist for r in narrowed} == {"Dannii Minogue", "Dan Ghenacia"}
+
+
+def test_filter_rows_by_query_blank_query_returns_rows_unchanged(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        rows = filters.resolve_rows(conn)
+
+    assert filters.filter_rows_by_query(rows, "   ") == rows
+
+
+def test_filter_rows_by_query_no_match_returns_empty_list(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        rows = filters.resolve_rows(conn)
+
+    assert filters.filter_rows_by_query(rows, "nonexistent xyz") == []
+
+
 # --- resolve_playlist_rows ---
 
 
