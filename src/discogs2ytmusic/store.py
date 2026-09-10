@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS playlists (
     name TEXT NOT NULL UNIQUE,
     ytmusic_playlist_id TEXT,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,   -- bumped by content edits only (add/remove tracks), not by pushing
+    pushed_at REAL              -- last successful push to YT Music; NULL if never pushed
 );
 
 CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -172,6 +173,24 @@ def _migrate_playlists_to_playlist_defs(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_playlists_table(conn: sqlite3.Connection) -> None:
+    """One-time upgrade for curated-playlist caches created before `playlists` had a
+    `pushed_at` column, which tracks the last successful push to YT Music separately from
+    `updated_at` (content edits only).
+
+    Only touches the table when it actually looks like the curated-playlists shape — not the
+    legacy style->playlist_id shape (handled, and possibly dropped, by
+    `_migrate_playlists_to_playlist_defs` above) or some unrelated table that happens to be
+    named `playlists`.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(playlists)")}
+    if not {"id", "name", "ytmusic_playlist_id", "created_at", "updated_at"} <= cols:
+        return
+    if "pushed_at" not in cols:
+        conn.execute("ALTER TABLE playlists ADD COLUMN pushed_at REAL")
+    conn.commit()
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     """Open the sqlite cache, applying schema/migrations first, and commit on clean exit."""
@@ -182,6 +201,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     _migrate_tracks_table(conn)
     _migrate_releases_table(conn)
     _migrate_playlists_to_playlist_defs(conn)
+    _migrate_playlists_table(conn)
     try:
         yield conn
         conn.commit()
@@ -493,11 +513,26 @@ def delete_playlist(conn: sqlite3.Connection, playlist_id: int) -> None:
 
 
 def set_playlist_ytmusic_id(conn: sqlite3.Connection, playlist_id: int, ytmusic_playlist_id: str) -> None:
-    """Record the YT Music playlist id created for a curated playlist."""
+    """Record the YT Music playlist id created for a curated playlist.
+
+    Deliberately leaves `updated_at` untouched — that column tracks content edits (see
+    `add_tracks_to_playlist`/`remove_tracks_from_playlist`), not linking. Use
+    `set_playlist_pushed_at` to record that a push happened.
+    """
     conn.execute(
-        "UPDATE playlists SET ytmusic_playlist_id = ?, updated_at = ? WHERE id = ?",
-        (ytmusic_playlist_id, time.time(), playlist_id),
+        "UPDATE playlists SET ytmusic_playlist_id = ? WHERE id = ?",
+        (ytmusic_playlist_id, playlist_id),
     )
+
+
+def set_playlist_pushed_at(conn: sqlite3.Connection, playlist_id: int) -> None:
+    """Record that a curated playlist was just successfully pushed to YT Music.
+
+    Called on every successful push — both the first time a playlist is linked and every
+    subsequent re-sync — so the UI can show an accurate "last pushed" time distinct from
+    `updated_at` (content edits only).
+    """
+    conn.execute("UPDATE playlists SET pushed_at = ? WHERE id = ?", (time.time(), playlist_id))
 
 
 def list_playlist_track_ids(conn: sqlite3.Connection, playlist_id: int) -> list[int]:
