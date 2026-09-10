@@ -198,7 +198,10 @@ def _build_track_row(
         score=match["score"] if match is not None else None,
         channel=(match["channel"] if match is not None else None) or "",
         searched_at=searched_at,
-        locked=artist_overridden or source == "manual",
+        locked=artist_overridden
+        or source == "manual"
+        or bool(release["artist_override"])
+        or bool(release["title_override"]),
     )
 
 

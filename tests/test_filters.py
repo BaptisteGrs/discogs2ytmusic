@@ -347,6 +347,39 @@ def test_resolve_rows_flags_a_manual_match_as_locked(isolated_cache, dummy_libra
     assert manual_row.locked is True
 
 
+def test_resolve_rows_flags_a_no_tracklist_release_artist_override_as_locked(isolated_cache):
+    """Regression test for #42: a release with no tracklist on file falls back to a
+    single synthetic row (track_id=None) whose artist/title already reflect the
+    release-level override, but `locked` used to only ever check the (empty) per-track
+    `artist_overridden` dict, so it always reported False even though the value is in
+    fact protected from a rescan clobbering it."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Original Artist", "Original Title", [], [])
+        store.set_release_artist_override(conn, 1, "Corrected Artist")
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0].track_id is None
+    assert rows[0].track_artist == "Corrected Artist"
+    assert rows[0].locked is True
+
+
+def test_resolve_rows_flags_a_no_tracklist_release_title_override_as_locked(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Original Artist", "Original Title", [], [])
+        store.set_release_title_override(conn, 1, "Corrected Title")
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0].track_id is None
+    assert rows[0].release_title == "Corrected Title"
+    assert rows[0].locked is True
+
+
 def test_resolve_rows_unmatched_untouched_track_is_not_locked(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
