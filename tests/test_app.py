@@ -337,6 +337,140 @@ def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_
     assert playlist["ytmusic_playlist_id"] == "ytmusic-playlist-id"
 
 
+def test_sync_recovers_from_a_stale_saved_playlist_id(isolated_cache, dummy_library, monkeypatch):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+        store.set_playlist_ytmusic_id(conn, playlist_id, "stale-id")
+        conn.commit()
+
+    from ytmusicapi.exceptions import YTMusicServerError
+
+    import discogs2ytmusic.app as app_module
+
+    created = []
+    pushed = {}
+
+    def _add_tracks(yt, pid, video_ids):
+        if pid == "stale-id":
+            raise YTMusicServerError("Server returned HTTP 404: Not Found.")
+        pushed.setdefault(pid, []).extend(video_ids)
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "get_or_create_playlist",
+        lambda yt, name, description="": created.append(name) or "fresh-id",
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "add_tracks", _add_tracks)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert not at.error
+    assert created == ["Discogs - My Favorites"]
+    assert pushed == {"fresh-id": ["vid1"]}
+    with store.connect() as conn:
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist["ytmusic_playlist_id"] == "fresh-id"
+
+    # The retry recovered fully — no need to flag the session as suspect.
+    at.run()
+    assert "is-connected" in _sidebar_pill(at)
+
+
+def test_failed_sync_flips_the_sidebar_pill_to_not_connected(isolated_cache, dummy_library, monkeypatch):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    from ytmusicapi.exceptions import YTMusicServerError
+
+    import discogs2ytmusic.app as app_module
+
+    def _blow_up(yt, playlist_id, video_ids):
+        raise YTMusicServerError("Server returned HTTP 404: Not Found.")
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        app_module.ytmusic_client, "get_or_create_playlist", lambda yt, name, description="": "ytmusic-playlist-id"
+    )
+    monkeypatch.setattr(app_module.ytmusic_client, "add_tracks", _blow_up)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    assert any("YT Music rejected the request" in e.value for e in at.error)
+
+    # The sidebar already rendered earlier in that same script run, so the pill only picks up
+    # the newly-set suspect flag on the *next* rerun (see _mark_ytmusic_auth_suspect).
+    at.run()
+    pill = _sidebar_pill(at)
+    assert "is-off" in pill
+    assert "Not connected" in pill
+
+    # Trying again without reconnecting is short-circuited locally, never touching YT Music again.
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+    assert any("Not authenticated" in e.value for e in at.error)
+
+
+def test_reconnecting_after_a_failed_sync_clears_the_not_connected_pill(isolated_cache, dummy_library, monkeypatch):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    from ytmusicapi.exceptions import YTMusicServerError
+
+    import discogs2ytmusic.app as app_module
+
+    monkeypatch.setattr(app_module.ytmusic_client, "is_authenticated", lambda: True)
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        app_module.ytmusic_client, "get_or_create_playlist", lambda yt, name, description="": "ytmusic-playlist-id"
+    )
+    monkeypatch.setattr(
+        app_module.ytmusic_client,
+        "add_tracks",
+        lambda yt, playlist_id, video_ids: (_ for _ in ()).throw(YTMusicServerError("404")),
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+    at.run()  # let the sidebar pick up the suspect flag before reconnecting, per the note above
+    assert "is-off" in _sidebar_pill(at)
+
+    at = _open_ytmusic_page(at)
+    at.text_input(key="ytmusic_auth_cookie_input").input("__Secure-3PAPISID=deadbeef; SID=fake").run()
+    at.text_input(key="ytmusic_auth_authuser_input").input("0").run()
+    at.button(key="ytmusic_auth_save").click().run()
+
+    assert not at.exception
+    assert "is-connected" in _sidebar_pill(at)
+
+
 def test_sync_with_no_matched_tracks_shows_no_button(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
