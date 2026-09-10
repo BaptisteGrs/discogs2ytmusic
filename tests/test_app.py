@@ -1026,10 +1026,10 @@ def test_sync_recovers_from_a_deleted_playlist_raising_a_bare_keyerror(isolated_
         "add_tracks",
         lambda yt, pid, video_ids: pushed.setdefault(pid, []).extend(video_ids),
     )
-    # The KeyError is retried a few times (see _get_playlist_tracks_with_retry) before the
-    # stale-id recovery kicks in — skip the real sleeps so the test isn't slow.
-    monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
-
+    # The KeyError is retried a couple of times (see _get_playlist_tracks_with_retry, deliberately
+    # short backoff) before the stale-id recovery kicks in — not worth mocking away, and patching
+    # the global time.sleep here would also stall Streamlit AppTest's own internal script-run
+    # polling, which relies on it.
     at = AppTest.from_file(APP_PATH).run()
     at = _select_playlist(at, playlist_id)
     at.button(key=f"sync_button_{playlist_id}").click().run()
@@ -1068,7 +1068,6 @@ def test_sync_retries_a_transient_keyerror_on_playlist_read_then_succeeds(isolat
 
     created_names, pushed, _removed = _patch_sync_happy_path(monkeypatch, app_module)
     monkeypatch.setattr(app_module.ytmusic_client, "get_playlist_tracks", _get_playlist_tracks)
-    monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
 
     at = AppTest.from_file(APP_PATH).run()
     at = _select_playlist(at, playlist_id)
@@ -1107,7 +1106,6 @@ def test_first_time_sync_bare_keyerror_does_not_flag_the_session_as_suspect(isol
         "get_or_create_playlist",
         lambda yt, name, description="": ("fresh-id", True),
     )
-    monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
 
     at = AppTest.from_file(APP_PATH).run()
     at = _select_playlist(at, playlist_id)

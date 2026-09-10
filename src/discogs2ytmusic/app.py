@@ -1119,13 +1119,17 @@ def _get_playlist_tracks_with_retry(yt: YTMusic, playlist_id: str) -> list[dict[
     rather than returning real (if empty) contents. Retrying with backoff avoids treating that
     delay as a real failure; a KeyError/IndexError that persists past the retries is still raised,
     for the caller to handle as before.
+
+    The backoff is deliberately short (well under a second total): long enough to ride out the
+    propagation delay, but short enough not to itself trip Streamlit AppTest's script-run timeout
+    in tests that exercise this path without mocking the delay away.
     """
     retries = 2
     for attempt in range(retries):
         try:
             return ytmusic_client.get_playlist_tracks(yt, playlist_id)
         except (KeyError, IndexError):
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(0.25 * (attempt + 1))
     return ytmusic_client.get_playlist_tracks(yt, playlist_id)
 
 
