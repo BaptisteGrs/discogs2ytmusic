@@ -683,6 +683,7 @@ def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_li
 
     assert not at.exception
     assert any("1 track(s), 1 matched" in c.value for c in at.main.caption)
+    assert any("Not yet pushed to YT Music" in c.value for c in at.main.caption)
 
 
 def test_playlist_search_excludes_tracks_already_in_the_playlist(isolated_cache, dummy_library):
@@ -909,6 +910,39 @@ def test_confirming_sync_pushes_matched_tracks_to_ytmusic(isolated_cache, dummy_
     with store.connect() as conn:
         playlist = store.get_playlist(conn, playlist_id)
     assert playlist["ytmusic_playlist_id"] == "ytmusic-playlist-id"
+    assert playlist["pushed_at"] is not None
+
+
+def test_pushed_at_is_recorded_again_on_a_resync_of_an_already_linked_playlist(
+    isolated_cache, dummy_library, monkeypatch
+):
+    """`pushed_at` must reflect the most recent push, not just the first link — the normal
+    workflow is adding tracks and re-syncing an already-linked playlist repeatedly."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+        store.set_playlist_ytmusic_id(conn, playlist_id, "already-linked-id")
+        conn.commit()
+
+    import discogs2ytmusic.app as app_module
+
+    _patch_sync_happy_path(monkeypatch, app_module, created_playlist_id="already-linked-id", created=False)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.button(key=f"sync_button_{playlist_id}").click().run()
+    at.button(key=f"confirm_sync_yes_{playlist_id}").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist["ytmusic_playlist_id"] == "already-linked-id"
+    assert playlist["pushed_at"] is not None
+    assert any("Pushed to YT Music" in c.value for c in at.main.caption)
 
 
 def test_confirming_sync_uses_the_configured_playlist_name_prefix(isolated_cache, dummy_library, monkeypatch):

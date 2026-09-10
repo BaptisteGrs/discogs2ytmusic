@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import time
 from typing import Any, Literal, cast
 
 import pandas as pd
@@ -969,6 +970,20 @@ def _render_ytmusic_page() -> None:
             st.success("Playlist name prefix saved.")
 
 
+def _relative_time(timestamp: float) -> str:
+    """Format a unix timestamp as a coarse "N unit(s) ago" string, relative to now."""
+    seconds = max(0.0, time.time() - timestamp)
+    for unit_seconds, unit_name in (
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+    ):
+        count = int(seconds // unit_seconds)
+        if count >= 1:
+            return f"{count} {unit_name}{'s' if count != 1 else ''} ago"
+    return "just now"
+
+
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     playlist_id = playlist["id"]
     with store.connect() as conn:
@@ -989,6 +1004,8 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     if st.session_state.get(f"confirm_delete_{playlist_id}"):
         _render_delete_confirmation(playlist)
 
+    pushed_at = playlist["pushed_at"]
+    pushed_caption = f"Pushed to YT Music {_relative_time(pushed_at)}" if pushed_at else "Not yet pushed to YT Music"
     st.caption(
         f"{len(rows)} track(s), {matched} matched"
         + (
@@ -996,6 +1013,7 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
             if playlist["ytmusic_playlist_id"]
             else ""
         )
+        + f" · {pushed_caption} · Last modified {_relative_time(playlist['updated_at'])}"
     )
 
     if rows:
@@ -1142,6 +1160,10 @@ def _push_to_ytmusic(
     forget the stale id, create a fresh playlist once, and retry the diff against it, rather than
     failing on the same bad id forever. Re-raises if that retry also fails, or if there was no
     saved id to blame.
+
+    Records `pushed_at` on every successful push — the first link and every later re-sync alike —
+    since a linked playlist's `ytmusic_playlist_id` doesn't change on a re-sync and so can't be
+    used on its own to tell when the playlist was last pushed.
     """
     existing_id = playlist["ytmusic_playlist_id"]
     with store.connect() as conn:
@@ -1155,7 +1177,7 @@ def _push_to_ytmusic(
         conn.commit()
 
     try:
-        return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
+        removed = _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
     except _YTMUSIC_MISSING_PLAYLIST_ERRORS:
         if not existing_id:
             raise
@@ -1165,7 +1187,12 @@ def _push_to_ytmusic(
             )
             store.set_playlist_ytmusic_id(conn, playlist_id, ytmusic_id)
             conn.commit()
-        return _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
+        removed = _diff_and_sync_ytmusic(yt, ytmusic_id, video_ids)
+
+    with store.connect() as conn:
+        store.set_playlist_pushed_at(conn, playlist_id)
+        conn.commit()
+    return removed
 
 
 def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> None:
