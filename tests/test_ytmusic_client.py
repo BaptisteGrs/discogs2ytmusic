@@ -99,6 +99,7 @@ class _FakePlaylistsClient:
         self.add_result = add_result if add_result is not None else {"status": "STATUS_SUCCEEDED"}
         self.created: list[tuple[str, str]] = []
         self.added: list[tuple[str, list[str]]] = []
+        self.add_duplicates_flags: list[bool] = []
         self.removed: list[tuple[str, list[dict]]] = []
 
     def get_library_playlists(self, limit: int = 200) -> list[dict]:
@@ -110,6 +111,7 @@ class _FakePlaylistsClient:
 
     def add_playlist_items(self, playlist_id: str, video_ids: list[str], duplicates: bool = False) -> str | dict:
         self.added.append((playlist_id, video_ids))
+        self.add_duplicates_flags.append(duplicates)
         return self.add_result
 
     def get_playlist(self, playlist_id: str, limit: int | None = 100) -> dict:
@@ -176,14 +178,25 @@ def test_add_tracks_is_a_noop_for_an_empty_list():
 
 
 def test_add_tracks_dedupes_before_sending():
-    """A duplicate video id in the request (e.g. two Discogs tracks matched to the same YouTube
-    video) makes YT Music reject the whole chunk with duplicates=False — dedupe first so one
-    repeated match can't block every other track in its chunk from being added."""
+    """Sending the same video id twice in one call is meaningless — dedupe first."""
     yt = _FakePlaylistsClient()
 
     ytmusic_client.add_tracks(yt, "playlist-id", ["v1", "v2", "v1", "v3"])  # type: ignore[arg-type]
 
     assert yt.added == [("playlist-id", ["v1", "v2", "v3"])]
+
+
+def test_add_tracks_passes_duplicates_true_to_avoid_the_confirm_dialog_failure():
+    """Confirmed against a real account: with duplicates=False, a video already on the playlist
+    (even one our own diff didn't think was there yet, e.g. a stale read right after a previous
+    add) makes YT Music reject the *whole* request with STATUS_FAILED and an interactive
+    'Duplicates' confirm-dialog payload — dropping every other track in the same chunk, not just
+    the one that was already there. duplicates=True skips that server-side check."""
+    yt = _FakePlaylistsClient()
+
+    ytmusic_client.add_tracks(yt, "playlist-id", ["v1"])  # type: ignore[arg-type]
+
+    assert yt.add_duplicates_flags == [True]
 
 
 def test_add_tracks_raises_when_ytmusic_reports_failure():
@@ -192,6 +205,33 @@ def test_add_tracks_raises_when_ytmusic_reports_failure():
 
     with pytest.raises(YTMusicError, match="rejected adding tracks"):
         ytmusic_client.add_tracks(yt, "playlist-id", ["v1"])  # type: ignore[arg-type]
+
+
+def test_add_tracks_raises_on_the_real_duplicates_confirm_dialog_shape():
+    """Regression test for the exact STATUS_FAILED/'Duplicates' response YT Music sends back for
+    an already-present video with duplicates=False — should this ever regress to that flag, it
+    must still be surfaced as a failure rather than silently dropping the whole chunk."""
+    duplicates_confirm_dialog = {
+        "status": "STATUS_FAILED",
+        "actions": [
+            {
+                "confirmDialogEndpoint": {
+                    "content": {
+                        "confirmDialogRenderer": {
+                            "title": {"runs": [{"text": "Duplicates"}]},
+                            "dialogMessages": [
+                                {"runs": [{"text": "One or more of the tracks are already in your playlist"}]}
+                            ],
+                        }
+                    }
+                }
+            }
+        ],
+    }
+    yt = _FakePlaylistsClient(add_result=duplicates_confirm_dialog)
+
+    with pytest.raises(YTMusicError, match="rejected adding tracks"):
+        ytmusic_client.add_tracks(yt, "playlist-id", ["P3OpfXS-iYg", "-7zh_xXVdAs"])  # type: ignore[arg-type]
 
 
 def test_get_playlist_tracks_returns_the_tracks_key_with_no_page_limit():

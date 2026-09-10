@@ -202,16 +202,22 @@ def add_tracks(yt: YTMusic, playlist_id: str, video_ids: list[str]) -> None:
     """
     if not video_ids:
         return
-    # With duplicates=False, ytmusicapi's own docs say a duplicate anywhere in the request
-    # makes YT Music reject the *whole* chunk rather than just skip that one video — so a video
-    # matched twice locally (e.g. two Discogs tracks resolved to the same YouTube video) would
-    # silently block every other track in its chunk from being added. Dedupe first: sending the
-    # same video twice in one call is meaningless anyway.
+    # A video matched twice locally (e.g. two Discogs tracks resolved to the same YouTube video)
+    # is meaningless to send twice in one call — dedupe first.
     deduped = list(dict.fromkeys(video_ids))
+    # duplicates=False doesn't silently skip a video already on the playlist: confirmed against a
+    # real account, YT Music instead rejects the *entire* chunk with STATUS_FAILED and hands back
+    # an interactive "Duplicates" confirm-dialog payload instead of adding anything — including
+    # the genuinely-new videos in the same chunk. This can trigger even for a video our own diff
+    # (`get_playlist_tracks`) didn't think was already there yet (e.g. a stale read right after a
+    # previous add). duplicates=True skips that dedup check server-side, so the request always
+    # goes through; the cost is a rare literal duplicate entry if a video really was already
+    # present, which is a minor, visible, user-fixable annoyance next to every other track in the
+    # same chunk silently failing to sync.
     CHUNK = 50
     for i in range(0, len(deduped), CHUNK):
         chunk = deduped[i : i + CHUNK]
-        result = yt.add_playlist_items(playlist_id, chunk, duplicates=False)
+        result = yt.add_playlist_items(playlist_id, chunk, duplicates=True)
         status = result.get("status", "") if isinstance(result, dict) else ""
         if "SUCCEEDED" not in status:
             raise YTMusicError(f"YT Music rejected adding tracks to playlist {playlist_id!r}: {result}")
