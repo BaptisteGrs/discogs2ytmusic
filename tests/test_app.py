@@ -19,9 +19,14 @@ def _collection_editor_df(at: AppTest) -> pd.DataFrame:
     """The Collection tab's `st.data_editor` value.
 
     Its widget key is derived from the currently visible row set (see #19), so tests
-    look it up by element type rather than assuming a static key.
+    match the key prefix rather than assuming a static key — and rather than assuming
+    it's the only (or first) `st.dataframe`-family element on the page, since the range
+    picker (#57) renders one of its own.
     """
-    return at.main.dataframe[0].value
+    for el in at.main.dataframe:
+        if (el.key or "").startswith("collection_editor_"):
+            return el.value
+    raise AssertionError("Collection tab data_editor not found")
 
 
 def _seed(conn, dummy_library):
@@ -165,6 +170,135 @@ def test_checking_select_all_after_narrowing_further_only_adds_the_newly_filtere
     expected_titles = {t["title"] for r in dummy_library if "Acid" in r["styles"] for t in r["tracklist"]}
     with store.connect() as conn:
         playlist = store.get_playlist_by_name(conn, "Acid Only")
+        assert playlist is not None
+        rows = filters.resolve_playlist_rows(conn, playlist["id"])
+    assert {r.track_title for r in rows} == expected_titles
+
+
+def _range_picker_key(at: AppTest) -> str:
+    """The Collection tab's range-select `st.dataframe` widget key (see #57)."""
+    for el in at.main.dataframe:
+        if (el.key or "").startswith("collection_range_picker_"):
+            return str(el.key)
+    raise AssertionError("range picker not found")
+
+
+def _select_range(at: AppTest, picker_key: str, positions: list[int]) -> AppTest:
+    """Simulate a native shift-click (or ctrl-click) row selection in the range picker."""
+    at.session_state[picker_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
+    return at.run()
+
+
+def _add_range_to_selection(at: AppTest, picker_key: str, positions: list[int]) -> AppTest:
+    """Range-select `positions` in the picker, then click "Add to selection".
+
+    AppTest replays a raw `session_state[key] = ...` assignment for exactly the one `.run()`
+    right after it; unlike `.click()`/`.check()`/`.select()`, it doesn't persist through a
+    further rerun triggered by a different widget (here, the "Add" button), so it has to be
+    staged again right before the `.run()` that processes the click.
+    """
+    at = _select_range(at, picker_key, positions)
+    at.button(key=f"{picker_key}_add").click()
+    at.session_state[picker_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
+    return at.run()
+
+
+def test_range_picker_is_available_once_tracks_are_shown(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert _range_picker_key(at)  # doesn't raise
+
+
+def test_range_picker_is_hidden_while_select_all_is_on(isolated_cache, dummy_library):
+    """Redundant once "select all" already covers every row, and its own "add to selection"
+    would be immediately steamrolled by select-all's forced override."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.checkbox(key="collection_select_all").check().run()
+
+    assert not any((el.key or "").startswith("collection_range_picker_") for el in at.main.dataframe)
+
+
+def test_selecting_a_range_and_adding_it_checks_only_those_tracks(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    picker_key = _range_picker_key(at)
+    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
+
+    assert not at.exception
+    select_col = _collection_editor_df(at)["select"]
+    assert select_col.iloc[:3].all()
+    assert not select_col.iloc[3:].any()
+
+
+def test_a_manual_uncheck_after_range_select_overrides_the_preset(isolated_cache, dummy_library):
+    """A range-select only presets the checkbox column's baseline value (see
+    `_render_range_picker`) — an explicit per-row edit on top of it must still win."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    picker_key = _range_picker_key(at)
+    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
+    titles = list(_collection_editor_df(at)["track_title"].iloc[:3])
+    editor_key = next(el.key for el in at.main.dataframe if (el.key or "").startswith("collection_editor_"))
+
+    # `st.data_editor`'s edit state isn't exposed as a helper method on the test element
+    # (unlike the range picker's selection), so it's set in its documented raw session_state
+    # shape directly: {"edited_rows": {row_index: {column: value}}, ...}. Every other
+    # interaction below is staged (not run) so it lands in this same rerun — a raw
+    # session_state assignment like this one doesn't survive a further rerun triggered by
+    # a different widget (see `_add_range_to_selection`).
+    at.session_state[editor_key] = {"edited_rows": {1: {"select": False}}, "added_rows": [], "deleted_rows": []}
+    at.selectbox(key="collection_add_target").select("+ Create new playlist")
+    at.text_input(key="collection_new_playlist_name").input("Range Minus One")
+    at.button(key="collection_add_button").click()
+    at.run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Range Minus One")
+        assert playlist is not None
+        rows = filters.resolve_playlist_rows(conn, playlist["id"])
+    assert {r.track_title for r in rows} == {titles[0], titles[2]}
+
+
+def test_clear_range_selection_unchecks_the_previously_added_range(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    picker_key = _range_picker_key(at)
+    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
+    at.button(key=f"{picker_key}_clear").click().run()
+
+    assert not at.exception
+    assert not _collection_editor_df(at)["select"].any()
+
+
+def test_range_selection_can_be_added_to_a_new_playlist(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    picker_key = _range_picker_key(at)
+    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
+    expected_titles = set(_collection_editor_df(at)["track_title"].iloc[:3])
+
+    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
+    at.text_input(key="collection_new_playlist_name").input("Range Picks").run()
+    at.button(key="collection_add_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Range Picks")
         assert playlist is not None
         rows = filters.resolve_playlist_rows(conn, playlist["id"])
     assert {r.track_title for r in rows} == expected_titles

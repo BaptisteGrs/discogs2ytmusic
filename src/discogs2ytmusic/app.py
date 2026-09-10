@@ -410,6 +410,17 @@ def _render_rematch_confirmation() -> None:
             st.rerun()
 
 
+def _collection_row_digest(rows: list[TrackRow]) -> str:
+    """Short digest identifying the currently visible (filtered) row set by track_id.
+
+    Shared by every Collection tab widget that must reset itself — rather than
+    silently misapply stale state to the wrong row — whenever the active filter
+    changes what's visible (#19).
+    """
+    ids = ",".join(str(r.track_id) for r in rows)
+    return hashlib.sha1(ids.encode()).hexdigest()[:12]
+
+
 def _collection_editor_key(rows: list[TrackRow]) -> str:
     """Derive the Collection tab's `st.data_editor` key from the currently visible row set.
 
@@ -420,9 +431,54 @@ def _collection_editor_key(rows: list[TrackRow]) -> str:
     longer exists in a narrower dataframe (#19). Keying on the row set's track_ids
     forces a fresh widget — with no pending edits — whenever the visible rows change.
     """
-    ids = ",".join(str(r.track_id) for r in rows)
-    digest = hashlib.sha1(ids.encode()).hexdigest()[:12]
-    return f"collection_editor_{digest}"
+    return f"collection_editor_{_collection_row_digest(rows)}"
+
+
+def _render_range_picker(rows: list[TrackRow], range_ids_key: str, picker_key: str) -> None:
+    """Render the "select a range of tracks" expander and merge its picks into `range_ids_key`.
+
+    `st.data_editor`'s checkbox column can't tell a shift-click from a plain click (no
+    keyboard-modifier info reaches Python), so it can't support range-select itself —
+    see the range-select request on #18/#57. `st.dataframe`'s row selection can: it's a
+    separate, read-only, native multi-row picker (real shift-click extends the range,
+    ctrl/cmd-click toggles individual rows) whose picks get folded into the checkbox
+    column's preset value (`range_ids_key`, read back in `render_collection_tab`) rather
+    than driving "select" directly — so a manual per-row check/uncheck afterward still
+    works normally instead of being fought by a live-bound picker selection.
+    """
+    with st.expander("Select a range of tracks"):
+        st.caption(
+            "Click a track, then shift-click another to select everything in between "
+            "(or ctrl/cmd-click to pick individual tracks), then add them to the selection below."
+        )
+        picker_df = pd.DataFrame({"Track": [f"{r.release_title} — {r.track_artist} — {r.track_title}" for r in rows]})
+        event = st.dataframe(
+            picker_df,
+            hide_index=True,
+            width="stretch",
+            on_select="rerun",
+            selection_mode="multi-row",
+            key=picker_key,
+        )
+        picked_positions = event.selection.rows
+
+        add_col, clear_col = st.columns(2)
+        with add_col:
+            if st.button(
+                f"Add {len(picked_positions)} to selection",
+                key=f"{picker_key}_add",
+                disabled=not picked_positions,
+            ):
+                picked_ids = {rows[i].track_id for i in picked_positions if rows[i].track_id is not None}
+                current: set[int] = st.session_state.get(range_ids_key, set())
+                st.session_state[range_ids_key] = current | picked_ids
+                st.rerun()
+        with clear_col:
+            if st.button(
+                "Clear range selection", key=f"{picker_key}_clear", disabled=not st.session_state.get(range_ids_key)
+            ):
+                st.session_state[range_ids_key] = set()
+                st.rerun()
 
 
 def _tag_group_ids() -> list[int]:
@@ -569,7 +625,15 @@ def render_collection_tab() -> None:
         f"Select all {len(rows)} filtered track(s)", key="collection_select_all", disabled=not rows
     )
 
+    row_digest = _collection_row_digest(rows)
+    range_ids_key = f"collection_range_ids_{row_digest}"
+    if rows and not select_all:
+        _render_range_picker(rows, range_ids_key, picker_key=f"collection_range_picker_{row_digest}")
+    range_ids: set[int] = st.session_state.get(range_ids_key, set())
+
     df = _rows_to_dataframe(rows, flag_column="select")
+    if range_ids:
+        df["select"] = df["track_id"].isin(range_ids)
     if select_all:
         df["select"] = True
     editor_key = _collection_editor_key(rows)
