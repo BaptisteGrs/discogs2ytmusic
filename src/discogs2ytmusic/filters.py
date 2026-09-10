@@ -231,6 +231,24 @@ def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -
     return rows
 
 
+def filter_rows_by_query(rows: list[TrackRow], query: str) -> list[TrackRow]:
+    """Narrow `rows` to those whose track artist, track title, or release title contains
+    `query` as a case-insensitive substring; returns `rows` unchanged if `query` is blank.
+
+    Applied client-side to an already-resolved row list (the Collection tab's free-text
+    search box) rather than folded into `PlaylistFilter`/`release_matches` — collection
+    size is small and rows are already materialized for the table by the time this runs.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return rows
+    return [
+        r
+        for r in rows
+        if needle in r.track_artist.lower() or needle in r.track_title.lower() or needle in r.release_title.lower()
+    ]
+
+
 def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[TrackRow]:
     """TrackRows for one curated playlist's tracks, in playlist order (unlike `resolve_rows`,
     this is not re-sorted — playlist order is meaningful)."""

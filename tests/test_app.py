@@ -72,6 +72,38 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
     assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
 
 
+def test_app_search_box_narrows_the_table_by_release_title(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    yoyaku_release = next(r for r in dummy_library if r["title"] == "Yoyaku Barcelona 2025")
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="collection_search").input("yoyaku").run()
+
+    assert not at.exception
+    assert at.main.caption[0].value == f"{len(yoyaku_release['tracklist'])} tracks (0 matched)"
+
+
+def test_app_search_box_matches_case_insensitively_and_combines_with_tag_filter(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    query, tag = "DAN", "House"
+    with store.connect() as conn:
+        tag_filtered = filters.resolve_rows(conn, filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=[tag])]))
+    expected = filters.filter_rows_by_query(tag_filtered, query)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="collection_search").input(query).run()
+    at.multiselect(key="collection_tag_group_0").select(tag).run()
+
+    assert not at.exception
+    # The search box and the structured Style filter should narrow together (AND), not
+    # one overriding the other.
+    assert at.main.caption[0].value == f"{len(expected)} tracks (0 matched)"
+    assert expected  # sanity: fixture actually produces a non-trivial combination, else this proves nothing
+
+
 def test_select_all_checkbox_label_reflects_the_current_filtered_count(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)

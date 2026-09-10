@@ -18,7 +18,15 @@ from discogs2ytmusic.collection_edits import (
 )
 from discogs2ytmusic.config import Config
 from discogs2ytmusic.discogs import DiscogsClient, DiscogsError
-from discogs2ytmusic.filters import BoolOp, PlaylistFilter, TagGroup, TrackRow, resolve_playlist_rows, resolve_rows
+from discogs2ytmusic.filters import (
+    BoolOp,
+    PlaylistFilter,
+    TagGroup,
+    TrackRow,
+    filter_rows_by_query,
+    resolve_playlist_rows,
+    resolve_rows,
+)
 
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
@@ -508,6 +516,10 @@ def render_collection_tab() -> None:
         st.info("No collection cached yet. Click Scan above, or run `discogs2ytmusic scan`.")
         return
 
+    search = st.text_input(
+        "Search by artist, track title, or release title", key="collection_search", placeholder="e.g. daft punk"
+    )
+
     tag_options = _tag_options(all_rows)
     label_options = _label_options(all_rows)
     channel_options = _channel_options(all_rows)
@@ -549,6 +561,7 @@ def render_collection_tab() -> None:
 
     with store.connect() as conn:
         rows = resolve_rows(conn, filt)
+    rows = filter_rows_by_query(rows, search)
 
     st.caption(f"{len(rows)} tracks ({sum(1 for r in rows if r.matched)} matched)")
     select_all = st.checkbox(
