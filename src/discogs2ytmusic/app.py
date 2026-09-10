@@ -10,7 +10,12 @@ from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicError
 
 from discogs2ytmusic import scan_engine, store, sync_engine, ytmusic_client
-from discogs2ytmusic.collection_edits import apply_artist_edits, apply_video_link_edits
+from discogs2ytmusic.collection_edits import (
+    apply_artist_edits,
+    apply_genre_edits,
+    apply_style_edits,
+    apply_video_link_edits,
+)
 from discogs2ytmusic.config import Config
 from discogs2ytmusic.discogs import DiscogsClient, DiscogsError
 from discogs2ytmusic.filters import BoolOp, PlaylistFilter, TagGroup, TrackRow, resolve_playlist_rows, resolve_rows
@@ -77,10 +82,16 @@ SHARED_COLUMN_CONFIG: dict[str, Any] = {
     "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
     "matched": st.column_config.CheckboxColumn("Matched"),
     "channel": st.column_config.TextColumn("Channel", help="Uploader/channel of the matched YouTube video"),
+    "styles": st.column_config.TextColumn(
+        "Styles", help="Comma-separated. Edit to override this track's styles from Discogs"
+    ),
+    "genres": st.column_config.TextColumn(
+        "Genres", help="Comma-separated. Edit to override this track's genres from Discogs"
+    ),
     "locked": st.column_config.CheckboxColumn(
         "Locked",
         help=(
-            "A manual correction (artist or YouTube link) protects this row from being "
+            "A manual correction (one or more fields) protects this row from being "
             "overwritten by `scan --refresh` or `rematch`. Clear the correction "
             "(`fix-artist --clear` / `correct --clear`) to unlock it."
         ),
@@ -557,8 +568,6 @@ def render_collection_tab() -> None:
         "track_title",
         "release_title",
         "discogs_url",
-        "styles",
-        "genres",
         "labels",
         "year",
         "matched",
@@ -587,12 +596,15 @@ def render_collection_tab() -> None:
 
     with store.connect() as conn:
         n_artist = apply_artist_edits(conn, df, edited_df)
+        n_style = apply_style_edits(conn, df, edited_df)
+        n_genre = apply_genre_edits(conn, df, edited_df)
         n_video, errors = apply_video_link_edits(conn, df, edited_df)
 
     for message in errors:
         st.error(message)
-    if n_artist or n_video:
-        st.success(f"Saved {n_artist + n_video} correction(s).")
+    n_corrections = n_artist + n_style + n_genre + n_video
+    if n_corrections:
+        st.success(f"Saved {n_corrections} correction(s).")
         del st.session_state[editor_key]
         st.rerun()
 
@@ -956,24 +968,35 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
 
     if rows:
         df = _playlist_dataframe(rows)
+        editor_key = f"playlist_editor_{playlist_id}"
         edited_df = st.data_editor(
             df,
-            key=f"playlist_editor_{playlist_id}",
+            key=editor_key,
             hide_index=True,
             width="stretch",
             column_order=PLAYLIST_TRACK_COLUMNS,
-            disabled=[c for c in PLAYLIST_TRACK_COLUMNS if c != "remove"],
+            disabled=[c for c in PLAYLIST_TRACK_COLUMNS if c not in ("remove", "styles", "genres")],
             column_config={
                 **SHARED_COLUMN_CONFIG,
                 "remove": st.column_config.CheckboxColumn("", help="Select tracks to remove from this playlist"),
             },
         )
+
+        with store.connect() as conn:
+            n_style = apply_style_edits(conn, df, edited_df)
+            n_genre = apply_genre_edits(conn, df, edited_df)
+        n_corrections = n_style + n_genre
+        if n_corrections:
+            st.success(f"Saved {n_corrections} correction(s).")
+            del st.session_state[editor_key]
+            st.rerun()
+
         to_remove = _selected_track_ids(edited_df, "remove")
         if st.button(f"Remove {len(to_remove)} selected", key=f"remove_button_{playlist_id}", disabled=not to_remove):
             with store.connect() as conn:
                 store.remove_tracks_from_playlist(conn, playlist_id, to_remove)
                 conn.commit()
-            del st.session_state[f"playlist_editor_{playlist_id}"]
+            del st.session_state[editor_key]
             st.rerun()
     else:
         st.caption("No tracks yet — search below to add some.")

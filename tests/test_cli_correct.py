@@ -185,3 +185,91 @@ def test_fix_artist_unknown_track_id_errors(isolated_cache):
     result = runner.invoke(cli.app, ["fix-artist", "9999", "--artist", "X"])
     assert result.exit_code != 0
     assert "No track" in result.output
+
+
+def test_fix_style_overrides_effective_styles(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+
+    result = runner.invoke(cli.app, ["fix-style", str(track_id), "--style", "Corrected Style", "--style", "Another"])
+    assert result.exit_code == 0, result.output
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        release_row = store.get_release(conn, release["release_id"])
+    assert store.effective_track_styles(track, release_row) == ["Corrected Style", "Another"]
+
+
+def test_fix_style_clear_reverts_to_release_styles(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+        store.set_track_styles_override(conn, track_id, ["Temporary Style"])
+
+    result = runner.invoke(cli.app, ["fix-style", str(track_id), "--clear"])
+    assert result.exit_code == 0, result.output
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        release_row = store.get_release(conn, release["release_id"])
+    assert track["styles_override"] is None
+    assert store.effective_track_styles(track, release_row) == release["styles"]
+
+
+def test_fix_style_requires_exactly_one_mode(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks LIMIT 1").fetchone()[0]
+
+    no_mode = runner.invoke(cli.app, ["fix-style", str(track_id)])
+    assert no_mode.exit_code != 0
+
+    both = runner.invoke(cli.app, ["fix-style", str(track_id), "--style", "X", "--clear"])
+    assert both.exit_code != 0
+
+
+def test_fix_style_unknown_track_id_errors(isolated_cache):
+    result = runner.invoke(cli.app, ["fix-style", "9999", "--style", "X"])
+    assert result.exit_code != 0
+    assert "No track" in result.output
+
+
+def test_fix_genre_overrides_effective_genres(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+
+    result = runner.invoke(cli.app, ["fix-genre", str(track_id), "--genre", "Corrected Genre"])
+    assert result.exit_code == 0, result.output
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        release_row = store.get_release(conn, release["release_id"])
+    assert store.effective_track_genres(track, release_row) == ["Corrected Genre"]
+
+
+def test_fix_genre_clear_reverts_to_release_genres(isolated_cache, dummy_library):
+    release = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release["release_id"],)).fetchone()[0]
+        store.set_track_genres_override(conn, track_id, ["Temporary Genre"])
+
+    result = runner.invoke(cli.app, ["fix-genre", str(track_id), "--clear"])
+    assert result.exit_code == 0, result.output
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        release_row = store.get_release(conn, release["release_id"])
+    assert track["genres_override"] is None
+    assert store.effective_track_genres(track, release_row) == release["genres"]
+
+
+def test_fix_genre_unknown_track_id_errors(isolated_cache):
+    result = runner.invoke(cli.app, ["fix-genre", "9999", "--genre", "X"])
+    assert result.exit_code != 0
+    assert "No track" in result.output

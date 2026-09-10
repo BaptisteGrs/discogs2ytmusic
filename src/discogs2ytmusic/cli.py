@@ -548,6 +548,82 @@ def fix_artist(
         console.print(f"[green]Track {track_id} ('{track['title']}') will now be searched as '{artist}'.[/green]")
 
 
+@app.command(name="fix-style")
+def fix_style(
+    track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
+    style: list[str] | None = typer.Option(
+        None, "--style", help="Style tag to use instead of Discogs' own. Repeatable for more than one."
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove the override and fall back to the release's styles again."
+    ),
+) -> None:
+    """Override the style tags used for one track, like `fix-artist` does for artist.
+
+    Discogs only reports styles per-release, so a release tagged e.g. "Tech House,
+    Downtempo, Breaks" gives no way to know which track is which from the API alone —
+    this lets a user correct that per track. Pass exactly one of --style (repeatable)
+    or --clear.
+
+    Note: this override lives on the track row, so it's lost if that release's
+    tracklist is later replaced (`scan --refresh`).
+    """
+    if bool(style) == clear:
+        console.print("[red]Pass --style (one or more times) or --clear.[/red]")
+        raise typer.Exit(1)
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        if track is None:
+            console.print(f"[red]No track with id {track_id}.[/red] Run `export` to see valid ids.")
+            raise typer.Exit(1)
+
+        store.set_track_styles_override(conn, track_id, style)
+
+    if clear:
+        console.print(f"[green]Cleared style override for track {track_id} ('{track['title']}').[/green]")
+    else:
+        assert style is not None  # the only remaining mode, per the modes check above
+        console.print(f"[green]Track {track_id} ('{track['title']}') styles set to: {', '.join(style)}[/green]")
+
+
+@app.command(name="fix-genre")
+def fix_genre(
+    track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
+    genre: list[str] | None = typer.Option(
+        None, "--genre", help="Genre tag to use instead of Discogs' own. Repeatable for more than one."
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove the override and fall back to the release's genres again."
+    ),
+) -> None:
+    """Override the genre tags used for one track, like `fix-artist` does for artist.
+
+    Pass exactly one of --genre (repeatable) or --clear. Same per-track rationale as
+    `fix-style` — see its docstring.
+
+    Note: this override lives on the track row, so it's lost if that release's
+    tracklist is later replaced (`scan --refresh`).
+    """
+    if bool(genre) == clear:
+        console.print("[red]Pass --genre (one or more times) or --clear.[/red]")
+        raise typer.Exit(1)
+
+    with store.connect() as conn:
+        track = store.get_track(conn, track_id)
+        if track is None:
+            console.print(f"[red]No track with id {track_id}.[/red] Run `export` to see valid ids.")
+            raise typer.Exit(1)
+
+        store.set_track_genres_override(conn, track_id, genre)
+
+    if clear:
+        console.print(f"[green]Cleared genre override for track {track_id} ('{track['title']}').[/green]")
+    else:
+        assert genre is not None  # the only remaining mode, per the modes check above
+        console.print(f"[green]Track {track_id} ('{track['title']}') genres set to: {', '.join(genre)}[/green]")
+
+
 @app.command()
 def ui() -> None:
     """Launch the browsable/editable web UI (Streamlit)."""

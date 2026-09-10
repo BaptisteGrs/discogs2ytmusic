@@ -198,6 +198,186 @@ def test_release_overrides_apply_to_effective_track_queries(isolated_cache, dumm
     assert all(artist == "Corrected Release Artist" for _tid, artist, _title in queries)
 
 
+def test_release_styles_and_genres_override_round_trip(isolated_cache, dummy_library):
+    release_id = dummy_library[0]["release_id"]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        assert store.effective_release_styles(release) == json.loads(release["styles"])
+        assert store.effective_release_genres(release) == json.loads(release["genres"])
+
+        store.set_release_styles_override(conn, release_id, ["Corrected Style"])
+        store.set_release_genres_override(conn, release_id, ["Corrected Genre"])
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        assert store.effective_release_styles(release) == ["Corrected Style"]
+        assert store.effective_release_genres(release) == ["Corrected Genre"]
+
+        store.set_release_styles_override(conn, release_id, None)
+        store.set_release_genres_override(conn, release_id, None)
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        assert store.effective_release_styles(release) == json.loads(release["styles"])
+        assert store.effective_release_genres(release) == json.loads(release["genres"])
+
+
+def test_upsert_release_preserves_styles_and_genres_override_across_a_rescan(isolated_cache, dummy_library):
+    """Regression coverage for the CLAUDE.md invariant: a manual correction must never be
+    silently clobbered by a rescan. `upsert_release` unconditionally overwrites the raw
+    `styles`/`genres` columns on every call (that's Discogs-sourced data, meant to refresh),
+    but must leave `styles_override`/`genres_override` alone."""
+    first = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.set_release_styles_override(conn, first["release_id"], ["My Style"])
+        store.set_release_genres_override(conn, first["release_id"], ["My Genre"])
+
+    with store.connect() as conn:
+        # Re-scan with fresh (different) Discogs-sourced styles/genres, as `scan --refresh` would.
+        store.upsert_release(
+            conn,
+            first["release_id"],
+            first["artist"],
+            first["title"],
+            ["Some New Discogs Style"],
+            ["Some New Discogs Genre"],
+            year=first.get("year"),
+            labels=first.get("labels", []),
+        )
+
+    with store.connect() as conn:
+        release = store.get_release(conn, first["release_id"])
+
+    assert json.loads(release["styles"]) == ["Some New Discogs Style"]  # Discogs-sourced value did refresh
+    assert store.effective_release_styles(release) == ["My Style"]  # override still wins
+    assert store.effective_release_genres(release) == ["My Genre"]
+
+
+def test_releases_table_migrates_in_styles_and_genres_override_columns(isolated_cache, dummy_library):
+    """Caches created before styles_override/genres_override existed must upgrade in place,
+    following the same PRAGMA table_info guard pattern as the other release override columns."""
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE releases (
+            release_id INTEGER PRIMARY KEY,
+            artist TEXT NOT NULL,
+            title TEXT NOT NULL,
+            styles TEXT NOT NULL,
+            genres TEXT NOT NULL,
+            fetched_at REAL NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO releases (release_id, artist, title, styles, genres, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (1, "Old Artist", "Old Title", "[]", "[]", 1700000000.0),
+    )
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(releases)")}
+        release = store.get_release(conn, 1)
+
+    assert {"styles_override", "genres_override"} <= cols
+    assert release["styles_override"] is None
+    assert release["genres_override"] is None
+
+
+def test_track_styles_and_genres_override_round_trip(isolated_cache, dummy_library):
+    """Unlike the release-level override (used only for the no-tracklist fallback row), a
+    per-track override is the normal path: Discogs only reports styles/genres per release,
+    so a multi-style release needs per-track correction to say which track is which."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        release_id = dummy_library[0]["release_id"]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (release_id,)).fetchone()[0]
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        track = store.get_track(conn, track_id)
+        assert store.effective_track_styles(track, release) == store.effective_release_styles(release)
+        assert store.effective_track_genres(track, release) == store.effective_release_genres(release)
+
+        store.set_track_styles_override(conn, track_id, ["Track-Only Style"])
+        store.set_track_genres_override(conn, track_id, ["Track-Only Genre"])
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        track = store.get_track(conn, track_id)
+        assert store.effective_track_styles(track, release) == ["Track-Only Style"]
+        assert store.effective_track_genres(track, release) == ["Track-Only Genre"]
+        # A sibling track on the same release is unaffected — this is the whole point.
+        other_track_id = conn.execute(
+            "SELECT id FROM tracks WHERE release_id = ? AND id != ?", (release_id, track_id)
+        ).fetchone()
+        if other_track_id is not None:
+            other_track = store.get_track(conn, other_track_id[0])
+            assert store.effective_track_styles(other_track, release) == store.effective_release_styles(release)
+
+        store.set_track_styles_override(conn, track_id, None)
+        store.set_track_genres_override(conn, track_id, None)
+
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        track = store.get_track(conn, track_id)
+        assert store.effective_track_styles(track, release) == store.effective_release_styles(release)
+        assert store.effective_track_genres(track, release) == store.effective_release_genres(release)
+
+
+def test_replace_tracks_preserves_a_manual_styles_and_genres_override_for_an_unchanged_track(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Various", "Comp EP", ["Tech House", "Breaks"], ["Electronic"])
+        store.replace_tracks(conn, 1, [("A1", "Some Track", None, None)])
+        track = conn.execute("SELECT id FROM tracks WHERE release_id = 1").fetchone()
+        store.set_track_styles_override(conn, track[0], ["Breaks"])
+        store.set_track_genres_override(conn, track[0], ["My Genre"])
+
+        # Re-scan with the exact same tracklist (as a real `scan --refresh` would do)
+        store.replace_tracks(conn, 1, [("A1", "Some Track", None, None)])
+
+        refreshed = store.get_track(conn, track[0])
+
+    assert refreshed["styles_override"] is not None
+    assert json.loads(refreshed["styles_override"]) == ["Breaks"]
+    assert json.loads(refreshed["genres_override"]) == ["My Genre"]
+
+
+def test_tracks_table_migrates_in_styles_and_genres_override_columns(isolated_cache):
+    """Caches created before tracks had styles_override/genres_override must upgrade in
+    place, following the same PRAGMA table_info guard pattern used elsewhere."""
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            release_id INTEGER NOT NULL,
+            position TEXT NOT NULL,
+            title TEXT NOT NULL,
+            duration TEXT,
+            search_artist TEXT,
+            discogs_artist TEXT
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO tracks (release_id, position, title) VALUES (?, ?, ?)",
+        (1, "A1", "Old Track"),
+    )
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}
+        conn.row_factory = sqlite3.Row
+        track = conn.execute("SELECT * FROM tracks WHERE release_id = 1").fetchone()
+
+    assert {"styles_override", "genres_override"} <= cols
+    assert track["styles_override"] is None
+    assert track["genres_override"] is None
+
+
 def test_scan_captures_year_and_labels(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)

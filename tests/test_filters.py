@@ -380,6 +380,62 @@ def test_resolve_rows_flags_a_no_tracklist_release_title_override_as_locked(isol
     assert rows[0].locked is True
 
 
+def test_resolve_rows_flags_a_styles_override_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.set_release_styles_override(conn, first["release_id"], ["Corrected Style"])
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    overridden = [r for r in rows if r.release_id == dummy_library[0]["release_id"]]
+    assert overridden
+    assert all(r.locked for r in overridden)
+    assert all(r.styles == ["Corrected Style"] for r in overridden)
+
+
+def test_resolve_rows_flags_a_genres_override_as_locked(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.set_release_genres_override(conn, first["release_id"], ["Corrected Genre"])
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    overridden = [r for r in rows if r.release_id == dummy_library[0]["release_id"]]
+    assert overridden
+    assert all(r.locked for r in overridden)
+    assert all(r.genres == ["Corrected Genre"] for r in overridden)
+
+
+def test_resolve_rows_track_style_override_affects_only_that_track(isolated_cache, dummy_library):
+    """A per-track style override must not leak onto its sibling tracks on the same
+    release — this is the whole reason a per-track override exists (a multi-style
+    release like "Tech House, Downtempo, Breaks" has no single style for all tracks)."""
+    multi_track_release = next(r for r in dummy_library if len(r["tracklist"]) >= 2)
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM tracks WHERE release_id = ? ORDER BY id", (multi_track_release["release_id"],)
+            )
+        ]
+        overridden_track_id, other_track_id = track_ids[0], track_ids[1]
+        store.set_track_styles_override(conn, overridden_track_id, ["Breaks"])
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    by_track_id = {r.track_id: r for r in rows}
+    assert by_track_id[overridden_track_id].styles == ["Breaks"]
+    assert by_track_id[overridden_track_id].locked is True
+    assert by_track_id[other_track_id].styles == multi_track_release["styles"]
+    assert by_track_id[other_track_id].locked is False
+
+
 def test_resolve_rows_unmatched_untouched_track_is_not_locked(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
