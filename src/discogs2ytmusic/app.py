@@ -873,7 +873,9 @@ def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playl
     """Render one playlist's sidebar row, wherever it appears (ungrouped, or inside an
     expanded folder)."""
     is_selected = kind == "playlist" and playlist["id"] == selected_playlist_id
-    if _nav_button(playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected):
+    if _nav_button(
+        playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected, icon=":material/music_note:"
+    ):
         st.session_state["nav_kind"] = "playlist"
         st.session_state["nav_playlist_id"] = playlist["id"]
         st.rerun()
