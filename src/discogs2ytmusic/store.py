@@ -1,3 +1,14 @@
+"""The sqlite cache: schema, migrations, and every read/write query.
+
+This is the source of truth for everything scanned from Discogs and matched against
+YouTube — nothing else in the codebase opens the database directly. Besides plain CRUD,
+it owns the "effective" value resolution logic (manual override > Discogs per-track
+credit > heuristic split > release value, see `effective_track_queries` and friends)
+that both `filters.py` (the UI's live Collection view) and the CLI's `fix-*` commands
+build on. Schema changes here must stay additive (see CLAUDE.md's Gotchas) so an
+existing user's cache upgrades in place instead of losing data.
+"""
+
 from __future__ import annotations
 
 import json

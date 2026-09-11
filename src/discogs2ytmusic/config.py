@@ -1,3 +1,11 @@
+"""File locations and saved settings, outside the repo in OS-standard config/cache dirs.
+
+Defines where every piece of local state lives (`CACHE_DB`, `YTMUSIC_AUTH_FILE`,
+`CONFIG_FILE`, all under `platformdirs`-resolved directories) and the `Config` dataclass
+for the Discogs credentials/playlist-prefix saved there — nothing here talks to Discogs,
+YT Music, or the sqlite schema itself.
+"""
+
 from __future__ import annotations
 
 import json

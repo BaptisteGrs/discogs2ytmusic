@@ -1,3 +1,10 @@
+"""Load the bundled test fixture for the `--library dummy` dev/testing flow.
+
+Lets `scan` (and the test suite) populate the cache from `tests/fixtures/dummy_library.json`
+instead of a real Discogs account/token — same shape `DiscogsClient` returns, so it's a
+drop-in stand-in for `cli.py`'s `scan` command specifically (see `cli.py`'s `_scan_dummy`).
+"""
+
 from __future__ import annotations
 
 import json

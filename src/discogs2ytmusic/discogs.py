@@ -1,3 +1,11 @@
+"""Thin, rate-limited client for the Discogs API.
+
+`DiscogsClient` is the only thing in the codebase that talks to Discogs: it lists a
+user's collection and fetches a release's tracklist/embedded videos, self-throttled to
+stay under Discogs' rate limit. It knows nothing about the sqlite cache or YT Music —
+`scan_engine.py` is what drives it into `store.py`.
+"""
+
 from __future__ import annotations
 
 import time

@@ -1,3 +1,13 @@
+"""Find a YouTube video for a (artist, title) query.
+
+`find_match` is the entry point: it tries YT Music search first, then falls back to a
+plain yt-dlp YouTube search, fuzzy-scoring candidates against the query either way.
+`match_against_discogs_videos` is tried separately, before either of those, against a
+release's own Discogs-embedded videos — see `sync_engine.ensure_matches` for how the
+three are actually ordered. This module only searches; it never reads or writes the
+sqlite cache itself.
+"""
+
 from __future__ import annotations
 
 import time

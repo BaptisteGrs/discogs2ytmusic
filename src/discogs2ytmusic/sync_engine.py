@@ -1,3 +1,12 @@
+"""Make sure every track across a set of releases has a cached YouTube match.
+
+`ensure_matches` is the shared orchestration layer between `matcher` (finds a match)
+and `store` (caches it): factored out of `cli.py`'s `sync`/`rematch` so the UI's Sync
+button and Rematch button drive the same match-finding logic. It only searches and
+writes to the match cache — pushing matched tracks to a real YT Music playlist is a
+separate concern, handled in `app.py`.
+"""
+
 from __future__ import annotations
 
 import json

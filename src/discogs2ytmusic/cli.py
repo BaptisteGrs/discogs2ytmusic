@@ -1,3 +1,11 @@
+"""The Typer app: a thin command layer over `scan_engine`/`sync_engine`/`store`/`ytmusic_client`.
+
+Each command wires those modules together for one step of the scan → cache → match → push
+pipeline (see CLAUDE.md's Architecture section) and does its own console output/confirmation
+prompts; the actual logic lives in the modules it calls, so the same logic is reusable from
+`app.py`. `ui` launches the Streamlit app as a subprocess.
+"""
+
 from __future__ import annotations
 
 import enum

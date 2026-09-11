@@ -1,3 +1,11 @@
+"""Persist edits made in the Streamlit data editor as manual corrections.
+
+The Collection/Playlist tables render as an editable `st.data_editor`; each `apply_*_edits`
+function diffs one column's before/after DataFrames and writes the changed cells to `store`
+as the same kind of manual override the CLI's `fix-artist`/`fix-style`/`fix-genre`/`correct`
+commands make — so a row edited here gets "locked" the same way (see CLAUDE.md's Gotchas).
+"""
+
 from __future__ import annotations
 
 import sqlite3

@@ -1,3 +1,14 @@
+"""The Streamlit UI: a browsable/editable view over the same sqlite cache the CLI uses.
+
+`main` renders a sidebar (`render_sidebar_nav`) that picks between three panes — the
+Collection tab (`render_collection_tab`), a playlist's detail view, or the YT Music
+connection page — each a thin view over `filters.resolve_rows`/`resolve_playlist_rows`
+and `store`. In-place edits to a rendered table are persisted as manual corrections via
+`collection_edits`; Scan/Sync/Rematch buttons drive `scan_engine`/`sync_engine` the same
+way the CLI's `scan`/`sync`/`rematch` commands do, so the UI never re-implements that
+logic — it only adds push/diff-to-YT-Music orchestration that's UI-specific.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -541,7 +552,15 @@ def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], B
 
 
 def render_collection_tab() -> None:
-    """Render the browsable/editable table of every cached track and its YouTube match."""
+    """Render the Collection pane: the whole cache, browsable/filterable/editable.
+
+    Loads every track via `filters.resolve_rows` (no filter — the whole collection),
+    derives filter option lists (tags/labels/channels/year range) from those rows, then
+    re-resolves with a `PlaylistFilter` built from whatever the user picked. The
+    Scan/Sync/Rematch buttons at the top drive `scan_engine`/`sync_engine` directly
+    (the same cache-populating logic `cli.py`'s `scan`/`sync`/`rematch` commands use);
+    edits made in the table itself are persisted via `collection_edits`.
+    """
     st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
     title_col, actions_col = st.columns([1, 1], vertical_alignment="center")
     with title_col:
@@ -906,11 +925,16 @@ def _render_folder_nav_entry(
 
 
 def render_sidebar_nav() -> tuple[str, int | None]:
-    """Render the sidebar: a Collection link, then a Playlists section listing playlist
-    folders and ungrouped playlists together (one row per entry, alphabetically) — folders
-    expand/collapse, like the Playlists section itself, to reveal the playlists filed under
-    them. Returns the current selection as ("collection", None), ("playlist", id), or
-    ("ytmusic", None).
+    """Render the sidebar, and report which pane `main` should show next.
+
+    A Collection link, then a Playlists section listing playlist folders and ungrouped
+    playlists together (one row per entry, alphabetically) — folders expand/collapse,
+    like the Playlists section itself, to reveal the playlists filed under them. Reads
+    `playlists`/`playlist_folders` from `store` directly (this is the one place in the
+    app that queries them outside `filters.py`, since sidebar rows aren't `TrackRow`s).
+    Selection state lives in `st.session_state`, set by the nav buttons here and cleared
+    back to "collection" if it points at a since-deleted playlist. Returns the current
+    selection as ("collection", None), ("playlist", id), or ("ytmusic", None).
     """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
@@ -1498,7 +1522,14 @@ def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
 
 
 def main() -> None:
-    """Streamlit entry point — a sidebar (Collection + Playlists) driving the main content pane."""
+    """Streamlit entry point: dispatch to a pane based on the sidebar's current selection.
+
+    `render_sidebar_nav` both renders the sidebar and returns what it should drive —
+    a specific playlist's detail view, the YT Music connection page, or (the default)
+    `render_collection_tab`. This is the module-level script Streamlit re-runs top to
+    bottom on every interaction, so nothing here persists across reruns except what's
+    explicitly stashed in `st.session_state` or read back from `store`.
+    """
     kind, playlist_id = render_sidebar_nav()
     if kind == "playlist" and playlist_id is not None:
         with store.connect() as conn:

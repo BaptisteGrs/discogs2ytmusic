@@ -1,3 +1,12 @@
+"""Flatten the sqlite cache into rows the UI can render, and filter them ad hoc.
+
+`PlaylistFilter`/`release_matches` express the Collection tab's style/genre/label/year/
+matched-only filter criteria against a release. `resolve_rows`/`resolve_playlist_rows`
+turn `store`'s per-release/per-track schema into one `TrackRow` per track — the whole
+collection (optionally narrowed by a filter), or one curated playlist's tracks in
+playlist order — which is the shape `app.py` actually renders as a table.
+"""
+
 from __future__ import annotations
 
 import json
