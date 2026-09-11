@@ -128,6 +128,24 @@ _ACTION_PILL_CSS = """
 </style>
 """
 
+# A folder detail page's playlist list (`_render_folder_detail`): each row is a single
+# tertiary button whose label is already "name - N tracks", so it just needs left-aligning —
+# Streamlit centers button content by default.
+_FOLDER_PLAYLIST_LIST_CSS = """
+<style>
+.st-key-folder_playlist_list button {
+    justify-content: flex-start !important;
+    width: 100% !important;
+}
+.st-key-folder_playlist_list button > div {
+    justify-content: flex-start !important;
+}
+.st-key-folder_playlist_list button p {
+    text-align: left !important;
+}
+</style>
+"""
+
 
 def _all_rows() -> list[TrackRow]:
     with store.connect() as conn:
@@ -1590,17 +1608,16 @@ def _render_folder_detail(folder: sqlite3.Row) -> None:
 
     if not playlists:
         st.caption("No playlists in this folder yet.")
-    for p in sorted(playlists, key=lambda p: p["name"].lower()):
-        count = track_counts[p["id"]]
-        name_col, count_col = st.columns([4, 1], vertical_alignment="center")
-        with name_col:
-            if st.button(p["name"], key=f"folder_playlist_{p['id']}", type="tertiary", width="stretch"):
+    st.markdown(_FOLDER_PLAYLIST_LIST_CSS, unsafe_allow_html=True)
+    with st.container(key="folder_playlist_list"):
+        for p in sorted(playlists, key=lambda p: p["name"].lower()):
+            count = track_counts[p["id"]]
+            label = f"{p['name']} - {count} track{'' if count == 1 else 's'}"
+            if st.button(label, key=f"folder_playlist_{p['id']}", type="tertiary", width="stretch"):
                 st.session_state["nav_kind"] = "playlist"
                 st.session_state["nav_playlist_id"] = p["id"]
                 st.session_state["nav_folder_id"] = None
                 st.rerun()
-        with count_col:
-            st.caption(f"{count} track{'' if count == 1 else 's'}")
 
 
 def main() -> None:

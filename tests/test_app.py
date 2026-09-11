@@ -1012,8 +1012,9 @@ def test_clicking_a_folder_opens_its_detail_page_listing_its_playlists(isolated_
     assert not at.exception
     assert at.session_state["nav_kind"] == "folder"
     assert any(h.value == "Genres" for h in at.main.subheader)
-    assert any(b.key == f"folder_playlist_{playlist_id}" for b in at.main.button)
-    assert any("1 track" in c.value for c in at.main.caption)
+    assert any(
+        b.key == f"folder_playlist_{playlist_id}" and b.label == "My Favorites - 1 track" for b in at.main.button
+    )
 
 
 def test_folder_detail_page_shows_a_placeholder_when_empty(isolated_cache, dummy_library):
