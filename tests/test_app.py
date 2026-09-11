@@ -944,14 +944,14 @@ def _open_folder(at: AppTest, folder_id: int) -> AppTest:
 
 
 def _open_playlist_in_folder(at: AppTest, folder_id: int, playlist_id: int) -> AppTest:
-    """Open a folder's detail page, then click one of its playlists from there — the only way
-    to reach a grouped playlist's detail view now that folders no longer expand inline in the
-    sidebar."""
+    """Open a folder's detail page, then click one of its playlists from there — one of two
+    ways to reach a grouped playlist's detail view, the other being the sidebar's own
+    expand/collapse chevron (see `test_clicking_the_folder_chevron_...` below)."""
     at = _open_folder(at, folder_id)
     return at.button(key=f"folder_playlist_{playlist_id}").click().run()
 
 
-def test_a_grouped_playlist_does_not_render_directly_in_the_sidebar(isolated_cache, dummy_library):
+def test_a_collapsed_folder_hides_its_playlists_from_the_sidebar(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         folder_id = store.create_playlist_folder(conn, "Genres")
@@ -962,7 +962,39 @@ def test_a_grouped_playlist_does_not_render_directly_in_the_sidebar(isolated_cac
 
     assert not at.exception
     assert any(b.key == f"nav_folder_{folder_id}" for b in at.button)  # the folder row itself renders
-    assert not any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)  # but its contents aren't
+    assert not any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)  # but its contents are hidden
+
+
+def test_clicking_the_folder_chevron_expands_it_to_show_its_playlists_in_the_sidebar(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_toggle_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)
+    assert any(h.value == "My Discogs Collection" for h in at.main.header)  # expanding didn't navigate anywhere
+
+
+def test_clicking_a_playlist_inside_an_expanded_folder_opens_its_detail_view(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_toggle_{folder_id}").click().run()
+    at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "playlist"
+    assert at.session_state["nav_playlist_id"] == playlist_id
+    assert any(h.value == "My Favorites" for h in at.main.subheader)
 
 
 def test_clicking_a_folder_opens_its_detail_page_listing_its_playlists(isolated_cache, dummy_library):
@@ -1021,8 +1053,8 @@ def test_playlists_outside_any_folder_still_render_directly_in_the_sidebar(isola
     at = AppTest.from_file(APP_PATH).run()
 
     assert not at.exception
-    assert any(b.key == f"nav_playlist_{ungrouped_id}" for b in at.button)
-    assert not any(b.key == f"nav_playlist_{grouped_id}" for b in at.button)  # only reachable via its folder now
+    assert any(b.key == f"nav_playlist_{ungrouped_id}" for b in at.button)  # rendered directly, no expand needed
+    assert not any(b.key == f"nav_playlist_{grouped_id}" for b in at.button)  # still hidden inside its collapsed folder
 
 
 def test_playlist_detail_can_move_a_playlist_into_a_new_folder(isolated_cache, dummy_library):

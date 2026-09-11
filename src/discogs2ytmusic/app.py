@@ -738,7 +738,8 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
 _SIDEBAR_NAV_CSS = """
 <style>
 .st-key-nav_top,
-.st-key-nav_playlists {
+.st-key-nav_playlists,
+[class*="st-key-nav_folder_playlists_"] {
     gap: 0.15rem !important;
 }
 [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
@@ -790,6 +791,9 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_top button:hover p,
 .st-key-nav_playlists button:hover p {
     color: #CC785C;
+}
+[class*="st-key-nav_folder_playlists_"] {
+    padding-left: 0.9rem;
 }
 .st-key-nav_selected button p {
     color: #CC785C !important;
@@ -866,8 +870,8 @@ def _nav_button(label: str, *, key: str, selected: bool, width: str = "stretch",
 
 
 def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playlist_id: int | None) -> None:
-    """Render one ungrouped playlist's sidebar row. A grouped playlist isn't rendered here —
-    it's reached via its folder's detail page (`_render_folder_detail`)."""
+    """Render one playlist's sidebar row, wherever it appears (ungrouped, or inside an
+    expanded folder)."""
     is_selected = kind == "playlist" and playlist["id"] == selected_playlist_id
     if _nav_button(playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected):
         st.session_state["nav_kind"] = "playlist"
@@ -875,23 +879,51 @@ def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playl
         st.rerun()
 
 
-def _render_folder_nav_button(folder: sqlite3.Row, kind: str, selected_folder_id: int | None) -> None:
-    """Render one playlist folder's sidebar row. Opens the folder's detail page in the main
-    pane (`_render_folder_detail`), which lists its playlists and offers the delete
-    affordance — kept out of the sidebar itself so the nav stays lightweight."""
-    is_selected = kind == "folder" and folder["id"] == selected_folder_id
-    if _nav_button(folder["name"], key=f"nav_folder_{folder['id']}", selected=is_selected, icon=":material/folder:"):
-        st.session_state["nav_kind"] = "folder"
-        st.session_state["nav_folder_id"] = folder["id"]
-        st.rerun()
+def _render_folder_nav_entry(
+    folder: sqlite3.Row, playlists: list[sqlite3.Row], kind: str, selected_id: int | None
+) -> None:
+    """Render one playlist folder's sidebar row: a chevron that expands/collapses (like the
+    Playlists section itself) to list the playlists filed under it right there in the sidebar,
+    plus the folder name itself as a separate click target that opens the folder's detail page
+    in the main pane (`_render_folder_detail`) — where its stats and the delete affordance live.
+    """
+    folder_id = folder["id"]
+    expanded_key = f"nav_folder_expanded_{folder_id}"
+    expanded = st.session_state.get(expanded_key, False)
+    is_selected = kind == "folder" and folder_id == selected_id
+
+    chevron_col, name_col = st.columns([1, 7])
+    with chevron_col:
+        if st.button(
+            "",
+            key=f"nav_folder_toggle_{folder_id}",
+            type="tertiary",
+            icon=":material/expand_more:" if expanded else ":material/chevron_right:",
+            help="Show playlists in this folder",
+        ):
+            st.session_state[expanded_key] = not expanded
+            st.rerun()
+    with name_col:
+        if _nav_button(folder["name"], key=f"nav_folder_{folder_id}", selected=is_selected, icon=":material/folder:"):
+            st.session_state["nav_kind"] = "folder"
+            st.session_state["nav_folder_id"] = folder_id
+            st.rerun()
+
+    if expanded:
+        with st.container(key=f"nav_folder_playlists_{folder_id}"):
+            if not playlists:
+                st.caption("No playlists in this folder yet.")
+            for p in sorted(playlists, key=lambda p: p["name"].lower()):
+                _render_playlist_nav_button(p, kind, selected_id)
 
 
 def render_sidebar_nav() -> tuple[str, int | None]:
     """Render the sidebar: a Collection link, then a Playlists section listing playlist
-    folders and ungrouped playlists together (one row per entry, alphabetically). Clicking a
-    folder opens its detail page in the main pane rather than expanding inline. Returns the
-    current selection as ("collection", None), ("playlist", id), ("folder", id), or
-    ("ytmusic", None).
+    folders and ungrouped playlists together (one row per entry, alphabetically) — folders
+    expand/collapse, like the Playlists section itself, to reveal the playlists filed under
+    them right there in the sidebar, while the folder name is its own click target opening the
+    folder's detail page in the main pane. Returns the current selection as
+    ("collection", None), ("playlist", id), ("folder", id), or ("ytmusic", None).
     """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
@@ -912,6 +944,10 @@ def render_sidebar_nav() -> tuple[str, int | None]:
     expanded = st.session_state.get("nav_playlists_expanded", True)
 
     ungrouped = [p for p in playlists if p["folder_id"] is None]
+    playlists_by_folder: dict[int, list[sqlite3.Row]] = {}
+    for p in playlists:
+        if p["folder_id"] is not None:
+            playlists_by_folder.setdefault(p["folder_id"], []).append(p)
 
     with st.sidebar:
         st.markdown(_SIDEBAR_NAV_CSS, unsafe_allow_html=True)
@@ -947,7 +983,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                 for _name, entry_id, entry_kind in entries:
                     if entry_kind == "folder":
                         folder = next(f for f in folders if f["id"] == entry_id)
-                        _render_folder_nav_button(folder, kind, selected_id)
+                        _render_folder_nav_entry(folder, playlists_by_folder.get(entry_id, []), kind, selected_id)
                     else:
                         playlist = next(p for p in ungrouped if p["id"] == entry_id)
                         _render_playlist_nav_button(playlist, kind, selected_id)
