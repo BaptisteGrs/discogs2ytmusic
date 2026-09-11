@@ -15,18 +15,30 @@ def _select_playlist(at: AppTest, playlist_id: int) -> AppTest:
     return at.button(key=f"nav_playlist_{playlist_id}").click().run()
 
 
-def _collection_editor_df(at: AppTest) -> pd.DataFrame:
-    """The Collection tab's `st.data_editor` value.
+def _collection_table_df(at: AppTest) -> pd.DataFrame:
+    """The Collection tab's main `st.dataframe` value.
 
     Its widget key is derived from the currently visible row set (see #19), so tests
-    match the key prefix rather than assuming a static key — and rather than assuming
-    it's the only (or first) `st.dataframe`-family element on the page, since the range
-    picker (#57) renders one of its own.
+    match the key prefix rather than assuming a static key.
     """
     for el in at.main.dataframe:
-        if (el.key or "").startswith("collection_editor_"):
+        if (el.key or "").startswith("collection_table_"):
             return el.value
-    raise AssertionError("Collection tab data_editor not found")
+    raise AssertionError("Collection tab table not found")
+
+
+def _collection_table_key(at: AppTest) -> str:
+    """The Collection tab's main `st.dataframe` widget key for the currently rendered page."""
+    for el in at.main.dataframe:
+        if (el.key or "").startswith("collection_table_"):
+            return str(el.key)
+    raise AssertionError("Collection tab table not found")
+
+
+def _select_table_rows(at: AppTest, table_key: str, positions: list[int]) -> AppTest:
+    """Simulate a native shift-click (or ctrl-click) row selection on the main table."""
+    at.session_state[table_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
+    return at.run()
 
 
 def _seed(conn, dummy_library):
@@ -175,126 +187,32 @@ def test_checking_select_all_after_narrowing_further_only_adds_the_newly_filtere
     assert {r.track_title for r in rows} == expected_titles
 
 
-def _range_picker_key(at: AppTest) -> str:
-    """The Collection tab's range-select `st.dataframe` widget key (see #57)."""
-    for el in at.main.dataframe:
-        if (el.key or "").startswith("collection_range_picker_"):
-            return str(el.key)
-    raise AssertionError("range picker not found")
-
-
-def _select_range(at: AppTest, picker_key: str, positions: list[int]) -> AppTest:
-    """Simulate a native shift-click (or ctrl-click) row selection in the range picker."""
-    at.session_state[picker_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
-    return at.run()
-
-
-def _add_range_to_selection(at: AppTest, picker_key: str, positions: list[int]) -> AppTest:
-    """Range-select `positions` in the picker, then click "Add to selection".
-
-    AppTest replays a raw `session_state[key] = ...` assignment for exactly the one `.run()`
-    right after it; unlike `.click()`/`.check()`/`.select()`, it doesn't persist through a
-    further rerun triggered by a different widget (here, the "Add" button), so it has to be
-    staged again right before the `.run()` that processes the click.
-    """
-    at = _select_range(at, picker_key, positions)
-    at.button(key=f"{picker_key}_add").click()
-    at.session_state[picker_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
-    return at.run()
-
-
-def test_range_picker_is_available_once_tracks_are_shown(isolated_cache, dummy_library):
+def test_selecting_rows_on_the_main_table_drives_the_add_to_playlist_label(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
-
-    assert _range_picker_key(at)  # doesn't raise
-
-
-def test_range_picker_is_hidden_while_select_all_is_on(isolated_cache, dummy_library):
-    """Redundant once "select all" already covers every row, and its own "add to selection"
-    would be immediately steamrolled by select-all's forced override."""
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-
-    at = AppTest.from_file(APP_PATH).run()
-    at.checkbox(key="collection_select_all").check().run()
-
-    assert not any((el.key or "").startswith("collection_range_picker_") for el in at.main.dataframe)
-
-
-def test_selecting_a_range_and_adding_it_checks_only_those_tracks(isolated_cache, dummy_library):
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-
-    at = AppTest.from_file(APP_PATH).run()
-    picker_key = _range_picker_key(at)
-    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0, 1, 2])
 
     assert not at.exception
-    select_col = _collection_editor_df(at)["select"]
-    assert select_col.iloc[:3].all()
-    assert not select_col.iloc[3:].any()
+    assert at.selectbox(key="collection_add_target").label == "Add 3 selected track(s) to"
 
 
-def test_a_manual_uncheck_after_range_select_overrides_the_preset(isolated_cache, dummy_library):
-    """A range-select only presets the checkbox column's baseline value (see
-    `_render_range_picker`) — an explicit per-row edit on top of it must still win."""
+def test_selecting_rows_on_the_main_table_and_adding_them_to_a_new_playlist(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
-    picker_key = _range_picker_key(at)
-    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
-    titles = list(_collection_editor_df(at)["track_title"].iloc[:3])
-    editor_key = next(el.key for el in at.main.dataframe if (el.key or "").startswith("collection_editor_"))
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0, 1, 2])
+    expected_titles = set(_collection_table_df(at)["track_title"].iloc[:3])
 
-    # `st.data_editor`'s edit state isn't exposed as a helper method on the test element
-    # (unlike the range picker's selection), so it's set in its documented raw session_state
-    # shape directly: {"edited_rows": {row_index: {column: value}}, ...}. Every other
-    # interaction below is staged (not run) so it lands in this same rerun — a raw
-    # session_state assignment like this one doesn't survive a further rerun triggered by
-    # a different widget (see `_add_range_to_selection`).
-    at.session_state[editor_key] = {"edited_rows": {1: {"select": False}}, "added_rows": [], "deleted_rows": []}
     at.selectbox(key="collection_add_target").select("+ Create new playlist")
-    at.text_input(key="collection_new_playlist_name").input("Range Minus One")
+    at.text_input(key="collection_new_playlist_name").input("Range Picks")
     at.button(key="collection_add_button").click()
+    at.session_state[table_key] = {"selection": {"rows": [0, 1, 2], "columns": [], "cells": []}}
     at.run()
-
-    assert not at.exception
-    with store.connect() as conn:
-        playlist = store.get_playlist_by_name(conn, "Range Minus One")
-        assert playlist is not None
-        rows = filters.resolve_playlist_rows(conn, playlist["id"])
-    assert {r.track_title for r in rows} == {titles[0], titles[2]}
-
-
-def test_clear_range_selection_unchecks_the_previously_added_range(isolated_cache, dummy_library):
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-
-    at = AppTest.from_file(APP_PATH).run()
-    picker_key = _range_picker_key(at)
-    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
-    at.button(key=f"{picker_key}_clear").click().run()
-
-    assert not at.exception
-    assert not _collection_editor_df(at)["select"].any()
-
-
-def test_range_selection_can_be_added_to_a_new_playlist(isolated_cache, dummy_library):
-    with store.connect() as conn:
-        _seed(conn, dummy_library)
-
-    at = AppTest.from_file(APP_PATH).run()
-    picker_key = _range_picker_key(at)
-    at = _add_range_to_selection(at, picker_key, [0, 1, 2])
-    expected_titles = set(_collection_editor_df(at)["track_title"].iloc[:3])
-
-    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
-    at.text_input(key="collection_new_playlist_name").input("Range Picks").run()
-    at.button(key="collection_add_button").click().run()
 
     assert not at.exception
     with store.connect() as conn:
@@ -302,6 +220,25 @@ def test_range_selection_can_be_added_to_a_new_playlist(isolated_cache, dummy_li
         assert playlist is not None
         rows = filters.resolve_playlist_rows(conn, playlist["id"])
     assert {r.track_title for r in rows} == expected_titles
+
+
+def test_select_all_overrides_whatever_is_selected_on_the_main_table(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0])
+    at.checkbox(key="collection_select_all").check()
+    # A raw `session_state[key] = ...` assignment (unlike `.click()`/`.check()`/`.select()`)
+    # only applies for the one `.run()` right after it, so it has to be restaged here to
+    # land in the same rerun as the checkbox click (see `_select_table_rows` callers below).
+    at.session_state[table_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+    at.run()
+
+    total = sum(len(r["tracklist"]) for r in dummy_library)
+    assert not at.exception
+    assert at.selectbox(key="collection_add_target").label == f"Add {total} selected track(s) to"
 
 
 def test_app_tag_group_and_mode_requires_every_tag_in_the_group(isolated_cache, dummy_library):
@@ -380,9 +317,9 @@ def test_app_a_single_style_group_has_no_remove_button_or_combinator(isolated_ca
     assert not any(r.key == "collection_tag_groups_mode" for r in at.radio)
 
 
-def test_collection_editor_key_changes_with_the_filtered_row_set(isolated_cache, dummy_library):
-    """`_collection_editor_key` (app.py) is what makes #19's crash impossible: it derives
-    the `data_editor` widget key from the row set's track_ids, so pending edit state
+def test_collection_table_key_changes_with_the_filtered_row_set(isolated_cache, dummy_library):
+    """`_collection_table_key` (app.py) is what makes #19's crash impossible: it derives
+    the main table's widget key from the row set's track_ids, so pending selection state
     (matched by row position) can never be reconciled against a differently-filtered,
     differently-shaped dataframe.
     """
@@ -396,20 +333,20 @@ def test_collection_editor_key_changes_with_the_filtered_row_set(isolated_cache,
         all_rows_again = resolve_rows(conn)
 
     assert 0 < len(acid_rows) < len(all_rows)
-    assert app_module._collection_editor_key(all_rows) != app_module._collection_editor_key(acid_rows)
+    assert app_module._collection_table_key(all_rows) != app_module._collection_table_key(acid_rows)
     # Same row set, recomputed independently -> same key, so unrelated reruns (e.g. a
-    # widget elsewhere on the page changing) don't needlessly reset pending edits.
-    assert app_module._collection_editor_key(all_rows) == app_module._collection_editor_key(all_rows_again)
+    # widget elsewhere on the page changing) don't needlessly reset pending selection.
+    assert app_module._collection_table_key(all_rows) == app_module._collection_table_key(all_rows_again)
 
 
-def test_collection_editor_widget_key_is_unique_per_filter_combination(isolated_cache, dummy_library):
+def test_collection_table_widget_key_is_unique_per_filter_combination(isolated_cache, dummy_library):
     """Regression test for #19 ("selecting a label after narrowing by year+subgenre throws
     an error"): reproduce the narrowing sequence from the bug report and confirm each step
-    renders `st.data_editor` under a distinct widget key. Streamlit matches a data_editor's
-    pending edits (including our "select" checkbox column) to the previous render by row
-    position, not row identity, so reusing one static key across these differently-filtered
-    row sets is what let a stale edit be misapplied or throw against a now-out-of-range
-    position; distinct keys per row set rule that out.
+    renders the main table under a distinct widget key. `st.dataframe` matches its native
+    row-selection state to the previous render by row position, not row identity, so
+    reusing one static key across these differently-filtered row sets is what let a stale
+    selection be misapplied or point past the end of a now-out-of-range dataframe;
+    distinct keys per row set rule that out.
     """
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -450,7 +387,7 @@ def test_app_shows_position_in_its_own_column_and_keeps_track_title_clean(isolat
         _seed(conn, dummy_library)
 
     at = AppTest.from_file(APP_PATH).run()
-    df = _collection_editor_df(at)
+    df = _collection_table_df(at)
 
     first = dummy_library[0]
     assert first["tracklist"][0]["position"] == "A"
@@ -480,7 +417,7 @@ def test_app_shows_match_confidence(isolated_cache, dummy_library):
         store.save_match(conn, manual["artist"], manual["tracklist"][0]["title"], "vid2", "Video", "manual", None)
 
     at = AppTest.from_file(APP_PATH).run()
-    df = _collection_editor_df(at).set_index("track_artist")
+    df = _collection_table_df(at).set_index("track_artist")
 
     assert not at.exception
     assert df.loc[fuzzy["artist"], "confidence"] == 87.0
@@ -503,7 +440,7 @@ def test_app_shows_the_matched_video_channel(isolated_cache, dummy_library):
         )
 
     at = AppTest.from_file(APP_PATH).run()
-    df = _collection_editor_df(at).set_index("track_artist")
+    df = _collection_table_df(at).set_index("track_artist")
 
     assert not at.exception
     assert df.loc[first["artist"], "channel"] == "Yoyaku Record Store"
@@ -538,7 +475,7 @@ def test_app_channel_filter_narrows_the_table_to_that_channel(isolated_cache, du
     at.multiselect(key="collection_channels").select("Yoyaku Record Store").run()
 
     assert not at.exception
-    df = _collection_editor_df(at)
+    df = _collection_table_df(at)
     assert df["channel"].tolist() == ["Yoyaku Record Store"]
 
 
@@ -563,10 +500,115 @@ def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_li
         store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "manual", None)
 
     at = AppTest.from_file(APP_PATH).run()
-    df = _collection_editor_df(at).set_index("track_artist")
+    df = _collection_table_df(at).set_index("track_artist")
 
     assert not at.exception
     assert bool(df.loc[first["artist"], "locked"]) is True
+
+
+# --- Collection tab edit panel (#57) ---
+
+
+def _edit_field_keys(track_id: int) -> tuple[str, str, str, str, str]:
+    """The edit panel's widget keys for `track_id` — (artist, styles, genres, youtube_url, save)."""
+    base = f"collection_edit_{track_id}"
+    return (f"{base}_artist", f"{base}_styles", f"{base}_genres", f"{base}_youtube_url", f"{base}_save")
+
+
+def test_edit_panel_shows_a_prompt_when_nothing_is_selected(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert any("Select a track above to edit" in c.value for c in at.main.caption)
+    assert not any((ti.key or "").startswith("collection_edit_") for ti in at.main.text_input)
+
+
+def test_edit_panel_prompts_to_narrow_the_selection_when_multiple_rows_are_selected(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0, 1])
+
+    assert not at.exception
+    assert any("2 tracks selected" in c.value for c in at.main.caption)
+    assert not any((ti.key or "").startswith("collection_edit_") for ti in at.main.text_input)
+
+
+def test_edit_panel_is_prefilled_with_the_selected_track(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0])
+    row = _collection_table_df(at).iloc[0]
+    artist_key, styles_key, genres_key, youtube_key, _ = _edit_field_keys(int(row["track_id"]))
+
+    assert not at.exception
+    assert at.text_input(key=artist_key).value == row["track_artist"]
+    assert at.text_input(key=styles_key).value == row["styles"]
+    assert at.text_input(key=genres_key).value == row["genres"]
+    assert at.text_input(key=youtube_key).value == row["youtube_url"]
+
+
+def test_saving_an_edit_panel_change_persists_an_artist_override(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0])
+    row = _collection_table_df(at).iloc[0]
+    track_id = int(row["track_id"])
+    artist_key, _, _, _, save_key = _edit_field_keys(track_id)
+
+    at.text_input(key=artist_key).input("Corrected Artist")
+    at.button(key=save_key).click()
+    # A raw `session_state[key] = ...` assignment (unlike `.click()`/`.input()`) only
+    # applies for the one `.run()` right after it, so the table's selection has to be
+    # restaged here to land in the same rerun as the Save click (see `_select_table_rows`).
+    at.session_state[table_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+    at.run()
+
+    # `_render_edit_panel` calls `st.rerun()` right after `st.success(...)` on a successful
+    # save, so — same as the app's other post-save reruns — AppTest settles on the state
+    # *after* that rerun, where there's nothing left to save; the persisted DB change below
+    # is what actually confirms the save happened.
+    assert not at.exception
+    with store.connect() as conn2:
+        rows = filters.resolve_rows(conn2)
+    updated = next(r for r in rows if r.track_id == track_id)
+    assert updated.track_artist == "Corrected Artist"
+    assert updated.locked is True
+
+
+def test_selecting_a_different_row_shows_that_rows_own_values(isolated_cache, dummy_library):
+    """Each row's edit panel widget keys are derived from track_id (see `_render_edit_panel`),
+    so switching the selected row renders a fresh panel rather than reusing widget state
+    (and thus stale values) from whichever row was selected before."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    df = _collection_table_df(at)
+    row_0 = df.iloc[0]
+    other_pos = next(i for i in range(1, len(df)) if df.iloc[i]["track_artist"] != row_0["track_artist"])
+    row_1 = df.iloc[other_pos]
+    artist_key_0, *_ = _edit_field_keys(int(row_0["track_id"]))
+    artist_key_1, *_ = _edit_field_keys(int(row_1["track_id"]))
+
+    at = _select_table_rows(at, table_key, [0])
+    assert at.text_input(key=artist_key_0).value == row_0["track_artist"]
+
+    at = _select_table_rows(at, table_key, [other_pos])
+    assert not at.exception
+    assert at.text_input(key=artist_key_1).value == row_1["track_artist"]
 
 
 # --- Scan / Sync matches / Rematch buttons ---

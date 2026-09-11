@@ -32,7 +32,6 @@ from discogs2ytmusic.filters import (
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
 COLLECTION_COLUMNS = [
-    "select",
     "release_title",
     "track_artist",
     "position",
@@ -421,64 +420,74 @@ def _collection_row_digest(rows: list[TrackRow]) -> str:
     return hashlib.sha1(ids.encode()).hexdigest()[:12]
 
 
-def _collection_editor_key(rows: list[TrackRow]) -> str:
-    """Derive the Collection tab's `st.data_editor` key from the currently visible row set.
+def _collection_table_key(rows: list[TrackRow]) -> str:
+    """Derive the Collection tab's main `st.dataframe` key from the currently visible row set.
 
-    `st.data_editor` matches pending edits (including our "select" checkbox column) to
-    the previous render by row *position*, not row identity. Reusing one static key
-    across differently-filtered row sets lets a stale edit apply to the wrong row once
-    the filter changes what's visible, or throw once a previously-edited position no
-    longer exists in a narrower dataframe (#19). Keying on the row set's track_ids
-    forces a fresh widget — with no pending edits — whenever the visible rows change.
+    `st.dataframe`'s native row-selection state matches selected rows to the previous
+    render by row *position*, not row identity. Reusing one static key across
+    differently-filtered row sets lets a stale selection apply to the wrong row once the
+    filter changes what's visible, or point past the end of a narrower dataframe (#19).
+    Keying on the row set's track_ids forces a fresh widget — with no pending selection —
+    whenever the visible rows change.
     """
-    return f"collection_editor_{_collection_row_digest(rows)}"
+    return f"collection_table_{_collection_row_digest(rows)}"
 
 
-def _render_range_picker(rows: list[TrackRow], range_ids_key: str, picker_key: str) -> None:
-    """Render the "select a range of tracks" expander and merge its picks into `range_ids_key`.
+def _render_edit_panel(selected_rows: list[TrackRow]) -> None:
+    """Edit artist/styles/genres/YouTube match for exactly one currently-selected track.
 
-    `st.data_editor`'s checkbox column can't tell a shift-click from a plain click (no
-    keyboard-modifier info reaches Python), so it can't support range-select itself —
-    see the range-select request on #18/#57. `st.dataframe`'s row selection can: it's a
-    separate, read-only, native multi-row picker (real shift-click extends the range,
-    ctrl/cmd-click toggles individual rows) whose picks get folded into the checkbox
-    column's preset value (`range_ids_key`, read back in `render_collection_tab`) rather
-    than driving "select" directly — so a manual per-row check/uncheck afterward still
-    works normally instead of being fought by a live-bound picker selection.
+    Corrections moved here (out of inline cell-editing) once the main table switched to
+    `st.dataframe` for real shift-click range selection (#57) — `st.dataframe` itself is
+    read-only, so it can't host in-place editing the way `st.data_editor` did. Scoped to
+    a single selected row: artist and YouTube-link corrections are inherently per-track,
+    so there's no obviously correct bulk semantic once more than one row is selected.
     """
-    with st.expander("Select a range of tracks"):
-        st.caption(
-            "Click a track, then shift-click another to select everything in between "
-            "(or ctrl/cmd-click to pick individual tracks), then add them to the selection below."
-        )
-        picker_df = pd.DataFrame({"Track": [f"{r.release_title} — {r.track_artist} — {r.track_title}" for r in rows]})
-        event = st.dataframe(
-            picker_df,
-            hide_index=True,
-            width="stretch",
-            on_select="rerun",
-            selection_mode="multi-row",
-            key=picker_key,
-        )
-        picked_positions = event.selection.rows
+    if len(selected_rows) != 1:
+        if selected_rows:
+            st.caption(f"{len(selected_rows)} tracks selected. Select exactly one to edit its details.")
+        else:
+            st.caption("Select a track above to edit its artist, styles, genres, or YouTube match.")
+        return
 
-        add_col, clear_col = st.columns(2)
-        with add_col:
-            if st.button(
-                f"Add {len(picked_positions)} to selection",
-                key=f"{picker_key}_add",
-                disabled=not picked_positions,
-            ):
-                picked_ids = {rows[i].track_id for i in picked_positions if rows[i].track_id is not None}
-                current: set[int] = st.session_state.get(range_ids_key, set())
-                st.session_state[range_ids_key] = current | picked_ids
-                st.rerun()
-        with clear_col:
-            if st.button(
-                "Clear range selection", key=f"{picker_key}_clear", disabled=not st.session_state.get(range_ids_key)
-            ):
-                st.session_state[range_ids_key] = set()
-                st.rerun()
+    row = selected_rows[0]
+    row_key = f"collection_edit_{row.track_id if row.track_id is not None else f'release_{row.release_id}'}"
+    with st.form(key=row_key):
+        st.caption(f"Editing **{row.track_artist} — {row.track_title}**")
+        artist = st.text_input(
+            "Track Artist",
+            value=row.track_artist,
+            key=f"{row_key}_artist",
+            help="Edit to override the artist used for this track's YouTube search",
+        )
+        styles = st.text_input("Styles", value=", ".join(row.styles), key=f"{row_key}_styles")
+        genres = st.text_input("Genres", value=", ".join(row.genres), key=f"{row_key}_genres")
+        youtube_url = st.text_input(
+            "YouTube link",
+            value=row.youtube_url,
+            key=f"{row_key}_youtube_url",
+            help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
+        )
+        saved = st.form_submit_button("Save changes", key=f"{row_key}_save")
+
+    if not saved:
+        return
+
+    original = _rows_to_dataframe([row])
+    edited = original.copy()
+    edited.loc[0, ["track_artist", "styles", "genres", "youtube_url"]] = [artist, styles, genres, youtube_url]
+
+    with store.connect() as conn:
+        n_artist = apply_artist_edits(conn, original, edited)
+        n_style = apply_style_edits(conn, original, edited)
+        n_genre = apply_genre_edits(conn, original, edited)
+        n_video, errors = apply_video_link_edits(conn, original, edited)
+
+    for message in errors:
+        st.error(message)
+    n_corrections = n_artist + n_style + n_genre + n_video
+    if n_corrections:
+        st.success(f"Saved {n_corrections} correction(s).")
+        st.rerun()
 
 
 def _tag_group_ids() -> list[int]:
@@ -625,76 +634,34 @@ def render_collection_tab() -> None:
         f"Select all {len(rows)} filtered track(s)", key="collection_select_all", disabled=not rows
     )
 
-    row_digest = _collection_row_digest(rows)
-    range_ids_key = f"collection_range_ids_{row_digest}"
-    if rows and not select_all:
-        _render_range_picker(rows, range_ids_key, picker_key=f"collection_range_picker_{row_digest}")
-    range_ids: set[int] = st.session_state.get(range_ids_key, set())
-
-    df = _rows_to_dataframe(rows, flag_column="select")
-    if range_ids:
-        df["select"] = df["track_id"].isin(range_ids)
-    if select_all:
-        df["select"] = True
-    editor_key = _collection_editor_key(rows)
-    # "Select all" overrides the per-row picks below rather than merely pre-checking them
-    # (disabling "select" while it's on), so the individual checkboxes can't be used to
-    # carve out exceptions from it — turn it off first to hand-pick a subset instead.
-    disabled_columns = [
-        "release_artist",
-        "position",
-        "track_title",
-        "release_title",
-        "discogs_url",
-        "labels",
-        "year",
-        "matched",
-        "confidence",
-        "video_title",
-        "channel",
-        "locked",
-    ]
-    if select_all:
-        disabled_columns.append("select")
-    edited_df = st.data_editor(
+    df = _rows_to_dataframe(rows)
+    table_key = _collection_table_key(rows)
+    event = st.dataframe(
         df,
-        key=editor_key,
+        key=table_key,
         hide_index=True,
         width="stretch",
         column_order=COLLECTION_COLUMNS,
-        disabled=disabled_columns,
-        column_config={
-            **SHARED_COLUMN_CONFIG,
-            "select": st.column_config.CheckboxColumn(
-                "",
-                help="All filtered tracks are selected" if select_all else "Select tracks to add to a playlist",
-            ),
-        },
+        column_config=SHARED_COLUMN_CONFIG,
+        on_select="rerun",
+        selection_mode="multi-row",
     )
+    selected_rows = [rows[i] for i in event.selection.rows]
 
-    with store.connect() as conn:
-        n_artist = apply_artist_edits(conn, df, edited_df)
-        n_style = apply_style_edits(conn, df, edited_df)
-        n_genre = apply_genre_edits(conn, df, edited_df)
-        n_video, errors = apply_video_link_edits(conn, df, edited_df)
+    _render_edit_panel(selected_rows)
 
-    for message in errors:
-        st.error(message)
-    n_corrections = n_artist + n_style + n_genre + n_video
-    if n_corrections:
-        st.success(f"Saved {n_corrections} correction(s).")
-        del st.session_state[editor_key]
-        st.rerun()
-
+    # "Select all" overrides whatever's highlighted in the table rather than merely
+    # pre-selecting it, so the table's own selection can't be used to carve out
+    # exceptions from it — turn it off first to hand-pick a subset instead.
     if select_all:
         selected_ids = [r.track_id for r in rows if r.track_id is not None]
     else:
-        selected_ids = _selected_track_ids(edited_df, "select")
-    _render_add_to_playlist(selected_ids, editor_key)
+        selected_ids = [r.track_id for r in selected_rows if r.track_id is not None]
+    _render_add_to_playlist(selected_ids, table_key)
 
 
-def _render_add_to_playlist(selected_ids: list[int], editor_key: str) -> None:
-    """Checked rows in the Collection tab's "select" column (or every filtered track, if
+def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
+    """Selected rows in the Collection tab's main table (or every filtered track, if
     "select all" is on) -> add to an existing or new playlist."""
 
     with store.connect() as conn:
@@ -741,7 +708,7 @@ def _render_add_to_playlist(selected_ids: list[int], editor_key: str) -> None:
         conn.commit()
 
     st.success(f"Added {added} track(s) to '{name}'.")
-    del st.session_state[editor_key]
+    del st.session_state[table_key]
     st.rerun()
 
 
