@@ -136,10 +136,24 @@ def parse_headers_block(text: str) -> tuple[str, str]:
     return cookie, authuser
 
 
+# A stray "nan"/"none"/etc. lands here if a caller accidentally stringifies a missing
+# pandas/None value instead of treating it as empty (see collection_edits._str, which this
+# guards against a repeat of) — reject it immediately with a clear message instead of saving it
+# as a literal video id that only fails later, confusingly, when YT Music rejects the push.
+_MISSING_VALUE_REPRS = {"nan", "none", "null", "nat"}
+
+
 def parse_video_id(value: str) -> str:
-    """Accept either a bare YouTube video id or a full watch URL (youtube.com, music.youtube.com, youtu.be)."""
+    """Accept either a bare YouTube video id or a full watch URL (youtube.com, music.youtube.com, youtu.be).
+
+    Raises:
+        ValueError: if given a URL with no video id, or a bare value that looks like a
+            stringified missing value (e.g. "nan") rather than a real video id.
+    """
     value = value.strip()
     if not value.startswith("http://") and not value.startswith("https://"):
+        if value.lower() in _MISSING_VALUE_REPRS:
+            raise ValueError(f"{value!r} doesn't look like a real YouTube video id.")
         return value
     parsed = urlparse(value)
     if parsed.hostname and "youtu.be" in parsed.hostname:
