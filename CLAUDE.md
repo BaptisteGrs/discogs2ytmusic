@@ -31,7 +31,9 @@ Discogs API  →  sqlite cache (store.py)  →  matcher.py  →  YT Music API
   yt-dlp YouTube search as a last resort.
 - **`sync_engine.py`** — orchestrates `matcher` + `store` to make sure every
   track across a set of releases has a cached match; shared by the CLI's
-  `sync`/`rematch` and reusable from the UI.
+  `sync`/`rematch` and reusable from the UI. Also owns pushing a playlist's
+  matched tracks to a real YT Music playlist and diffing it against what's
+  already there (`push_to_ytmusic`), used by the UI's Playlists Sync button.
 - **`scan_engine.py`** — fetches one release's tracklist from Discogs and
   upserts it into the cache; shared by the CLI's `scan` and reusable from
   the UI.
