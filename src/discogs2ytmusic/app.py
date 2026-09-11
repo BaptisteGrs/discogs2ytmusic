@@ -878,27 +878,77 @@ def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playl
         st.rerun()
 
 
+def _render_folder_delete_confirmation(folder: sqlite3.Row, playlists: list[sqlite3.Row]) -> None:
+    """Confirm-then-delete for a folder row: unassigns (not deletes) any playlists inside it,
+    per `store.delete_playlist_folder`'s semantics — mirrors `_render_delete_confirmation`'s
+    warn/Yes/Cancel shape for a playlist."""
+    folder_id = folder["id"]
+    confirm_key = f"confirm_delete_folder_{folder_id}"
+
+    if playlists:
+        st.warning(
+            f"Delete the folder '{folder['name']}'? Its {len(playlists)} playlist(s) won't be "
+            "deleted — they'll move back to ungrouped."
+        )
+    else:
+        st.warning(f"Delete the empty folder '{folder['name']}'?")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, delete", key=f"confirm_delete_folder_yes_{folder_id}"):
+            with store.connect() as conn:
+                store.delete_playlist_folder(conn, folder_id)
+                conn.commit()
+            st.session_state[confirm_key] = False
+            st.session_state.pop(f"nav_folder_expanded_{folder_id}", None)
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key=f"confirm_delete_folder_no_{folder_id}"):
+            st.session_state[confirm_key] = False
+            st.rerun()
+
+
 def _render_folder_nav_entry(
     folder: sqlite3.Row, playlists: list[sqlite3.Row], kind: str, selected_playlist_id: int | None
 ) -> None:
     """Render one playlist folder's sidebar row: same row style as a playlist entry, expanding
     and collapsing — via the same mechanism as the Playlists section itself — to reveal the
-    playlists filed under it.
+    playlists filed under it. A trailing delete icon offers the same confirm-then-delete flow
+    an existing playlist gets (`_render_delete_button`/`_render_delete_confirmation`).
     """
-    expanded_key = f"nav_folder_expanded_{folder['id']}"
+    folder_id = folder["id"]
+    expanded_key = f"nav_folder_expanded_{folder_id}"
+    confirm_key = f"confirm_delete_folder_{folder_id}"
     expanded = st.session_state.get(expanded_key, False)
-    if st.button(
-        folder["name"],
-        key=f"nav_folder_{folder['id']}",
-        type="tertiary",
-        width="stretch",
-        icon=":material/expand_more:" if expanded else ":material/chevron_right:",
-    ):
-        st.session_state[expanded_key] = not expanded
-        st.rerun()
+    confirming = st.session_state.get(confirm_key, False)
+
+    name_col, delete_col = st.columns([6, 1])
+    with name_col:
+        if st.button(
+            folder["name"],
+            key=f"nav_folder_{folder_id}",
+            type="tertiary",
+            width="stretch",
+            icon=":material/expand_more:" if expanded else ":material/chevron_right:",
+        ):
+            st.session_state[expanded_key] = not expanded
+            st.rerun()
+    with delete_col:
+        if not confirming and st.button(
+            "",
+            key=f"nav_folder_delete_{folder_id}",
+            type="tertiary",
+            icon=":material/delete:",
+            help="Delete this folder",
+        ):
+            st.session_state[confirm_key] = True
+            st.rerun()
+
+    if confirming:
+        _render_folder_delete_confirmation(folder, playlists)
+        return
 
     if expanded:
-        with st.container(key=f"nav_folder_playlists_{folder['id']}"):
+        with st.container(key=f"nav_folder_playlists_{folder_id}"):
             if not playlists:
                 st.caption("No playlists in this folder yet.")
             for p in sorted(playlists, key=lambda p: p["name"].lower()):

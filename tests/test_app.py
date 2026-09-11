@@ -1051,6 +1051,67 @@ def test_playlist_detail_folder_picker_defaults_to_the_playlists_current_folder(
     assert at.selectbox(key=f"playlist_folder_choice_{playlist_id}").value == "Genres"
 
 
+def test_clicking_delete_on_a_folder_shows_a_confirmation_and_does_not_delete_yet(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_delete_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any("won't be deleted" in w.value for w in at.sidebar.warning)
+    with store.connect() as conn:
+        assert len(store.list_playlist_folders(conn)) == 1  # not deleted yet — only warned
+
+
+def test_confirming_folder_delete_removes_the_folder_but_not_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_delete_{folder_id}").click().run()
+    at.button(key=f"confirm_delete_folder_yes_{folder_id}").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        assert store.list_playlist_folders(conn) == []
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist is not None
+    assert playlist["folder_id"] is None
+
+
+def test_cancelling_folder_delete_keeps_the_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_delete_{folder_id}").click().run()
+    at.button(key=f"confirm_delete_folder_no_{folder_id}").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        assert len(store.list_playlist_folders(conn)) == 1
+
+
+def test_deleting_an_empty_folder_shows_a_simpler_confirmation(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_delete_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any("empty folder" in w.value for w in at.sidebar.warning)
+
+
 def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
