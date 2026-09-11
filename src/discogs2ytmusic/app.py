@@ -50,30 +50,11 @@ COLLECTION_COLUMNS = [
     "video_title",
 ]
 
-PLAYLIST_TRACK_COLUMNS = [
-    "remove",
-    "release_title",
-    "track_artist",
-    "position",
-    "track_title",
-    "labels",
-    "year",
-    "matched",
-    "discogs_url",
-    "youtube_url",
-    "channel",
-    "locked",
-    "release_artist",
-    "styles",
-    "genres",
-    "confidence",
-    "video_title",
-]
-
 # Labels/help text for columns shared across the Collection tab and both Playlist-tab tables
 # (`render_collection_tab`, `_render_playlist_detail`'s tracks table and its "Add tracks" search
-# results table) — keeps the same field looking identical everywhere it's rendered. Each call site
-# layers its own checkbox column (`select`/`remove`) and `disabled` list on top of this.
+# results table) — keeps the same field looking identical everywhere it's rendered. All three
+# tables are read-only `st.dataframe`s with native row selection (#57/#60); per-track corrections
+# are made through `_render_edit_panel`, not inline cell-editing.
 SHARED_COLUMN_CONFIG: dict[str, Any] = {
     "track_artist": st.column_config.TextColumn(
         "Track Artist", help="Edit to override the artist used for this track's YouTube search"
@@ -200,9 +181,7 @@ _TRACK_ROW_COLUMNS = [
 ]
 
 
-def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> pd.DataFrame:
-    """`flag_column`, if given, adds a leading boolean column (default False) — used for
-    a transient "select"/"remove" checkbox that doesn't correspond to any stored field."""
+def _rows_to_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
     records = [
         {
             "track_id": r.track_id,
@@ -227,22 +206,10 @@ def _rows_to_dataframe(rows: list[TrackRow], flag_column: str | None = None) -> 
         }
         for r in rows
     ]
-    columns = list(_TRACK_ROW_COLUMNS)
-    if flag_column:
-        for record in records:
-            record[flag_column] = False
-        columns.append(flag_column)
     # Pass `columns=` explicitly so an empty row set still yields a dataframe with the
-    # expected columns (incl. `flag_column`) instead of a columnless one that crashes
-    # any code — e.g. `_selected_track_ids` — expecting them to be present.
-    return pd.DataFrame(records, columns=columns)
-
-
-def _selected_track_ids(edited_df: pd.DataFrame, flag_column: str) -> list[int]:
-    """track_ids checked under `flag_column`, excluding rows with no real track_id
-    (the no-tracklist fallback row can't be added to a playlist)."""
-    selected = edited_df[edited_df[flag_column] & edited_df["track_id"].notna()]
-    return [int(tid) for tid in selected["track_id"]]
+    # expected columns instead of a columnless one that breaks callers (e.g. `.set_index(...)`
+    # in tests) expecting them to be present.
+    return pd.DataFrame(records, columns=list(_TRACK_ROW_COLUMNS))
 
 
 def _load_discogs_client() -> tuple[DiscogsClient, str] | None:
@@ -409,31 +376,34 @@ def _render_rematch_confirmation() -> None:
             st.rerun()
 
 
-def _collection_row_digest(rows: list[TrackRow]) -> str:
-    """Short digest identifying the currently visible (filtered) row set by track_id.
+def _row_digest(rows: list[TrackRow]) -> str:
+    """Short digest identifying a row set by track_id.
 
-    Shared by every Collection tab widget that must reset itself — rather than
-    silently misapply stale state to the wrong row — whenever the active filter
-    changes what's visible (#19).
+    Shared by every `st.dataframe` table (Collection tab, and a playlist detail view's
+    tracks/search tables) that must reset its native row-selection state — rather than
+    silently misapply stale state to the wrong row — whenever what's visible changes,
+    whether from a filter (#19) or a different search query/playlist (#60).
     """
     ids = ",".join(str(r.track_id) for r in rows)
     return hashlib.sha1(ids.encode()).hexdigest()[:12]
 
 
-def _collection_table_key(rows: list[TrackRow]) -> str:
-    """Derive the Collection tab's main `st.dataframe` key from the currently visible row set.
+def _table_key(prefix: str, rows: list[TrackRow]) -> str:
+    """Derive an `st.dataframe` widget key from `prefix` and the currently visible row set.
 
     `st.dataframe`'s native row-selection state matches selected rows to the previous
     render by row *position*, not row identity. Reusing one static key across
-    differently-filtered row sets lets a stale selection apply to the wrong row once the
-    filter changes what's visible, or point past the end of a narrower dataframe (#19).
-    Keying on the row set's track_ids forces a fresh widget — with no pending selection —
-    whenever the visible rows change.
+    differently-shaped row sets lets a stale selection apply to the wrong row once what's
+    visible changes, or point past the end of a narrower dataframe (#19, #60). Keying on
+    the row set's track_ids forces a fresh widget — with no pending selection — whenever
+    the visible rows change. `prefix` scopes the key to a particular table (the Collection
+    tab's main table, or a specific playlist's tracks/search table) so two tables rendered
+    in the same session can never collide.
     """
-    return f"collection_table_{_collection_row_digest(rows)}"
+    return f"{prefix}_{_row_digest(rows)}"
 
 
-def _render_edit_panel(selected_rows: list[TrackRow]) -> None:
+def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collection") -> None:
     """Edit artist/styles/genres/YouTube match for exactly one currently-selected track.
 
     Corrections moved here (out of inline cell-editing) once the main table switched to
@@ -441,6 +411,10 @@ def _render_edit_panel(selected_rows: list[TrackRow]) -> None:
     read-only, so it can't host in-place editing the way `st.data_editor` did. Scoped to
     a single selected row: artist and YouTube-link corrections are inherently per-track,
     so there's no obviously correct bulk semantic once more than one row is selected.
+
+    `key_prefix` namespaces the underlying widget/session-state keys so the Collection tab
+    and a given playlist's detail view — either of which can render this panel in the same
+    session — never collide (#60).
     """
     if len(selected_rows) != 1:
         if selected_rows:
@@ -450,7 +424,7 @@ def _render_edit_panel(selected_rows: list[TrackRow]) -> None:
         return
 
     row = selected_rows[0]
-    row_key = f"collection_edit_{row.track_id if row.track_id is not None else f'release_{row.release_id}'}"
+    row_key = f"{key_prefix}_edit_{row.track_id if row.track_id is not None else f'release_{row.release_id}'}"
     with st.form(key=row_key):
         st.caption(f"Editing **{row.track_artist} — {row.track_title}**")
         artist = st.text_input(
@@ -635,7 +609,7 @@ def render_collection_tab() -> None:
     )
 
     df = _rows_to_dataframe(rows)
-    table_key = _collection_table_key(rows)
+    table_key = _table_key("collection_table", rows)
     event = st.dataframe(
         df,
         key=table_key,
@@ -710,10 +684,6 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
     st.success(f"Added {added} track(s) to '{name}'.")
     del st.session_state[table_key]
     st.rerun()
-
-
-def _playlist_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
-    return _rows_to_dataframe(rows, flag_column="remove")
 
 
 _SIDEBAR_NAV_CSS = """
@@ -1054,36 +1024,28 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     st.caption(f"{pushed_caption} · Last modified {_relative_time(playlist['updated_at'])}")
 
     if rows:
-        df = _playlist_dataframe(rows)
-        editor_key = f"playlist_editor_{playlist_id}"
-        edited_df = st.data_editor(
+        df = _rows_to_dataframe(rows)
+        table_key = _table_key(f"playlist_tracks_{playlist_id}", rows)
+        event = st.dataframe(
             df,
-            key=editor_key,
+            key=table_key,
             hide_index=True,
             width="stretch",
-            column_order=PLAYLIST_TRACK_COLUMNS,
-            disabled=[c for c in PLAYLIST_TRACK_COLUMNS if c not in ("remove", "styles", "genres")],
-            column_config={
-                **SHARED_COLUMN_CONFIG,
-                "remove": st.column_config.CheckboxColumn("", help="Select tracks to remove from this playlist"),
-            },
+            column_order=COLLECTION_COLUMNS,
+            column_config=SHARED_COLUMN_CONFIG,
+            on_select="rerun",
+            selection_mode="multi-row",
         )
+        selected_rows = [rows[i] for i in event.selection.rows]
 
-        with store.connect() as conn:
-            n_style = apply_style_edits(conn, df, edited_df)
-            n_genre = apply_genre_edits(conn, df, edited_df)
-        n_corrections = n_style + n_genre
-        if n_corrections:
-            st.success(f"Saved {n_corrections} correction(s).")
-            del st.session_state[editor_key]
-            st.rerun()
+        _render_edit_panel(selected_rows, key_prefix=f"playlist_{playlist_id}")
 
-        to_remove = _selected_track_ids(edited_df, "remove")
+        to_remove = [r.track_id for r in selected_rows if r.track_id is not None]
         if st.button(f"Remove {len(to_remove)} selected", key=f"remove_button_{playlist_id}", disabled=not to_remove):
             with store.connect() as conn:
                 store.remove_tracks_from_playlist(conn, playlist_id, to_remove)
                 conn.commit()
-            del st.session_state[editor_key]
+            del st.session_state[table_key]
             st.rerun()
     else:
         st.caption("No tracks yet — search below to add some.")
@@ -1103,23 +1065,26 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
         if not matches:
             st.caption("No matching tracks found.")
         else:
-            search_df = _rows_to_dataframe(matches, flag_column="select")
-            edited_search_df = st.data_editor(
+            search_df = _rows_to_dataframe(matches)
+            search_table_key = _table_key(f"playlist_search_table_{playlist_id}", matches)
+            search_event = st.dataframe(
                 search_df,
-                key=f"playlist_search_editor_{playlist_id}",
+                key=search_table_key,
                 hide_index=True,
                 width="stretch",
-                column_order=["select", "track_artist", "track_title", "release_title", "matched"],
-                disabled=["track_artist", "track_title", "release_title", "matched"],
-                column_config={**SHARED_COLUMN_CONFIG, "select": st.column_config.CheckboxColumn("")},
+                column_order=["track_artist", "track_title", "release_title", "matched"],
+                column_config=SHARED_COLUMN_CONFIG,
+                on_select="rerun",
+                selection_mode="multi-row",
             )
-            to_add = _selected_track_ids(edited_search_df, "select")
+            selected_matches = [matches[i] for i in search_event.selection.rows]
+            to_add = [r.track_id for r in selected_matches if r.track_id is not None]
             if st.button(f"Add {len(to_add)} selected", key=f"add_from_search_{playlist_id}", disabled=not to_add):
                 with store.connect() as conn:
                     added = store.add_tracks_to_playlist(conn, playlist_id, to_add)
                     conn.commit()
                 st.success(f"Added {added} track(s).")
-                del st.session_state[f"playlist_search_editor_{playlist_id}"]
+                del st.session_state[search_table_key]
                 st.rerun()
 
 
