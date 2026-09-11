@@ -15,28 +15,56 @@ def _select_playlist(at: AppTest, playlist_id: int) -> AppTest:
     return at.button(key=f"nav_playlist_{playlist_id}").click().run()
 
 
-def _collection_table_df(at: AppTest) -> pd.DataFrame:
-    """The Collection tab's main `st.dataframe` value.
-
-    Its widget key is derived from the currently visible row set (see #19), so tests
-    match the key prefix rather than assuming a static key.
-    """
+def _dataframe_by_prefix(at: AppTest, prefix: str) -> pd.DataFrame:
+    """The value of the (single) `st.dataframe` on the page whose widget key starts with
+    `prefix` — every table's key is `{prefix}_{digest}` (see `app._table_key`), so tests
+    match the key prefix rather than assuming a static key."""
     for el in at.main.dataframe:
-        if (el.key or "").startswith("collection_table_"):
+        if (el.key or "").startswith(prefix):
             return el.value
-    raise AssertionError("Collection tab table not found")
+    raise AssertionError(f"no dataframe found with key prefix {prefix!r}")
+
+
+def _dataframe_key_by_prefix(at: AppTest, prefix: str) -> str:
+    """The widget key of the (single) `st.dataframe` on the page whose key starts with `prefix`."""
+    for el in at.main.dataframe:
+        if (el.key or "").startswith(prefix):
+            return str(el.key)
+    raise AssertionError(f"no dataframe found with key prefix {prefix!r}")
+
+
+def _collection_table_df(at: AppTest) -> pd.DataFrame:
+    """The Collection tab's main `st.dataframe` value."""
+    return _dataframe_by_prefix(at, "collection_table_")
 
 
 def _collection_table_key(at: AppTest) -> str:
     """The Collection tab's main `st.dataframe` widget key for the currently rendered page."""
-    for el in at.main.dataframe:
-        if (el.key or "").startswith("collection_table_"):
-            return str(el.key)
-    raise AssertionError("Collection tab table not found")
+    return _dataframe_key_by_prefix(at, "collection_table_")
+
+
+def _playlist_table_df(at: AppTest, playlist_id: int) -> pd.DataFrame:
+    """A playlist detail view's main tracks `st.dataframe` value."""
+    return _dataframe_by_prefix(at, f"playlist_tracks_{playlist_id}_")
+
+
+def _playlist_table_key(at: AppTest, playlist_id: int) -> str:
+    """A playlist detail view's main tracks `st.dataframe` widget key."""
+    return _dataframe_key_by_prefix(at, f"playlist_tracks_{playlist_id}_")
+
+
+def _playlist_search_table_df(at: AppTest, playlist_id: int) -> pd.DataFrame:
+    """A playlist detail view's "Add tracks" search-results `st.dataframe` value."""
+    return _dataframe_by_prefix(at, f"playlist_search_table_{playlist_id}_")
+
+
+def _playlist_search_table_key(at: AppTest, playlist_id: int) -> str:
+    """A playlist detail view's "Add tracks" search-results `st.dataframe` widget key."""
+    return _dataframe_key_by_prefix(at, f"playlist_search_table_{playlist_id}_")
 
 
 def _select_table_rows(at: AppTest, table_key: str, positions: list[int]) -> AppTest:
-    """Simulate a native shift-click (or ctrl-click) row selection on the main table."""
+    """Simulate a native shift-click (or ctrl-click) row selection on a table."""
     at.session_state[table_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
     return at.run()
 
@@ -373,10 +401,10 @@ def test_app_a_single_style_group_has_no_remove_button_or_combinator(isolated_ca
 
 
 def test_collection_table_key_changes_with_the_filtered_row_set(isolated_cache, dummy_library):
-    """`_collection_table_key` (app.py) is what makes #19's crash impossible: it derives
-    the main table's widget key from the row set's track_ids, so pending selection state
-    (matched by row position) can never be reconciled against a differently-filtered,
-    differently-shaped dataframe.
+    """`_table_key` (app.py) is what makes #19's crash impossible: it derives a table's
+    widget key from the row set's track_ids, so pending selection state (matched by row
+    position) can never be reconciled against a differently-filtered, differently-shaped
+    dataframe.
     """
     import discogs2ytmusic.app as app_module
     from discogs2ytmusic.filters import PlaylistFilter, TagGroup, resolve_rows
@@ -388,10 +416,15 @@ def test_collection_table_key_changes_with_the_filtered_row_set(isolated_cache, 
         all_rows_again = resolve_rows(conn)
 
     assert 0 < len(acid_rows) < len(all_rows)
-    assert app_module._collection_table_key(all_rows) != app_module._collection_table_key(acid_rows)
+    assert app_module._table_key("collection_table", all_rows) != app_module._table_key("collection_table", acid_rows)
     # Same row set, recomputed independently -> same key, so unrelated reruns (e.g. a
     # widget elsewhere on the page changing) don't needlessly reset pending selection.
-    assert app_module._collection_table_key(all_rows) == app_module._collection_table_key(all_rows_again)
+    assert app_module._table_key("collection_table", all_rows) == app_module._table_key(
+        "collection_table", all_rows_again
+    )
+    # Different prefix, same row set -> different key, so the Collection tab's table and a
+    # playlist detail view's table (or two different playlists') can never collide (#60).
+    assert app_module._table_key("collection_table", all_rows) != app_module._table_key("playlist_tracks_1", all_rows)
 
 
 def test_collection_table_widget_key_is_unique_per_filter_combination(isolated_cache, dummy_library):
@@ -564,9 +597,11 @@ def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_li
 # --- Collection tab edit panel (#57) ---
 
 
-def _edit_field_keys(track_id: int) -> tuple[str, str, str, str, str]:
-    """The edit panel's widget keys for `track_id` — (artist, styles, genres, youtube_url, save)."""
-    base = f"collection_edit_{track_id}"
+def _edit_field_keys(track_id: int, key_prefix: str = "collection") -> tuple[str, str, str, str, str]:
+    """The edit panel's widget keys for `track_id` under `key_prefix` — (artist, styles, genres,
+    youtube_url, save). `key_prefix` defaults to the Collection tab's; a playlist detail view
+    uses `playlist_{playlist_id}` (see `_render_edit_panel`)."""
+    base = f"{key_prefix}_edit_{track_id}"
     return (f"{base}_artist", f"{base}_styles", f"{base}_genres", f"{base}_youtube_url", f"{base}_save")
 
 
@@ -1079,7 +1114,7 @@ def test_playlist_search_excludes_tracks_already_in_the_playlist(isolated_cache,
     at.text_input(key=f"playlist_search_{playlist_id}").input(shared_artist).run()
 
     assert not at.exception
-    search_df = at.get_by_key(f"playlist_search_editor_{playlist_id}").value
+    search_df = _playlist_search_table_df(at, playlist_id)
     assert track_ids[0] not in search_df["track_id"].tolist()
     assert track_ids[1] in search_df["track_id"].tolist()  # still findable — not yet in the playlist
 
@@ -1095,8 +1130,129 @@ def test_playlist_search_matches_by_artist_or_title_case_insensitively(isolated_
     at.text_input(key=f"playlist_search_{playlist_id}").input(second["artist"].lower()).run()
 
     assert not at.exception
-    search_df = at.get_by_key(f"playlist_search_editor_{playlist_id}").value
+    search_df = _playlist_search_table_df(at, playlist_id)
     assert (search_df["track_artist"] == second["artist"]).any()
+
+
+# --- Playlist detail view: shift-click table selection + edit panel (#60) ---
+#
+# Same UX as the Collection tab (#57): the tracks table and the "Add tracks" search-results
+# table are both `st.dataframe`s with native multi-row selection, and per-track corrections
+# go through the shared `_render_edit_panel` scoped to this playlist's own widget keys.
+
+
+def _all_track_ids(conn) -> list[int]:
+    return [row[0] for row in conn.execute("SELECT id FROM tracks ORDER BY id")]
+
+
+def test_playlist_table_multi_row_selection_removes_several_tracks_at_once(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_ids = _all_track_ids(conn)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, track_ids[:3])
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    table_key = _playlist_table_key(at, playlist_id)
+    df = _playlist_table_df(at, playlist_id)
+    at = _select_table_rows(at, table_key, [0, 2])
+
+    assert not at.exception
+    assert at.button(key=f"remove_button_{playlist_id}").label == "Remove 2 selected"
+
+    at.button(key=f"remove_button_{playlist_id}").click()
+    at.session_state[table_key] = {"selection": {"rows": [0, 2], "columns": [], "cells": []}}
+    at.run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        rows = filters.resolve_playlist_rows(conn, playlist_id)
+    assert {r.track_id for r in rows} == {int(df.iloc[1]["track_id"])}
+
+
+def test_playlist_search_table_multi_row_selection_adds_several_tracks_at_once(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    # "a" matches most fixture tracks by artist or title — plenty to pick two rows from.
+    at.text_input(key=f"playlist_search_{playlist_id}").input("a").run()
+    search_table_key = _playlist_search_table_key(at, playlist_id)
+    search_df = _playlist_search_table_df(at, playlist_id)
+    expected_ids = {int(search_df.iloc[0]["track_id"]), int(search_df.iloc[1]["track_id"])}
+    at = _select_table_rows(at, search_table_key, [0, 1])
+
+    assert not at.exception
+    assert at.button(key=f"add_from_search_{playlist_id}").label == "Add 2 selected"
+
+    at.button(key=f"add_from_search_{playlist_id}").click()
+    at.session_state[search_table_key] = {"selection": {"rows": [0, 1], "columns": [], "cells": []}}
+    at.run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        rows = filters.resolve_playlist_rows(conn, playlist_id)
+    assert {r.track_id for r in rows} == expected_ids
+
+
+def test_playlist_edit_panel_saves_a_correction_scoped_to_this_playlist(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_ids = _all_track_ids(conn)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, track_ids[:1])
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    table_key = _playlist_table_key(at, playlist_id)
+    at = _select_table_rows(at, table_key, [0])
+    row = _playlist_table_df(at, playlist_id).iloc[0]
+    track_id = int(row["track_id"])
+    key_prefix = f"playlist_{playlist_id}"
+    artist_key, _, _, _, save_key = _edit_field_keys(track_id, key_prefix)
+
+    # Prefilled with the selected row's own values, under this playlist's own key prefix —
+    # distinct from the Collection tab's edit panel keys for the same track_id.
+    assert at.text_input(key=artist_key).value == row["track_artist"]
+    assert not any((ti.key or "").startswith(f"collection_edit_{track_id}") for ti in at.main.text_input)
+
+    at.text_input(key=artist_key).input("Playlist-Scoped Artist")
+    at.button(key=save_key).click()
+    # A raw `session_state[key] = ...` assignment only applies for the one `.run()` right after
+    # it, so the table's selection has to be restaged here to land in the same rerun as the
+    # Save click (see `_select_table_rows`).
+    at.session_state[table_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+    at.run()
+
+    assert not at.exception
+    with store.connect() as conn2:
+        rows = filters.resolve_rows(conn2)
+    updated = next(r for r in rows if r.track_id == track_id)
+    assert updated.track_artist == "Playlist-Scoped Artist"
+    assert updated.locked is True
+
+
+def test_playlist_edit_panel_prompts_when_zero_or_multiple_rows_selected(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        track_ids = _all_track_ids(conn)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.add_tracks_to_playlist(conn, playlist_id, track_ids[:2])
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    assert any("Select a track above to edit" in c.value for c in at.main.caption)
+
+    table_key = _playlist_table_key(at, playlist_id)
+    at = _select_table_rows(at, table_key, [0, 1])
+
+    assert not at.exception
+    assert any("2 tracks selected" in c.value for c in at.main.caption)
 
 
 def test_deleting_a_playlist_requires_confirmation(isolated_cache, dummy_library):
