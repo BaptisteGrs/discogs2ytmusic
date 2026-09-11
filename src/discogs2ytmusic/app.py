@@ -894,7 +894,10 @@ def _render_folder_nav_entry(
     expanded = st.session_state.get(expanded_key, False)
     is_selected = kind == "folder" and folder_id == selected_id
 
-    chevron_col, name_col = st.columns([1, 7])
+    # An icon-only button (the chevron) sizes its box to just the icon, while the name
+    # button's box also accounts for its label text — center-aligning the columns keeps both
+    # icons on the same visual line despite that box-height difference.
+    chevron_col, name_col = st.columns([1, 7], vertical_alignment="center")
     with chevron_col:
         if st.button(
             "",
