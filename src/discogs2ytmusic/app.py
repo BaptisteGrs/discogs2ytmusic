@@ -435,6 +435,16 @@ def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collect
     `key_prefix` namespaces the underlying widget/session-state keys so the Collection tab
     and a given playlist's detail view — either of which can render this panel in the same
     session — never collide (#60).
+
+    Each field also gets a "Reset" button (enabled only once that field actually carries a
+    correction — see `TrackRow.artist_overridden`/`styles_overridden`/`genres_overridden`/
+    `video_overridden`), for reverting just that one field instead of the whole row (#66).
+    Artist/Styles/Genres reset the same way blanking-and-saving the field already did — clear
+    the override, fall back to Discogs. YouTube link reset is different: blanking-and-saving
+    that field means "reject, this track has no match" (`apply_video_link_edits`), which is
+    sticky — `sync`/`rematch` both leave a rejected match alone. Reset instead deletes the
+    cached match outright and searches again immediately, so an accidentally-cleared link can
+    be recovered without dropping to the CLI's `correct --clear`.
     """
     if len(selected_rows) != 1:
         if selected_rows:
@@ -445,23 +455,121 @@ def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collect
 
     row = selected_rows[0]
     row_key = f"{key_prefix}_edit_{row.track_id if row.track_id is not None else f'release_{row.release_id}'}"
+
+    # A text_input's `value=` argument only seeds its *first-ever* render for a given
+    # `key` — once mounted, the widget keeps whatever the user (or a prior rerun) left in
+    # it regardless of a later `value=` change, and merely clearing `st.session_state[key]`
+    # doesn't reliably force a resync either (the frontend component can retain its last
+    # displayed text across a rerun that doesn't touch its `key`). So each field's actual
+    # widget key carries a generation counter that a reset bumps, forcing a genuinely new
+    # widget instance next render — the only reliable way to make it redisplay the fresh
+    # Discogs/re-searched value instead of the correction that was just discarded.
+    artist_gen = st.session_state.get(f"{row_key}_artist_gen", 0)
+    styles_gen = st.session_state.get(f"{row_key}_styles_gen", 0)
+    genres_gen = st.session_state.get(f"{row_key}_genres_gen", 0)
+    video_gen = st.session_state.get(f"{row_key}_video_gen", 0)
+
     with st.form(key=row_key):
         st.caption(f"Editing **{row.track_artist} — {row.track_title}**")
-        artist = st.text_input(
-            "Track Artist",
-            value=row.track_artist,
-            key=f"{row_key}_artist",
-            help="Edit to override the artist used for this track's YouTube search",
-        )
-        styles = st.text_input("Styles", value=", ".join(row.styles), key=f"{row_key}_styles")
-        genres = st.text_input("Genres", value=", ".join(row.genres), key=f"{row_key}_genres")
-        youtube_url = st.text_input(
-            "YouTube link",
-            value=row.youtube_url,
-            key=f"{row_key}_youtube_url",
-            help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
-        )
+
+        artist_col, artist_reset_col = st.columns([5, 1])
+        with artist_col:
+            artist = st.text_input(
+                "Track Artist",
+                value=row.track_artist,
+                key=f"{row_key}_artist_{artist_gen}",
+                help="Edit to override the artist used for this track's YouTube search",
+            )
+        with artist_reset_col:
+            st.write("")  # align with the labeled input above
+            reset_artist = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_artist",
+                icon=":material/restart_alt:",
+                help="Discard the artist correction and use the Discogs-sourced artist again",
+                disabled=not row.artist_overridden,
+            )
+
+        styles_col, styles_reset_col = st.columns([5, 1])
+        with styles_col:
+            styles = st.text_input("Styles", value=", ".join(row.styles), key=f"{row_key}_styles_{styles_gen}")
+        with styles_reset_col:
+            st.write("")
+            reset_styles = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_styles",
+                icon=":material/restart_alt:",
+                help="Discard the styles correction and use the Discogs-sourced styles again",
+                disabled=not row.styles_overridden,
+            )
+
+        genres_col, genres_reset_col = st.columns([5, 1])
+        with genres_col:
+            genres = st.text_input("Genres", value=", ".join(row.genres), key=f"{row_key}_genres_{genres_gen}")
+        with genres_reset_col:
+            st.write("")
+            reset_genres = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_genres",
+                icon=":material/restart_alt:",
+                help="Discard the genres correction and use the Discogs-sourced genres again",
+                disabled=not row.genres_overridden,
+            )
+
+        video_col, video_reset_col = st.columns([5, 1])
+        with video_col:
+            youtube_url = st.text_input(
+                "YouTube link",
+                value=row.youtube_url,
+                key=f"{row_key}_youtube_url_{video_gen}",
+                help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
+            )
+        with video_reset_col:
+            st.write("")
+            reset_video = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_video",
+                icon=":material/restart_alt:",
+                help="Forget the manually-picked/rejected match and search for a new one now",
+                disabled=not row.video_overridden,
+            )
+
         saved = st.form_submit_button("Save changes", key=f"{row_key}_save")
+
+    if reset_artist or reset_styles or reset_genres:
+        with store.connect() as conn:
+            if reset_artist:
+                if row.track_id is not None:
+                    store.set_track_search_artist(conn, row.track_id, None)
+                else:
+                    store.set_release_artist_override(conn, row.release_id, None)
+                st.session_state[f"{row_key}_artist_gen"] = artist_gen + 1
+            if reset_styles:
+                if row.track_id is not None:
+                    store.set_track_styles_override(conn, row.track_id, None)
+                else:
+                    store.set_release_styles_override(conn, row.release_id, None)
+                st.session_state[f"{row_key}_styles_gen"] = styles_gen + 1
+            if reset_genres:
+                if row.track_id is not None:
+                    store.set_track_genres_override(conn, row.track_id, None)
+                else:
+                    store.set_release_genres_override(conn, row.release_id, None)
+                st.session_state[f"{row_key}_genres_gen"] = genres_gen + 1
+        st.rerun()
+
+    if reset_video:
+        with store.connect() as conn:
+            release = store.get_release(conn, row.release_id)
+            assert release is not None  # the row was just built from this release
+            tracks = store.get_release_tracks(conn, row.release_id)
+            if row.match_id is not None:
+                store.delete_match(conn, row.match_id)
+            yt = ytmusic_client.get_client(authenticated=False)
+            sync_engine.rematch_track(conn, yt, release, tracks, row.track_id, row.track_artist, row.track_title)
+        st.session_state[f"{row_key}_video_gen"] = video_gen + 1
+        st.success("Refetched the YouTube match.")
+        st.rerun()
 
     if not saved:
         return

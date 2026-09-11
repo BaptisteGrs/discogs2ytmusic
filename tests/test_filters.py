@@ -392,6 +392,10 @@ def test_resolve_rows_flags_a_manually_overridden_artist_as_locked(isolated_cach
 
     corrected = next(r for r in rows if r.track_id == track[0])
     assert corrected.locked is True
+    assert corrected.artist_overridden is True
+    assert corrected.styles_overridden is False
+    assert corrected.genres_overridden is False
+    assert corrected.video_overridden is False
     others = [r for r in rows if r.track_id != track[0]]
     assert all(not r.locked for r in others)
 
@@ -409,6 +413,26 @@ def test_resolve_rows_flags_a_manual_match_as_locked(isolated_cache, dummy_libra
 
     manual_row = next(r for r in rows if r.video_id == "manual-vid")
     assert manual_row.locked is True
+    assert manual_row.video_overridden is True
+    assert manual_row.artist_overridden is False
+
+
+def test_resolve_rows_flags_a_rejected_match_as_video_overridden(isolated_cache, dummy_library):
+    """A rejected match (video_id=None, source='manual' — what saving a blanked YouTube
+    link cell produces) locks the row the same way a picked link does, since both are
+    `source == 'manual'`."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], None, None, "manual", None)
+
+    with store.connect() as conn:
+        rows = filters.resolve_rows(conn)
+
+    rejected_row = next(r for r in rows if r.track_title == first["tracklist"][0]["title"])
+    assert rejected_row.matched is False
+    assert rejected_row.locked is True
+    assert rejected_row.video_overridden is True
 
 
 def test_resolve_rows_flags_a_no_tracklist_release_artist_override_as_locked(isolated_cache):
@@ -442,6 +466,12 @@ def test_resolve_rows_flags_a_no_tracklist_release_title_override_as_locked(isol
     assert rows[0].track_id is None
     assert rows[0].release_title == "Corrected Title"
     assert rows[0].locked is True
+    # `title_override` has no editable UI/CLI path and thus no matching per-field flag —
+    # `locked` still reflects it, but there's nothing here for a per-field reset to target.
+    assert rows[0].artist_overridden is False
+    assert rows[0].styles_overridden is False
+    assert rows[0].genres_overridden is False
+    assert rows[0].video_overridden is False
 
 
 def test_resolve_rows_flags_a_styles_override_as_locked(isolated_cache, dummy_library):
@@ -456,6 +486,8 @@ def test_resolve_rows_flags_a_styles_override_as_locked(isolated_cache, dummy_li
     overridden = [r for r in rows if r.release_id == dummy_library[0]["release_id"]]
     assert overridden
     assert all(r.locked for r in overridden)
+    assert all(r.styles_overridden for r in overridden)
+    assert all(not r.genres_overridden for r in overridden)
     assert all(r.styles == ["Corrected Style"] for r in overridden)
 
 
@@ -471,6 +503,8 @@ def test_resolve_rows_flags_a_genres_override_as_locked(isolated_cache, dummy_li
     overridden = [r for r in rows if r.release_id == dummy_library[0]["release_id"]]
     assert overridden
     assert all(r.locked for r in overridden)
+    assert all(r.genres_overridden for r in overridden)
+    assert all(not r.styles_overridden for r in overridden)
     assert all(r.genres == ["Corrected Genre"] for r in overridden)
 
 
