@@ -109,52 +109,6 @@ _NEW_PLAYLIST_SENTINEL = "+ Create new playlist"
 _NO_FOLDER_SENTINEL = "No folder"
 _NEW_FOLDER_SENTINEL = "+ Create new folder"
 
-# Shared "pill" button style: small, rounded, icon+text buttons placed close together in a
-# horizontal container (see `_render_playlist_detail`'s Sync/Delete row and
-# `render_collection_tab`'s Scan/Sync matches/Rematch row). Keyed by `st.container(key=...)`
-# rather than a generic class so each button can still get its own color override (e.g. delete).
-_ACTION_PILL_CSS = """
-<style>
-.st-key-scan_pill button,
-.st-key-sync_matches_pill button,
-.st-key-rematch_pill button,
-.st-key-sync_pill button,
-.st-key-delete_pill button {
-    border-radius: 999px !important;
-    padding: 0.3rem 0.9rem !important;
-    min-height: 0 !important;
-    font-size: 0.85rem !important;
-}
-.st-key-delete_pill button {
-    border-color: #E5E2D9 !important;
-    color: #AF3029 !important;
-}
-.st-key-delete_pill button:hover {
-    border-color: #E3B6AE !important;
-    color: #AF3029 !important;
-    background-color: #FBEEEC !important;
-}
-</style>
-"""
-
-# A folder detail page's playlist list (`_render_folder_detail`): each row is a single
-# tertiary button whose label is already "name - N tracks", so it just needs left-aligning —
-# Streamlit centers button content by default.
-_FOLDER_PLAYLIST_LIST_CSS = """
-<style>
-.st-key-folder_playlist_list button {
-    justify-content: flex-start !important;
-    width: 100% !important;
-}
-.st-key-folder_playlist_list button > div {
-    justify-content: flex-start !important;
-}
-.st-key-folder_playlist_list button p {
-    text-align: left !important;
-}
-</style>
-"""
-
 
 def _all_rows() -> list[TrackRow]:
     with store.connect() as conn:
@@ -878,132 +832,6 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
     st.rerun()
 
 
-_SIDEBAR_NAV_CSS = """
-<style>
-.st-key-nav_top,
-.st-key-nav_playlists,
-[class*="st-key-nav_folder_playlists_"] {
-    gap: 0.15rem !important;
-}
-[data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
-    gap: 0.4rem !important;
-}
-.st-key-nav_top hr {
-    margin: 0.5rem 0 !important;
-}
-.st-key-nav_top [data-testid="stMarkdownContainer"]:has(hr) {
-    margin-bottom: 0 !important;
-}
-.st-key-nav_top button,
-.st-key-nav_playlists button {
-    background-color: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    padding: 0.2rem 0 !important;
-    min-height: 0 !important;
-    width: 100% !important;
-    justify-content: flex-start !important;
-}
-.st-key-nav_top button > div,
-.st-key-nav_playlists button > div {
-    justify-content: flex-start !important;
-}
-.st-key-nav_top button p,
-.st-key-nav_playlists button p {
-    color: #1F1E1D;
-    text-align: left !important;
-}
-.st-key-nav_top button p {
-    font-weight: 600;
-    font-size: 0.95rem;
-}
-.st-key-nav_playlists {
-    padding-left: 0.9rem;
-}
-.st-key-nav_playlists .stButton {
-    line-height: 1.3;
-}
-.st-key-nav_playlists button {
-    padding: 0.1rem 0 !important;
-}
-.st-key-nav_playlists button p {
-    font-weight: 400;
-    font-size: 0.85rem;
-    line-height: 1.3;
-}
-.st-key-nav_top button:hover p,
-.st-key-nav_playlists button:hover p {
-    color: #CC785C;
-}
-[class*="st-key-nav_folder_playlists_"] {
-    padding-left: 0.9rem;
-}
-.st-key-nav_selected button p {
-    color: #CC785C !important;
-    font-weight: 500 !important;
-}
-.st-key-nav_ytmusic {
-    align-items: center !important;
-}
-.st-key-nav_ytmusic button {
-    background-color: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    padding: 0.2rem 0 !important;
-    min-height: 0 !important;
-    justify-content: flex-start !important;
-}
-.st-key-nav_ytmusic button > div {
-    justify-content: flex-start !important;
-}
-.st-key-nav_ytmusic button p {
-    color: #1F1E1D;
-    text-align: left !important;
-    font-weight: 600;
-    font-size: 0.95rem;
-}
-.st-key-nav_ytmusic button:hover p {
-    color: #CC785C;
-}
-.yt-status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.68rem;
-    font-weight: 600;
-    padding: 0.1rem 0.55rem;
-    border-radius: 999px;
-    white-space: nowrap;
-}
-.yt-status-pill::before {
-    content: "";
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-}
-.yt-status-pill.is-connected {
-    background: #E9F3EC;
-    border: 1px solid #BFDCC7;
-    color: #2F6D42;
-}
-.yt-status-pill.is-connected::before {
-    background: #3A8451;
-}
-.yt-status-pill.is-off {
-    background: #FFFFFF;
-    border: 1px solid #E5E2D9;
-    color: #87837A;
-}
-.yt-status-pill.is-off::before {
-    background: transparent;
-    border: 1.4px solid #87837A;
-    width: 4px;
-    height: 4px;
-}
-</style>
-"""
-
-
 def _nav_button(label: str, *, key: str, selected: bool, width: str = "stretch", **button_kwargs: object) -> bool:
     """Render a plain-text sidebar nav button, accent-colored via a scoped wrapper when selected."""
     if selected:
@@ -1633,6 +1461,184 @@ def _render_folder_detail(folder: sqlite3.Row) -> None:
                 st.session_state["nav_playlist_id"] = p["id"]
                 st.session_state["nav_folder_id"] = None
                 st.rerun()
+
+
+# --- CSS ---
+#
+# Grouped together at the bottom of the file, out of the way of render logic, since these are
+# markup/styling rather than business logic — each is `st.markdown(..., unsafe_allow_html=True)`'d
+# from the render function it styles.
+
+# Shared "pill" button style: small, rounded, icon+text buttons placed close together in a
+# horizontal container (see `_render_playlist_detail`'s Sync/Delete row and
+# `render_collection_tab`'s Scan/Sync matches/Rematch row). Keyed by `st.container(key=...)`
+# rather than a generic class so each button can still get its own color override (e.g. delete).
+_ACTION_PILL_CSS = """
+<style>
+.st-key-scan_pill button,
+.st-key-sync_matches_pill button,
+.st-key-rematch_pill button,
+.st-key-sync_pill button,
+.st-key-delete_pill button {
+    border-radius: 999px !important;
+    padding: 0.3rem 0.9rem !important;
+    min-height: 0 !important;
+    font-size: 0.85rem !important;
+}
+.st-key-delete_pill button {
+    border-color: #E5E2D9 !important;
+    color: #AF3029 !important;
+}
+.st-key-delete_pill button:hover {
+    border-color: #E3B6AE !important;
+    color: #AF3029 !important;
+    background-color: #FBEEEC !important;
+}
+</style>
+"""
+
+# A folder detail page's playlist list (`_render_folder_detail`): each row is a single
+# tertiary button whose label is already "name - N tracks", so it just needs left-aligning —
+# Streamlit centers button content by default.
+_FOLDER_PLAYLIST_LIST_CSS = """
+<style>
+.st-key-folder_playlist_list button {
+    justify-content: flex-start !important;
+    width: 100% !important;
+}
+.st-key-folder_playlist_list button > div {
+    justify-content: flex-start !important;
+}
+.st-key-folder_playlist_list button p {
+    text-align: left !important;
+}
+</style>
+"""
+
+_SIDEBAR_NAV_CSS = """
+<style>
+.st-key-nav_top,
+.st-key-nav_playlists,
+[class*="st-key-nav_folder_playlists_"] {
+    gap: 0.15rem !important;
+}
+[data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
+    gap: 0.4rem !important;
+}
+.st-key-nav_top hr {
+    margin: 0.5rem 0 !important;
+}
+.st-key-nav_top [data-testid="stMarkdownContainer"]:has(hr) {
+    margin-bottom: 0 !important;
+}
+.st-key-nav_top button,
+.st-key-nav_playlists button {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0.2rem 0 !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    justify-content: flex-start !important;
+}
+.st-key-nav_top button > div,
+.st-key-nav_playlists button > div {
+    justify-content: flex-start !important;
+}
+.st-key-nav_top button p,
+.st-key-nav_playlists button p {
+    color: #1F1E1D;
+    text-align: left !important;
+}
+.st-key-nav_top button p {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+.st-key-nav_playlists {
+    padding-left: 0.9rem;
+}
+.st-key-nav_playlists .stButton {
+    line-height: 1.3;
+}
+.st-key-nav_playlists button {
+    padding: 0.1rem 0 !important;
+}
+.st-key-nav_playlists button p {
+    font-weight: 400;
+    font-size: 0.85rem;
+    line-height: 1.3;
+}
+.st-key-nav_top button:hover p,
+.st-key-nav_playlists button:hover p {
+    color: #CC785C;
+}
+[class*="st-key-nav_folder_playlists_"] {
+    padding-left: 0.9rem;
+}
+.st-key-nav_selected button p {
+    color: #CC785C !important;
+    font-weight: 500 !important;
+}
+.st-key-nav_ytmusic {
+    align-items: center !important;
+}
+.st-key-nav_ytmusic button {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0.2rem 0 !important;
+    min-height: 0 !important;
+    justify-content: flex-start !important;
+}
+.st-key-nav_ytmusic button > div {
+    justify-content: flex-start !important;
+}
+.st-key-nav_ytmusic button p {
+    color: #1F1E1D;
+    text-align: left !important;
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+.st-key-nav_ytmusic button:hover p {
+    color: #CC785C;
+}
+.yt-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 0.1rem 0.55rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.yt-status-pill::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+.yt-status-pill.is-connected {
+    background: #E9F3EC;
+    border: 1px solid #BFDCC7;
+    color: #2F6D42;
+}
+.yt-status-pill.is-connected::before {
+    background: #3A8451;
+}
+.yt-status-pill.is-off {
+    background: #FFFFFF;
+    border: 1px solid #E5E2D9;
+    color: #87837A;
+}
+.yt-status-pill.is-off::before {
+    background: transparent;
+    border: 1.4px solid #87837A;
+    width: 4px;
+    height: 4px;
+}
+</style>
+"""
 
 
 def main() -> None:
