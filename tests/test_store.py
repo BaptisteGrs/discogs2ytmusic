@@ -288,6 +288,20 @@ def test_releases_table_migrates_in_styles_and_genres_override_columns(isolated_
     assert release["genres_override"] is None
 
 
+def test_get_release_tracks_returns_all_tracks_for_that_release_only(isolated_cache, dummy_library):
+    first, second = dummy_library[0], dummy_library[1]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    with store.connect() as conn:
+        tracks = store.get_release_tracks(conn, first["release_id"])
+
+    assert [t["title"] for t in tracks] == [t["title"] for t in first["tracklist"]]
+    assert all(t["release_id"] == first["release_id"] for t in tracks)
+    other_titles = {t["title"] for t in second["tracklist"]} - {t["title"] for t in first["tracklist"]}
+    assert not (other_titles & {t["title"] for t in tracks})
+
+
 def test_track_styles_and_genres_override_round_trip(isolated_cache, dummy_library):
     """Unlike the release-level override (used only for the no-tracklist fallback row), a
     per-track override is the normal path: Discogs only reports styles/genres per release,
