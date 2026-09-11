@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from getpass import getpass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -58,6 +60,12 @@ def save_auth_headers(cookie: str, authuser: str) -> None:
 
     ensure_dirs()
     headers_raw = f"cookie: {cookie}\nx-goog-authuser: {authuser}\nauthorization: {_SAPISIDHASH_MARKER}"
+    # Pre-create the file at 0600 before handing it to ytmusicapi's setup(), which opens it with
+    # `open(filepath, "w")` — created under the process's default umask (often world-readable) if
+    # the path doesn't exist yet. Pre-creating it avoids that window entirely (open() doesn't
+    # change the mode of a file that already exists). The chmod below is belt-and-suspenders in
+    # case ytmusicapi internals ever recreate the file instead of just writing to it.
+    os.close(os.open(YTMUSIC_AUTH_FILE, os.O_WRONLY | os.O_CREAT, 0o600))
     try:
         setup(filepath=str(YTMUSIC_AUTH_FILE), headers_raw=headers_raw)
     except YTMusicUserError as e:
@@ -81,8 +89,12 @@ def run_setup(from_file: Path | None = None) -> None:
         cookie, authuser = parse_headers_block(text)
     else:
         print(SETUP_INSTRUCTIONS)
-        cookie = input("cookie: ").strip()
-        authuser = input("x-goog-authuser: ").strip()
+        # getpass (not input()) so the cookie — a live Google session credential, not a
+        # YT-Music-scoped token — doesn't echo to the screen or linger in terminal
+        # scrollback/session recordings. x-goog-authuser isn't a secret (just an account
+        # index), but masking it too is harmless and keeps both prompts consistent.
+        cookie = getpass("cookie: ").strip()
+        authuser = getpass("x-goog-authuser: ").strip()
 
     try:
         save_auth_headers(cookie, authuser)

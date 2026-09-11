@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -300,6 +301,33 @@ def test_save_auth_headers_raises_auth_error_when_ytmusicapi_rejects_the_headers
 
     with pytest.raises(ytmusic_client.YTMusicAuthError, match="nope"):
         ytmusic_client.save_auth_headers("SID=fake", "0")
+
+
+def test_save_auth_headers_writes_the_auth_file_owner_only(isolated_auth_file):
+    """The saved file holds a live Google session cookie — it must never be group/world
+    readable, including the brief window before ytmusicapi's own setup() writes it (#32)."""
+    ytmusic_client.save_auth_headers("__Secure-3PAPISID=deadbeef; SID=fake", "0")
+
+    mode = stat.S_IMODE(isolated_auth_file.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_run_setup_reads_the_interactive_cookie_and_authuser_prompts_with_getpass(monkeypatch, isolated_auth_file):
+    """The cookie is the more sensitive of the two Discogs/YT-Music secrets (a full Google
+    session vs. a Discogs-scoped token) so, unlike plain input(), it must not echo (#32)."""
+    prompts: list[str] = []
+
+    def _fake_getpass(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return {"cookie: ": "__Secure-3PAPISID=deadbeef; SID=fake", "x-goog-authuser: ": "0"}[prompt]
+
+    monkeypatch.setattr(ytmusic_client, "getpass", _fake_getpass)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not use input()")))
+
+    ytmusic_client.run_setup()
+
+    assert prompts == ["cookie: ", "x-goog-authuser: "]
+    assert isolated_auth_file.exists()
 
 
 def test_parse_headers_block_reads_cookie_and_authuser_from_a_full_header_dump():
