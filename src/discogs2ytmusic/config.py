@@ -58,6 +58,12 @@ class Config:
 
 
 def ensure_dirs() -> None:
-    """Create the config/cache directories if they don't exist yet."""
+    """Create the config/cache directories if they don't exist yet.
+
+    `CONFIG_DIR` holds `YTMUSIC_AUTH_FILE` (a live Google session cookie), so it's chmod'd
+    to owner-only after creation — `mkdir`'s `mode` argument alone isn't enough since it's
+    subject to the process umask (see issue #32).
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.chmod(0o700)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
