@@ -57,47 +57,6 @@ class PlaylistFilter:
     matched_only: bool = False
     channels: list[str] = field(default_factory=list)
 
-    def to_json(self) -> str:
-        """Serialize to the JSON stored in `playlist_defs.filter_json`."""
-        return json.dumps(
-            {
-                "tag_groups": [{"tags": g.tags, "mode": g.mode} for g in self.tag_groups],
-                "tag_groups_mode": self.tag_groups_mode,
-                "labels": self.labels,
-                "year_min": self.year_min,
-                "year_max": self.year_max,
-                "matched_only": self.matched_only,
-                "channels": self.channels,
-            }
-        )
-
-    @classmethod
-    def from_json(cls, raw: str) -> PlaylistFilter:
-        """Deserialize a `PlaylistFilter` from `playlist_defs.filter_json`.
-
-        Accepts both the current `tag_groups` shape and the flat `tags: [...]` list
-        used before #20, which is treated as a single OR group for filter_json rows
-        saved before that change.
-        """
-        data = json.loads(raw)
-        if "tag_groups" in data:
-            tag_groups = [
-                TagGroup(tags=g.get("tags") or [], mode=g.get("mode") or "or") for g in data.get("tag_groups") or []
-            ]
-        else:
-            legacy_tags = data.get("tags") or []
-            tag_groups = [TagGroup(tags=legacy_tags, mode="or")] if legacy_tags else []
-        return cls(
-            tag_groups=tag_groups,
-            tag_groups_mode=data.get("tag_groups_mode") or "or",
-            labels=data.get("labels") or [],
-            year_min=data.get("year_min"),
-            year_max=data.get("year_max"),
-            matched_only=data.get("matched_only", False),
-            # Absent for filter_json rows saved before #28 added this field.
-            channels=data.get("channels") or [],
-        )
-
 
 def _norm(values: Iterable[str]) -> set[str]:
     return {v.strip().lower() for v in values}
@@ -130,9 +89,8 @@ def release_matches(release: sqlite3.Row, filt: PlaylistFilter) -> bool:
 class TrackRow:
     """One browsable row per track — the shape the Collection/Playlists tabs work with.
 
-    Unlike `views.MatchRow` (one row per style tag, for the legacy per-style
-    export/sync), this is always exactly one row per track regardless of how
-    many tags/criteria it happens to match.
+    Always exactly one row per track, regardless of how many tags/criteria it
+    happens to match.
     """
 
     track_id: int | None

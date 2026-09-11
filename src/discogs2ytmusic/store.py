@@ -468,7 +468,7 @@ def save_match(
 
 
 def get_match_by_id(conn: sqlite3.Connection, match_id: int) -> sqlite3.Row | None:
-    """Look up a cached match by its surrogate id (the id shown by `export`)."""
+    """Look up a cached match by its surrogate id (as used by `correct`)."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
 
@@ -519,7 +519,7 @@ def clear_all_matches(conn: sqlite3.Connection, include_manual: bool = False) ->
 
 
 def get_track(conn: sqlite3.Connection, track_id: int) -> sqlite3.Row | None:
-    """Look up a track by its surrogate id (the id shown by `export`)."""
+    """Look up a track by its surrogate id (as used by `fix-artist`/`fix-style`/`fix-genre`)."""
     conn.row_factory = sqlite3.Row
     return conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
 
@@ -527,51 +527,6 @@ def get_track(conn: sqlite3.Connection, track_id: int) -> sqlite3.Row | None:
 def set_track_search_artist(conn: sqlite3.Connection, track_id: int, artist: str | None) -> None:
     """Set (or, with `artist=None`, clear) the manual search-artist override for a track."""
     conn.execute("UPDATE tracks SET search_artist = ? WHERE id = ?", (artist, track_id))
-
-
-def get_playlist_def_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
-    """Look up a saved playlist definition by its name."""
-    conn.row_factory = sqlite3.Row
-    return conn.execute("SELECT * FROM playlist_defs WHERE name = ?", (name,)).fetchone()
-
-
-def get_playlist_def(conn: sqlite3.Connection, def_id: int) -> sqlite3.Row | None:
-    """Look up a saved playlist definition by its id."""
-    conn.row_factory = sqlite3.Row
-    return conn.execute("SELECT * FROM playlist_defs WHERE id = ?", (def_id,)).fetchone()
-
-
-def list_playlist_defs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """All saved playlist definitions, alphabetical by name."""
-    conn.row_factory = sqlite3.Row
-    return conn.execute("SELECT * FROM playlist_defs ORDER BY name").fetchall()
-
-
-def upsert_playlist_def(conn: sqlite3.Connection, name: str, filter_json: str) -> int:
-    """Create a playlist def, or update its filter if the name already exists. Returns its id."""
-    now = time.time()
-    conn.execute(
-        """INSERT INTO playlist_defs (name, filter_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(name) DO UPDATE SET filter_json=excluded.filter_json, updated_at=excluded.updated_at""",
-        (name, filter_json, now, now),
-    )
-    row = get_playlist_def_by_name(conn, name)
-    assert row is not None  # just upserted above
-    return row["id"]
-
-
-def set_playlist_def_ytmusic_id(conn: sqlite3.Connection, def_id: int, ytmusic_playlist_id: str) -> None:
-    """Record the YT Music playlist id created for a playlist definition."""
-    conn.execute(
-        "UPDATE playlist_defs SET ytmusic_playlist_id = ?, updated_at = ? WHERE id = ?",
-        (ytmusic_playlist_id, time.time(), def_id),
-    )
-
-
-def delete_playlist_def(conn: sqlite3.Connection, def_id: int) -> None:
-    """Delete a saved playlist definition (does not touch the YT Music playlist itself)."""
-    conn.execute("DELETE FROM playlist_defs WHERE id = ?", (def_id,))
 
 
 def get_release(conn: sqlite3.Connection, release_id: int) -> sqlite3.Row | None:

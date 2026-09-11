@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import enum
 import json
 import sqlite3
@@ -15,7 +14,7 @@ from rich.progress import Progress
 from rich.table import Table
 from ytmusicapi import YTMusic
 
-from . import dummy_library, scan_engine, store, sync_engine, views, ytmusic_client
+from . import dummy_library, scan_engine, store, sync_engine, ytmusic_client
 from .config import Config
 from .discogs import DiscogsClient, DiscogsError
 
@@ -245,8 +244,7 @@ def sync(
 
     This only searches and caches YouTube/YT Music matches — it never creates or modifies
     anything on your YT Music account. Use the Playlists tab to build and review a playlist,
-    then push it with its own Sync button. `push-style-playlists` is still available for the
-    old one-playlist-per-style-tag flow, but it's a separate, explicitly confirmed command now.
+    then push it with its own Sync button.
     """
     if refresh_collection:
         scan(refresh=True)
@@ -268,87 +266,6 @@ def sync(
         for s, track_list in by_style.items():
             table.add_row(s, str(len(style_video_ids[s])), str(len(track_list)))
         console.print(table)
-
-
-@app.command(name="push-style-playlists")
-def push_style_playlists(
-    style: list[str] | None = typer.Option(
-        None, "--style", help="Limit to specific style tag(s). Repeatable. Defaults to all styles."
-    ),
-    dry_run: bool = typer.Option(
-        True,
-        "--dry-run/--apply",
-        help="Preview without touching YT Music (default). Use --apply to actually create/update playlists.",
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (for scripting)."),
-) -> None:
-    """[Legacy] Auto-create one YT Music playlist per Discogs style tag and push every matched track to it.
-
-    This bypasses any playlist review — every style tag with matches gets its own playlist,
-    created or updated directly on your real YT Music account. It's being superseded by the
-    Playlists tab (define a playlist by filters, save it, review it, then push it with its own
-    Sync button) — prefer that once it's available. Requires explicit confirmation with --apply.
-    """
-    if not dry_run:
-        if not ytmusic_client.is_authenticated():
-            console.print("[red]Not authenticated with YT Music.[/red] Run: discogs2ytmusic auth ytmusic")
-            raise typer.Exit(1)
-        console.print(
-            "[bold yellow]Warning:[/bold yellow] this will create or update real playlists on your "
-            "YT Music account — one per Discogs style tag — with no review step. "
-            "This command is legacy and will be replaced by the Playlists tab."
-        )
-        if not yes and not typer.confirm("Continue?"):
-            console.print("Aborted.")
-            raise typer.Exit(0)
-
-    yt = ytmusic_client.get_client(authenticated=not dry_run)
-
-    with store.connect() as conn:
-        by_style = _match_by_style(conn, yt, style)
-        if not by_style:
-            console.print("[yellow]No releases found for the given style filter. Run `scan` first?[/yellow]")
-            raise typer.Exit(0)
-
-        style_video_ids = _video_ids_by_style(conn, by_style)
-
-        table = Table(title="Push preview" if dry_run else "Push result")
-        table.add_column("Style")
-        table.add_column("Matched", justify="right")
-        table.add_column("Total", justify="right")
-        for s, track_list in by_style.items():
-            table.add_row(s, str(len(style_video_ids[s])), str(len(track_list)))
-        console.print(table)
-
-        if dry_run:
-            console.print(
-                "[cyan]Dry run only — no playlists were created. Re-run with --apply to push to YT Music.[/cyan]"
-            )
-            return
-
-        for s, video_ids in style_video_ids.items():
-            if not video_ids:
-                continue
-            playlist_name = f"Discogs - {s}"
-            playlist_def = store.get_playlist_def_by_name(conn, playlist_name)
-            if playlist_def is None:
-                def_id = store.upsert_playlist_def(conn, playlist_name, json.dumps({"tags": [s]}))
-                conn.commit()
-                existing_id = None
-            else:
-                def_id = playlist_def["id"]
-                existing_id = playlist_def["ytmusic_playlist_id"]
-
-            if existing_id:
-                playlist_id = existing_id
-            else:
-                playlist_id, _created = ytmusic_client.get_or_create_playlist(
-                    yt, playlist_name, description=f"Auto-generated from Discogs collection (style: {s})"
-                )
-                store.set_playlist_def_ytmusic_id(conn, def_id, playlist_id)
-                conn.commit()
-            ytmusic_client.add_tracks(yt, playlist_id, video_ids)
-            console.print(f"[green]Pushed '{playlist_name}': {len(video_ids)} tracks.[/green]")
 
 
 @app.command()
@@ -399,69 +316,6 @@ def rematch(
     sync(style=style, refresh_collection=False)
 
 
-EXPORT_FIELDNAMES = [
-    "match_id",
-    "track_id",
-    "style",
-    "artist",
-    "title",
-    "discogs_url",
-    "matched",
-    "video_id",
-    "youtube_url",
-    "video_title",
-    "source",
-    "score",
-    "searched_at",
-]
-
-
-@app.command()
-def export(
-    output: Path = typer.Option(Path("matches.csv"), "--output", "-o", help="CSV file to write."),
-    style: list[str] | None = typer.Option(None, "--style", help="Limit to specific style tag(s). Repeatable."),
-) -> None:
-    """Export cached track-to-YouTube matches to a CSV for manual review.
-
-    Reads whatever is already in the local cache — run `sync` (dry-run is
-    fine, it doesn't touch your YT Music account) first to populate it. This
-    command never searches YouTube itself.
-    """
-    with store.connect() as conn:
-        match_rows = views.build_match_rows(conn, styles=style)
-
-    if not match_rows:
-        console.print("[yellow]Nothing to export. Run `scan` and `sync` first.[/yellow]")
-        raise typer.Exit(0)
-
-    rows = [
-        {
-            "match_id": r.match_id if r.match_id is not None else "",
-            "track_id": r.track_id if r.track_id is not None else "",
-            "style": r.style,
-            "artist": r.artist,
-            "title": r.title,
-            "discogs_url": r.discogs_url,
-            "matched": "yes" if r.matched else "no",
-            "video_id": r.video_id or "",
-            "youtube_url": r.youtube_url,
-            "video_title": r.video_title,
-            "source": r.source,
-            "score": r.score if r.score is not None else "",
-            "searched_at": r.searched_at or "",
-        }
-        for r in match_rows
-    ]
-
-    with output.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=EXPORT_FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    unmatched = sum(1 for r in rows if r["matched"] == "no")
-    console.print(f"[green]Wrote {len(rows)} rows to {output}[/green] ({unmatched} unmatched)")
-
-
 def _parse_video_id(value: str) -> str:
     try:
         return ytmusic_client.parse_video_id(value)
@@ -472,7 +326,7 @@ def _parse_video_id(value: str) -> str:
 
 @app.command()
 def correct(
-    match_id: int = typer.Argument(..., help="The match_id shown by `export`."),
+    match_id: int = typer.Argument(..., help="The match's surrogate id (`matches.id` in the sqlite cache)."),
     video_id: str | None = typer.Option(
         None, "--video-id", help="The correct video id, or a full YouTube/YT Music URL, to use for this match."
     ),
@@ -483,9 +337,10 @@ def correct(
         False, "--clear", help="Forget this cached result so the next `sync` searches it again from scratch."
     ),
 ) -> None:
-    """Manually fix one cached YouTube match, addressed by the match_id from `export`.
+    """Manually fix one cached YouTube match, addressed by its `matches.id` in the sqlite cache.
 
-    Pass exactly one of --video-id, --reject, or --clear.
+    Pass exactly one of --video-id, --reject, or --clear. Also available as the "YouTube link"
+    column in the Streamlit app, which doesn't require knowing the match id.
     """
     modes_given = sum([video_id is not None, reject, clear])
     if modes_given != 1:
@@ -495,7 +350,7 @@ def correct(
     with store.connect() as conn:
         row = store.get_match_by_id(conn, match_id)
         if row is None:
-            console.print(f"[red]No cached match with id {match_id}.[/red] Run `export` to see valid ids.")
+            console.print(f"[red]No cached match with id {match_id}.[/red]")
             raise typer.Exit(1)
 
         if clear:
@@ -519,7 +374,7 @@ def correct(
 
 @app.command(name="fix-artist")
 def fix_artist(
-    track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
+    track_id: int = typer.Argument(..., help="The track's surrogate id (`tracks.id` in the sqlite cache)."),
     artist: str | None = typer.Option(
         None,
         "--artist",
@@ -539,7 +394,8 @@ def fix_artist(
     dilute the fuzzy match enough to miss or pick the wrong video. Pass exactly one
     of --artist or --clear. Takes effect on the next `sync` (it searches under the
     new artist/title pair, which won't be cached yet); it doesn't touch any existing
-    cached match for this track — `correct --clear` that separately if needed.
+    cached match for this track — `correct --clear` that separately if needed. Also
+    available as the "Track Artist" column in the Streamlit app.
 
     Note: this override lives on the track row, so it's lost if that release's
     tracklist is later replaced (`scan --refresh`).
@@ -551,7 +407,7 @@ def fix_artist(
     with store.connect() as conn:
         track = store.get_track(conn, track_id)
         if track is None:
-            console.print(f"[red]No track with id {track_id}.[/red] Run `export` to see valid ids.")
+            console.print(f"[red]No track with id {track_id}.[/red]")
             raise typer.Exit(1)
 
         store.set_track_search_artist(conn, track_id, artist)
@@ -564,7 +420,7 @@ def fix_artist(
 
 @app.command(name="fix-style")
 def fix_style(
-    track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
+    track_id: int = typer.Argument(..., help="The track's surrogate id (`tracks.id` in the sqlite cache)."),
     style: list[str] | None = typer.Option(
         None, "--style", help="Style tag to use instead of Discogs' own. Repeatable for more than one."
     ),
@@ -577,7 +433,7 @@ def fix_style(
     Discogs only reports styles per-release, so a release tagged e.g. "Tech House,
     Downtempo, Breaks" gives no way to know which track is which from the API alone —
     this lets a user correct that per track. Pass exactly one of --style (repeatable)
-    or --clear.
+    or --clear. Also available as the "Styles" column in the Streamlit app.
 
     Note: this override lives on the track row, so it's lost if that release's
     tracklist is later replaced (`scan --refresh`).
@@ -589,7 +445,7 @@ def fix_style(
     with store.connect() as conn:
         track = store.get_track(conn, track_id)
         if track is None:
-            console.print(f"[red]No track with id {track_id}.[/red] Run `export` to see valid ids.")
+            console.print(f"[red]No track with id {track_id}.[/red]")
             raise typer.Exit(1)
 
         store.set_track_styles_override(conn, track_id, style)
@@ -603,7 +459,7 @@ def fix_style(
 
 @app.command(name="fix-genre")
 def fix_genre(
-    track_id: int = typer.Argument(..., help="The track_id shown by `export`."),
+    track_id: int = typer.Argument(..., help="The track's surrogate id (`tracks.id` in the sqlite cache)."),
     genre: list[str] | None = typer.Option(
         None, "--genre", help="Genre tag to use instead of Discogs' own. Repeatable for more than one."
     ),
@@ -614,7 +470,8 @@ def fix_genre(
     """Override the genre tags used for one track, like `fix-artist` does for artist.
 
     Pass exactly one of --genre (repeatable) or --clear. Same per-track rationale as
-    `fix-style` — see its docstring.
+    `fix-style` — see its docstring. Also available as the "Genres" column in the
+    Streamlit app.
 
     Note: this override lives on the track row, so it's lost if that release's
     tracklist is later replaced (`scan --refresh`).
@@ -626,7 +483,7 @@ def fix_genre(
     with store.connect() as conn:
         track = store.get_track(conn, track_id)
         if track is None:
-            console.print(f"[red]No track with id {track_id}.[/red] Run `export` to see valid ids.")
+            console.print(f"[red]No track with id {track_id}.[/red]")
             raise typer.Exit(1)
 
         store.set_track_genres_override(conn, track_id, genre)
