@@ -738,8 +738,7 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
 _SIDEBAR_NAV_CSS = """
 <style>
 .st-key-nav_top,
-.st-key-nav_playlists,
-[class*="st-key-nav_folder_playlists_"] {
+.st-key-nav_playlists {
     gap: 0.15rem !important;
 }
 [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
@@ -791,9 +790,6 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_top button:hover p,
 .st-key-nav_playlists button:hover p {
     color: #CC785C;
-}
-[class*="st-key-nav_folder_playlists_"] {
-    padding-left: 0.9rem;
 }
 .st-key-nav_selected button p {
     color: #CC785C !important;
@@ -870,7 +866,8 @@ def _nav_button(label: str, *, key: str, selected: bool, width: str = "stretch",
 
 
 def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playlist_id: int | None) -> None:
-    """Render one playlist's sidebar row, wherever it appears (ungrouped, or inside a folder)."""
+    """Render one ungrouped playlist's sidebar row. A grouped playlist isn't rendered here —
+    it's reached via its folder's detail page (`_render_folder_detail`)."""
     is_selected = kind == "playlist" and playlist["id"] == selected_playlist_id
     if _nav_button(playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected):
         st.session_state["nav_kind"] = "playlist"
@@ -878,108 +875,43 @@ def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playl
         st.rerun()
 
 
-def _render_folder_delete_confirmation(folder: sqlite3.Row, playlists: list[sqlite3.Row]) -> None:
-    """Confirm-then-delete for a folder row: unassigns (not deletes) any playlists inside it,
-    per `store.delete_playlist_folder`'s semantics — mirrors `_render_delete_confirmation`'s
-    warn/Yes/Cancel shape for a playlist."""
-    folder_id = folder["id"]
-    confirm_key = f"confirm_delete_folder_{folder_id}"
-
-    if playlists:
-        st.warning(
-            f"Delete the folder '{folder['name']}'? Its {len(playlists)} playlist(s) won't be "
-            "deleted — they'll move back to ungrouped."
-        )
-    else:
-        st.warning(f"Delete the empty folder '{folder['name']}'?")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Yes, delete", key=f"confirm_delete_folder_yes_{folder_id}"):
-            with store.connect() as conn:
-                store.delete_playlist_folder(conn, folder_id)
-                conn.commit()
-            st.session_state[confirm_key] = False
-            st.session_state.pop(f"nav_folder_expanded_{folder_id}", None)
-            st.rerun()
-    with col2:
-        if st.button("Cancel", key=f"confirm_delete_folder_no_{folder_id}"):
-            st.session_state[confirm_key] = False
-            st.rerun()
-
-
-def _render_folder_nav_entry(
-    folder: sqlite3.Row, playlists: list[sqlite3.Row], kind: str, selected_playlist_id: int | None
-) -> None:
-    """Render one playlist folder's sidebar row: same row style as a playlist entry, expanding
-    and collapsing — via the same mechanism as the Playlists section itself — to reveal the
-    playlists filed under it. A trailing delete icon offers the same confirm-then-delete flow
-    an existing playlist gets (`_render_delete_button`/`_render_delete_confirmation`).
-    """
-    folder_id = folder["id"]
-    expanded_key = f"nav_folder_expanded_{folder_id}"
-    confirm_key = f"confirm_delete_folder_{folder_id}"
-    expanded = st.session_state.get(expanded_key, False)
-    confirming = st.session_state.get(confirm_key, False)
-
-    name_col, delete_col = st.columns([6, 1])
-    with name_col:
-        if st.button(
-            folder["name"],
-            key=f"nav_folder_{folder_id}",
-            type="tertiary",
-            width="stretch",
-            icon=":material/expand_more:" if expanded else ":material/chevron_right:",
-        ):
-            st.session_state[expanded_key] = not expanded
-            st.rerun()
-    with delete_col:
-        if not confirming and st.button(
-            "",
-            key=f"nav_folder_delete_{folder_id}",
-            type="tertiary",
-            icon=":material/delete:",
-            help="Delete this folder",
-        ):
-            st.session_state[confirm_key] = True
-            st.rerun()
-
-    if confirming:
-        _render_folder_delete_confirmation(folder, playlists)
-        return
-
-    if expanded:
-        with st.container(key=f"nav_folder_playlists_{folder_id}"):
-            if not playlists:
-                st.caption("No playlists in this folder yet.")
-            for p in sorted(playlists, key=lambda p: p["name"].lower()):
-                _render_playlist_nav_button(p, kind, selected_playlist_id)
+def _render_folder_nav_button(folder: sqlite3.Row, kind: str, selected_folder_id: int | None) -> None:
+    """Render one playlist folder's sidebar row. Opens the folder's detail page in the main
+    pane (`_render_folder_detail`), which lists its playlists and offers the delete
+    affordance — kept out of the sidebar itself so the nav stays lightweight."""
+    is_selected = kind == "folder" and folder["id"] == selected_folder_id
+    if _nav_button(folder["name"], key=f"nav_folder_{folder['id']}", selected=is_selected, icon=":material/folder:"):
+        st.session_state["nav_kind"] = "folder"
+        st.session_state["nav_folder_id"] = folder["id"]
+        st.rerun()
 
 
 def render_sidebar_nav() -> tuple[str, int | None]:
     """Render the sidebar: a Collection link, then a Playlists section listing playlist
-    folders and ungrouped playlists together (one row per entry, alphabetically) — folders
-    expand/collapse, like the Playlists section itself, to reveal the playlists filed under
-    them. Returns the current selection as ("collection", None), ("playlist", id), or
+    folders and ungrouped playlists together (one row per entry, alphabetically). Clicking a
+    folder opens its detail page in the main pane rather than expanding inline. Returns the
+    current selection as ("collection", None), ("playlist", id), ("folder", id), or
     ("ytmusic", None).
     """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
         folders = store.list_playlist_folders(conn)
     playlist_ids = {p["id"] for p in playlists}
+    folder_ids = {f["id"] for f in folders}
 
     kind = st.session_state.get("nav_kind", "collection")
-    playlist_id = st.session_state.get("nav_playlist_id")
-    stale_playlist = kind == "playlist" and playlist_id not in playlist_ids
-    if stale_playlist or kind not in ("collection", "playlist", "ytmusic"):
-        kind, playlist_id = "collection", None
+    selected_id = (
+        st.session_state.get("nav_playlist_id") if kind == "playlist" else st.session_state.get("nav_folder_id")
+    )
+    stale = (kind == "playlist" and selected_id not in playlist_ids) or (
+        kind == "folder" and selected_id not in folder_ids
+    )
+    if stale or kind not in ("collection", "playlist", "folder", "ytmusic"):
+        kind, selected_id = "collection", None
 
     expanded = st.session_state.get("nav_playlists_expanded", True)
 
     ungrouped = [p for p in playlists if p["folder_id"] is None]
-    playlists_by_folder: dict[int, list[sqlite3.Row]] = {}
-    for p in playlists:
-        if p["folder_id"] is not None:
-            playlists_by_folder.setdefault(p["folder_id"], []).append(p)
 
     with st.sidebar:
         st.markdown(_SIDEBAR_NAV_CSS, unsafe_allow_html=True)
@@ -988,6 +920,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
             if _nav_button("My Discogs Collection", key="nav_collection", selected=kind == "collection"):
                 st.session_state["nav_kind"] = "collection"
                 st.session_state["nav_playlist_id"] = None
+                st.session_state["nav_folder_id"] = None
                 st.rerun()
 
             st.divider()
@@ -1014,15 +947,15 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                 for _name, entry_id, entry_kind in entries:
                     if entry_kind == "folder":
                         folder = next(f for f in folders if f["id"] == entry_id)
-                        _render_folder_nav_entry(folder, playlists_by_folder.get(entry_id, []), kind, playlist_id)
+                        _render_folder_nav_button(folder, kind, selected_id)
                     else:
                         playlist = next(p for p in ungrouped if p["id"] == entry_id)
-                        _render_playlist_nav_button(playlist, kind, playlist_id)
+                        _render_playlist_nav_button(playlist, kind, selected_id)
 
         st.divider()
         _render_ytmusic_nav_item(kind == "ytmusic")
 
-    return kind, playlist_id
+    return kind, selected_id
 
 
 def _ytmusic_connected() -> bool:
@@ -1547,14 +1480,101 @@ def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
             st.rerun()
 
 
+def _render_folder_delete_button(folder: sqlite3.Row) -> None:
+    folder_id = folder["id"]
+    confirm_key = f"confirm_delete_folder_{folder_id}"
+
+    if st.session_state.get(confirm_key):
+        return
+    with st.container(key="delete_pill", width="content"):
+        if st.button(
+            "Delete",
+            key=f"delete_folder_button_{folder_id}",
+            icon=":material/delete:",
+            help="Delete this folder",
+        ):
+            st.session_state[confirm_key] = True
+            st.rerun()
+
+
+def _render_folder_delete_confirmation(folder: sqlite3.Row, playlist_count: int) -> None:
+    """Confirm-then-delete for a folder, mirroring `_render_delete_confirmation`'s shape for a
+    playlist. Deleting a folder unassigns (rather than deletes) any playlists inside it, per
+    `store.delete_playlist_folder`'s semantics — the warning spells that out whenever the
+    folder isn't empty."""
+    folder_id = folder["id"]
+    confirm_key = f"confirm_delete_folder_{folder_id}"
+
+    if playlist_count:
+        st.warning(
+            f"Delete the folder '{folder['name']}'? Its {playlist_count} playlist(s) won't be "
+            "deleted — they'll move back to ungrouped."
+        )
+    else:
+        st.warning(f"Delete the empty folder '{folder['name']}'?")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, delete", key=f"confirm_delete_folder_yes_{folder_id}"):
+            with store.connect() as conn:
+                store.delete_playlist_folder(conn, folder_id)
+                conn.commit()
+            st.session_state[confirm_key] = False
+            st.session_state["nav_kind"] = "collection"
+            st.session_state["nav_folder_id"] = None
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key=f"confirm_delete_folder_no_{folder_id}"):
+            st.session_state[confirm_key] = False
+            st.rerun()
+
+
+def _render_folder_detail(folder: sqlite3.Row) -> None:
+    """A folder's detail page: its contained playlists with a track count each (clicking one
+    opens its own detail view — the only way to reach a grouped playlist now that folders no
+    longer expand inline in the sidebar), plus the delete affordance for the folder itself."""
+    folder_id = folder["id"]
+    with store.connect() as conn:
+        playlists = [p for p in store.list_playlists(conn) if p["folder_id"] == folder_id]
+        track_counts = {p["id"]: len(store.list_playlist_track_ids(conn, p["id"])) for p in playlists}
+
+    st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
+    title_col, actions_col = st.columns([3, 2], vertical_alignment="center")
+    with title_col:
+        st.subheader(folder["name"])
+    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
+        _render_folder_delete_button(folder)
+
+    if st.session_state.get(f"confirm_delete_folder_{folder_id}"):
+        _render_folder_delete_confirmation(folder, len(playlists))
+
+    if not playlists:
+        st.caption("No playlists in this folder yet.")
+    for p in sorted(playlists, key=lambda p: p["name"].lower()):
+        count = track_counts[p["id"]]
+        name_col, count_col = st.columns([4, 1], vertical_alignment="center")
+        with name_col:
+            if st.button(p["name"], key=f"folder_playlist_{p['id']}", type="tertiary", width="stretch"):
+                st.session_state["nav_kind"] = "playlist"
+                st.session_state["nav_playlist_id"] = p["id"]
+                st.session_state["nav_folder_id"] = None
+                st.rerun()
+        with count_col:
+            st.caption(f"{count} track{'' if count == 1 else 's'}")
+
+
 def main() -> None:
     """Streamlit entry point — a sidebar (Collection + Playlists) driving the main content pane."""
-    kind, playlist_id = render_sidebar_nav()
-    if kind == "playlist" and playlist_id is not None:
+    kind, selected_id = render_sidebar_nav()
+    if kind == "playlist" and selected_id is not None:
         with store.connect() as conn:
-            playlist = store.get_playlist(conn, playlist_id)
+            playlist = store.get_playlist(conn, selected_id)
         assert playlist is not None  # render_sidebar_nav already dropped stale/deleted ids
         _render_playlist_detail(playlist)
+    elif kind == "folder" and selected_id is not None:
+        with store.connect() as conn:
+            folder = store.get_playlist_folder(conn, selected_id)
+        assert folder is not None  # render_sidebar_nav already dropped stale/deleted ids
+        _render_folder_detail(folder)
     elif kind == "ytmusic":
         _render_ytmusic_page()
     else:
