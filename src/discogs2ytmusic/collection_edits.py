@@ -13,8 +13,14 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _str(value: Any) -> str:
-    """Cast a DataFrame cell to str — columns we read here are always string dtype."""
-    return str(value)
+    """Cast a DataFrame cell to str, treating a missing/NaN cell as empty.
+
+    A data-editor cell can come back as pandas NaN even for a nominally string-dtype
+    column (e.g. a cleared link cell) — plain `str(value)` would turn that into the
+    literal text "nan" instead of "", which then reads as real (garbage) user input to
+    every caller below. Mirrors `_int_or_none`'s existing `pd.isna` guard.
+    """
+    return "" if pd.isna(value) else str(value)
 
 
 def apply_artist_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame) -> int:

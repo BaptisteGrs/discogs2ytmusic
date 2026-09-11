@@ -341,3 +341,17 @@ def test_parse_headers_block_reads_cookie_and_authuser_from_a_full_header_dump()
 
 def test_parse_headers_block_returns_empty_strings_when_keys_are_absent():
     assert ytmusic_client.parse_headers_block("user-agent: Mozilla/5.0") == ("", "")
+
+
+def test_parse_video_id_accepts_a_bare_id():
+    assert ytmusic_client.parse_video_id("right-id") == "right-id"
+
+
+@pytest.mark.parametrize("value", ["nan", "NaN", "none", "None", "null", "NAT"])
+def test_parse_video_id_rejects_stringified_missing_values(value):
+    """Regression test: a NaN pandas cell stringified instead of treated as empty (the bug
+    behind collection_edits._str, see test_apply_video_link_edits_nan_cell_is_treated_as_empty)
+    must be rejected here too, so it can never again be silently saved as a literal video id
+    that only fails later, confusingly, when YT Music rejects the push."""
+    with pytest.raises(ValueError, match="doesn't look like a real YouTube video id"):
+        ytmusic_client.parse_video_id(value)
