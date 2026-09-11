@@ -938,7 +938,20 @@ def test_sidebar_shows_empty_state_when_no_playlists_exist(isolated_cache, dummy
 # --- Playlist folders ---
 
 
-def test_sidebar_folder_starts_collapsed_and_hides_its_playlists(isolated_cache, dummy_library):
+def _open_folder(at: AppTest, folder_id: int) -> AppTest:
+    """Click the sidebar nav button for `folder_id`, opening its detail page in the main pane."""
+    return at.button(key=f"nav_folder_{folder_id}").click().run()
+
+
+def _open_playlist_in_folder(at: AppTest, folder_id: int, playlist_id: int) -> AppTest:
+    """Open a folder's detail page, then click one of its playlists from there — one of two
+    ways to reach a grouped playlist's detail view, the other being the sidebar's own
+    expand/collapse chevron (see `test_clicking_the_folder_chevron_...` below)."""
+    at = _open_folder(at, folder_id)
+    return at.button(key=f"folder_playlist_{playlist_id}").click().run()
+
+
+def test_a_collapsed_folder_hides_its_playlists_from_the_sidebar(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         folder_id = store.create_playlist_folder(conn, "Genres")
@@ -952,7 +965,7 @@ def test_sidebar_folder_starts_collapsed_and_hides_its_playlists(isolated_cache,
     assert not any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)  # but its contents are hidden
 
 
-def test_clicking_a_folder_expands_it_to_show_its_playlists(isolated_cache, dummy_library):
+def test_clicking_the_folder_chevron_expands_it_to_show_its_playlists_in_the_sidebar(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         folder_id = store.create_playlist_folder(conn, "Genres")
@@ -960,10 +973,11 @@ def test_clicking_a_folder_expands_it_to_show_its_playlists(isolated_cache, dumm
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at.button(key=f"nav_folder_toggle_{folder_id}").click().run()
 
     assert not at.exception
     assert any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)
+    assert any(h.value == "My Discogs Collection" for h in at.main.header)  # expanding didn't navigate anywhere
 
 
 def test_clicking_a_playlist_inside_an_expanded_folder_opens_its_detail_view(isolated_cache, dummy_library):
@@ -974,8 +988,54 @@ def test_clicking_a_playlist_inside_an_expanded_folder_opens_its_detail_view(iso
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at.button(key=f"nav_folder_toggle_{folder_id}").click().run()
     at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "playlist"
+    assert at.session_state["nav_playlist_id"] == playlist_id
+    assert any(h.value == "My Favorites" for h in at.main.subheader)
+
+
+def test_clicking_a_folder_opens_its_detail_page_listing_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "folder"
+    assert any(h.value == "Genres" for h in at.main.subheader)
+    assert any(
+        b.key == f"folder_playlist_{playlist_id}" and b.label == "My Favorites - 1 track" for b in at.main.button
+    )
+
+
+def test_folder_detail_page_shows_a_placeholder_when_empty(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+
+    assert not at.exception
+    assert any("No playlists in this folder yet" in c.value for c in at.main.caption)
+
+
+def test_clicking_a_playlist_in_the_folder_detail_page_opens_its_detail_view(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = _open_playlist_in_folder(AppTest.from_file(APP_PATH).run(), folder_id, playlist_id)
 
     assert not at.exception
     assert at.session_state["nav_kind"] == "playlist"
@@ -1024,9 +1084,7 @@ def test_playlist_detail_can_move_a_playlist_back_to_ungrouped(isolated_cache, d
         playlist_id = store.create_playlist(conn, "My Favorites")
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
-    at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
-    at = _select_playlist(at, playlist_id)
+    at = _open_playlist_in_folder(AppTest.from_file(APP_PATH).run(), folder_id, playlist_id)
     at.selectbox(key=f"playlist_folder_choice_{playlist_id}").select("No folder").run()
     at.button(key=f"playlist_folder_move_{playlist_id}").click().run()
 
@@ -1043,12 +1101,73 @@ def test_playlist_detail_folder_picker_defaults_to_the_playlists_current_folder(
         playlist_id = store.create_playlist(conn, "My Favorites")
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
-    at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
-    at = _select_playlist(at, playlist_id)
+    at = _open_playlist_in_folder(AppTest.from_file(APP_PATH).run(), folder_id, playlist_id)
 
     assert not at.exception
     assert at.selectbox(key=f"playlist_folder_choice_{playlist_id}").value == "Genres"
+
+
+def test_clicking_delete_on_a_folder_page_shows_a_confirmation_and_does_not_delete_yet(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any("won't be deleted" in w.value for w in at.main.warning)
+    with store.connect() as conn:
+        assert len(store.list_playlist_folders(conn)) == 1  # not deleted yet — only warned
+
+
+def test_confirming_folder_delete_removes_the_folder_but_not_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+    at.button(key=f"confirm_delete_folder_yes_{folder_id}").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "collection"  # the folder page no longer exists
+    with store.connect() as conn:
+        assert store.list_playlist_folders(conn) == []
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist is not None
+    assert playlist["folder_id"] is None
+
+
+def test_cancelling_folder_delete_keeps_the_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+    at.button(key=f"confirm_delete_folder_no_{folder_id}").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "folder"
+    with store.connect() as conn:
+        assert len(store.list_playlist_folders(conn)) == 1
+
+
+def test_deleting_an_empty_folder_shows_a_simpler_confirmation(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any("empty folder" in w.value for w in at.main.warning)
 
 
 def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_library):
