@@ -347,3 +347,45 @@ def test_apply_video_link_edits_invalid_url_reports_error_and_skips(isolated_cac
     assert count == 0
     assert len(errors) == 1
     assert match is None
+
+
+def test_str_treats_nan_as_empty_not_the_literal_text_nan():
+    """Regression test for the bug behind #64's cookie-storage-branch follow-up: a data-editor
+    cell can come back as pandas NaN even in a string column, and `str(nan)` silently produces
+    the text "nan" — which then reads as real (garbage) user input downstream."""
+    assert collection_edits._str(float("nan")) == ""
+    assert collection_edits._str("real value") == "real value"
+
+
+def test_apply_video_link_edits_nan_cell_is_treated_as_clearing_not_a_literal_video_id(isolated_cache, dummy_library):
+    """A cleared youtube_url cell can arrive as pandas NaN rather than "" — this must be
+    treated the same as an explicit clear, never saved as the literal video id "nan" (which
+    would only fail later, confusingly, when YT Music rejects a push containing it)."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.save_match(conn, "Some Artist", "Some Title", "some-id", "Some", "ytmusic", 70.0)
+        match_id = store.get_match(conn, "Some Artist", "Some Title")["id"]
+
+    old_url = "https://music.youtube.com/watch?v=some-id"
+    original = _df(
+        [{"match_id": match_id, "track_artist": "Some Artist", "track_title": "Some Title", "youtube_url": old_url}]
+    )
+    edited = _df(
+        [
+            {
+                "match_id": match_id,
+                "track_artist": "Some Artist",
+                "track_title": "Some Title",
+                "youtube_url": float("nan"),
+            }
+        ]
+    )
+
+    with store.connect() as conn:
+        count, errors = collection_edits.apply_video_link_edits(conn, original, edited)
+        match = store.get_match_by_id(conn, match_id)
+
+    assert count == 1
+    assert errors == []
+    assert match["video_id"] is None
+    assert match["video_id"] != "nan"

@@ -137,6 +137,24 @@ _ACTION_PILL_CSS = """
 </style>
 """
 
+# A folder detail page's playlist list (`_render_folder_detail`): each row is a single
+# tertiary button whose label is already "name - N tracks", so it just needs left-aligning —
+# Streamlit centers button content by default.
+_FOLDER_PLAYLIST_LIST_CSS = """
+<style>
+.st-key-folder_playlist_list button {
+    justify-content: flex-start !important;
+    width: 100% !important;
+}
+.st-key-folder_playlist_list button > div {
+    justify-content: flex-start !important;
+}
+.st-key-folder_playlist_list button p {
+    text-align: left !important;
+}
+</style>
+"""
+
 
 def _all_rows() -> list[TrackRow]:
     with store.connect() as conn:
@@ -426,6 +444,16 @@ def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collect
     `key_prefix` namespaces the underlying widget/session-state keys so the Collection tab
     and a given playlist's detail view — either of which can render this panel in the same
     session — never collide (#60).
+
+    Each field also gets a "Reset" button (enabled only once that field actually carries a
+    correction — see `TrackRow.artist_overridden`/`styles_overridden`/`genres_overridden`/
+    `video_overridden`), for reverting just that one field instead of the whole row (#66).
+    Artist/Styles/Genres reset the same way blanking-and-saving the field already did — clear
+    the override, fall back to Discogs. YouTube link reset is different: blanking-and-saving
+    that field means "reject, this track has no match" (`apply_video_link_edits`), which is
+    sticky — `sync`/`rematch` both leave a rejected match alone. Reset instead deletes the
+    cached match outright and searches again immediately, so an accidentally-cleared link can
+    be recovered without dropping to the CLI's `correct --clear`.
     """
     if len(selected_rows) != 1:
         if selected_rows:
@@ -436,23 +464,121 @@ def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collect
 
     row = selected_rows[0]
     row_key = f"{key_prefix}_edit_{row.track_id if row.track_id is not None else f'release_{row.release_id}'}"
+
+    # A text_input's `value=` argument only seeds its *first-ever* render for a given
+    # `key` — once mounted, the widget keeps whatever the user (or a prior rerun) left in
+    # it regardless of a later `value=` change, and merely clearing `st.session_state[key]`
+    # doesn't reliably force a resync either (the frontend component can retain its last
+    # displayed text across a rerun that doesn't touch its `key`). So each field's actual
+    # widget key carries a generation counter that a reset bumps, forcing a genuinely new
+    # widget instance next render — the only reliable way to make it redisplay the fresh
+    # Discogs/re-searched value instead of the correction that was just discarded.
+    artist_gen = st.session_state.get(f"{row_key}_artist_gen", 0)
+    styles_gen = st.session_state.get(f"{row_key}_styles_gen", 0)
+    genres_gen = st.session_state.get(f"{row_key}_genres_gen", 0)
+    video_gen = st.session_state.get(f"{row_key}_video_gen", 0)
+
     with st.form(key=row_key):
         st.caption(f"Editing **{row.track_artist} — {row.track_title}**")
-        artist = st.text_input(
-            "Track Artist",
-            value=row.track_artist,
-            key=f"{row_key}_artist",
-            help="Edit to override the artist used for this track's YouTube search",
-        )
-        styles = st.text_input("Styles", value=", ".join(row.styles), key=f"{row_key}_styles")
-        genres = st.text_input("Genres", value=", ".join(row.genres), key=f"{row_key}_genres")
-        youtube_url = st.text_input(
-            "YouTube link",
-            value=row.youtube_url,
-            key=f"{row_key}_youtube_url",
-            help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
-        )
+
+        artist_col, artist_reset_col = st.columns([5, 1])
+        with artist_col:
+            artist = st.text_input(
+                "Track Artist",
+                value=row.track_artist,
+                key=f"{row_key}_artist_{artist_gen}",
+                help="Edit to override the artist used for this track's YouTube search",
+            )
+        with artist_reset_col:
+            st.write("")  # align with the labeled input above
+            reset_artist = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_artist",
+                icon=":material/restart_alt:",
+                help="Discard the artist correction and use the Discogs-sourced artist again",
+                disabled=not row.artist_overridden,
+            )
+
+        styles_col, styles_reset_col = st.columns([5, 1])
+        with styles_col:
+            styles = st.text_input("Styles", value=", ".join(row.styles), key=f"{row_key}_styles_{styles_gen}")
+        with styles_reset_col:
+            st.write("")
+            reset_styles = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_styles",
+                icon=":material/restart_alt:",
+                help="Discard the styles correction and use the Discogs-sourced styles again",
+                disabled=not row.styles_overridden,
+            )
+
+        genres_col, genres_reset_col = st.columns([5, 1])
+        with genres_col:
+            genres = st.text_input("Genres", value=", ".join(row.genres), key=f"{row_key}_genres_{genres_gen}")
+        with genres_reset_col:
+            st.write("")
+            reset_genres = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_genres",
+                icon=":material/restart_alt:",
+                help="Discard the genres correction and use the Discogs-sourced genres again",
+                disabled=not row.genres_overridden,
+            )
+
+        video_col, video_reset_col = st.columns([5, 1])
+        with video_col:
+            youtube_url = st.text_input(
+                "YouTube link",
+                value=row.youtube_url,
+                key=f"{row_key}_youtube_url_{video_gen}",
+                help="Paste a YouTube/YT Music URL, or clear it to reject the current match",
+            )
+        with video_reset_col:
+            st.write("")
+            reset_video = st.form_submit_button(
+                "Reset",
+                key=f"{row_key}_reset_video",
+                icon=":material/restart_alt:",
+                help="Forget the manually-picked/rejected match and search for a new one now",
+                disabled=not row.video_overridden,
+            )
+
         saved = st.form_submit_button("Save changes", key=f"{row_key}_save")
+
+    if reset_artist or reset_styles or reset_genres:
+        with store.connect() as conn:
+            if reset_artist:
+                if row.track_id is not None:
+                    store.set_track_search_artist(conn, row.track_id, None)
+                else:
+                    store.set_release_artist_override(conn, row.release_id, None)
+                st.session_state[f"{row_key}_artist_gen"] = artist_gen + 1
+            if reset_styles:
+                if row.track_id is not None:
+                    store.set_track_styles_override(conn, row.track_id, None)
+                else:
+                    store.set_release_styles_override(conn, row.release_id, None)
+                st.session_state[f"{row_key}_styles_gen"] = styles_gen + 1
+            if reset_genres:
+                if row.track_id is not None:
+                    store.set_track_genres_override(conn, row.track_id, None)
+                else:
+                    store.set_release_genres_override(conn, row.release_id, None)
+                st.session_state[f"{row_key}_genres_gen"] = genres_gen + 1
+        st.rerun()
+
+    if reset_video:
+        with store.connect() as conn:
+            release = store.get_release(conn, row.release_id)
+            assert release is not None  # the row was just built from this release
+            tracks = store.get_release_tracks(conn, row.release_id)
+            if row.match_id is not None:
+                store.delete_match(conn, row.match_id)
+            yt = ytmusic_client.get_client(authenticated=False)
+            sync_engine.rematch_track(conn, yt, release, tracks, row.track_id, row.track_artist, row.track_title)
+        st.session_state[f"{row_key}_video_gen"] = video_gen + 1
+        st.success("Refetched the YouTube match.")
+        st.rerun()
 
     if not saved:
         return
@@ -887,39 +1013,56 @@ def _nav_button(label: str, *, key: str, selected: bool, width: str = "stretch",
 
 
 def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playlist_id: int | None) -> None:
-    """Render one playlist's sidebar row, wherever it appears (ungrouped, or inside a folder)."""
+    """Render one playlist's sidebar row, wherever it appears (ungrouped, or inside an
+    expanded folder)."""
     is_selected = kind == "playlist" and playlist["id"] == selected_playlist_id
-    if _nav_button(playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected):
+    if _nav_button(
+        playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected, icon=":material/music_note:"
+    ):
         st.session_state["nav_kind"] = "playlist"
         st.session_state["nav_playlist_id"] = playlist["id"]
         st.rerun()
 
 
 def _render_folder_nav_entry(
-    folder: sqlite3.Row, playlists: list[sqlite3.Row], kind: str, selected_playlist_id: int | None
+    folder: sqlite3.Row, playlists: list[sqlite3.Row], kind: str, selected_id: int | None
 ) -> None:
-    """Render one playlist folder's sidebar row: same row style as a playlist entry, expanding
-    and collapsing — via the same mechanism as the Playlists section itself — to reveal the
-    playlists filed under it.
+    """Render one playlist folder's sidebar row: a chevron that expands/collapses (like the
+    Playlists section itself) to list the playlists filed under it right there in the sidebar,
+    plus the folder name itself as a separate click target that opens the folder's detail page
+    in the main pane (`_render_folder_detail`) — where its stats and the delete affordance live.
     """
-    expanded_key = f"nav_folder_expanded_{folder['id']}"
+    folder_id = folder["id"]
+    expanded_key = f"nav_folder_expanded_{folder_id}"
     expanded = st.session_state.get(expanded_key, False)
-    if st.button(
-        folder["name"],
-        key=f"nav_folder_{folder['id']}",
-        type="tertiary",
-        width="stretch",
-        icon=":material/expand_more:" if expanded else ":material/chevron_right:",
-    ):
-        st.session_state[expanded_key] = not expanded
-        st.rerun()
+    is_selected = kind == "folder" and folder_id == selected_id
+
+    # An icon-only button (the chevron) sizes its box to just the icon, while the name
+    # button's box also accounts for its label text — center-aligning the columns keeps both
+    # icons on the same visual line despite that box-height difference.
+    chevron_col, name_col = st.columns([1, 7], vertical_alignment="center")
+    with chevron_col:
+        if st.button(
+            "",
+            key=f"nav_folder_toggle_{folder_id}",
+            type="tertiary",
+            icon=":material/expand_more:" if expanded else ":material/chevron_right:",
+            help="Show playlists in this folder",
+        ):
+            st.session_state[expanded_key] = not expanded
+            st.rerun()
+    with name_col:
+        if _nav_button(folder["name"], key=f"nav_folder_{folder_id}", selected=is_selected, icon=":material/folder:"):
+            st.session_state["nav_kind"] = "folder"
+            st.session_state["nav_folder_id"] = folder_id
+            st.rerun()
 
     if expanded:
-        with st.container(key=f"nav_folder_playlists_{folder['id']}"):
+        with st.container(key=f"nav_folder_playlists_{folder_id}"):
             if not playlists:
                 st.caption("No playlists in this folder yet.")
             for p in sorted(playlists, key=lambda p: p["name"].lower()):
-                _render_playlist_nav_button(p, kind, selected_playlist_id)
+                _render_playlist_nav_button(p, kind, selected_id)
 
 
 def render_sidebar_nav() -> tuple[str, int | None]:
@@ -927,23 +1070,30 @@ def render_sidebar_nav() -> tuple[str, int | None]:
 
     A Collection link, then a Playlists section listing playlist folders and ungrouped
     playlists together (one row per entry, alphabetically) — folders expand/collapse,
-    like the Playlists section itself, to reveal the playlists filed under them. Reads
-    `playlists`/`playlist_folders` from `store` directly (this is the one place in the
-    app that queries them outside `filters.py`, since sidebar rows aren't `TrackRow`s).
-    Selection state lives in `st.session_state`, set by the nav buttons here and cleared
-    back to "collection" if it points at a since-deleted playlist. Returns the current
-    selection as ("collection", None), ("playlist", id), or ("ytmusic", None).
+    like the Playlists section itself, to reveal the playlists filed under them right
+    there in the sidebar, while the folder name is its own click target opening the
+    folder's detail page in the main pane. Reads `playlists`/`playlist_folders` from
+    `store` directly (this is the one place in the app that queries them outside
+    `filters.py`, since sidebar rows aren't `TrackRow`s). Selection state lives in
+    `st.session_state`, set by the nav buttons here and cleared back to "collection" if
+    it points at a since-deleted playlist/folder. Returns the current selection as
+    ("collection", None), ("playlist", id), ("folder", id), or ("ytmusic", None).
     """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
         folders = store.list_playlist_folders(conn)
     playlist_ids = {p["id"] for p in playlists}
+    folder_ids = {f["id"] for f in folders}
 
     kind = st.session_state.get("nav_kind", "collection")
-    playlist_id = st.session_state.get("nav_playlist_id")
-    stale_playlist = kind == "playlist" and playlist_id not in playlist_ids
-    if stale_playlist or kind not in ("collection", "playlist", "ytmusic"):
-        kind, playlist_id = "collection", None
+    selected_id = (
+        st.session_state.get("nav_playlist_id") if kind == "playlist" else st.session_state.get("nav_folder_id")
+    )
+    stale = (kind == "playlist" and selected_id not in playlist_ids) or (
+        kind == "folder" and selected_id not in folder_ids
+    )
+    if stale or kind not in ("collection", "playlist", "folder", "ytmusic"):
+        kind, selected_id = "collection", None
 
     expanded = st.session_state.get("nav_playlists_expanded", True)
 
@@ -960,6 +1110,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
             if _nav_button("My Discogs Collection", key="nav_collection", selected=kind == "collection"):
                 st.session_state["nav_kind"] = "collection"
                 st.session_state["nav_playlist_id"] = None
+                st.session_state["nav_folder_id"] = None
                 st.rerun()
 
             st.divider()
@@ -986,15 +1137,15 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                 for _name, entry_id, entry_kind in entries:
                     if entry_kind == "folder":
                         folder = next(f for f in folders if f["id"] == entry_id)
-                        _render_folder_nav_entry(folder, playlists_by_folder.get(entry_id, []), kind, playlist_id)
+                        _render_folder_nav_entry(folder, playlists_by_folder.get(entry_id, []), kind, selected_id)
                     else:
                         playlist = next(p for p in ungrouped if p["id"] == entry_id)
-                        _render_playlist_nav_button(playlist, kind, playlist_id)
+                        _render_playlist_nav_button(playlist, kind, selected_id)
 
         st.divider()
         _render_ytmusic_nav_item(kind == "ytmusic")
 
-    return kind, playlist_id
+    return kind, selected_id
 
 
 def _ytmusic_connected() -> bool:
@@ -1403,21 +1554,108 @@ def _render_delete_confirmation(playlist: sqlite3.Row) -> None:
             st.rerun()
 
 
+def _render_folder_delete_button(folder: sqlite3.Row) -> None:
+    folder_id = folder["id"]
+    confirm_key = f"confirm_delete_folder_{folder_id}"
+
+    if st.session_state.get(confirm_key):
+        return
+    with st.container(key="delete_pill", width="content"):
+        if st.button(
+            "Delete",
+            key=f"delete_folder_button_{folder_id}",
+            icon=":material/delete:",
+            help="Delete this folder",
+        ):
+            st.session_state[confirm_key] = True
+            st.rerun()
+
+
+def _render_folder_delete_confirmation(folder: sqlite3.Row, playlist_count: int) -> None:
+    """Confirm-then-delete for a folder, mirroring `_render_delete_confirmation`'s shape for a
+    playlist. Deleting a folder unassigns (rather than deletes) any playlists inside it, per
+    `store.delete_playlist_folder`'s semantics — the warning spells that out whenever the
+    folder isn't empty."""
+    folder_id = folder["id"]
+    confirm_key = f"confirm_delete_folder_{folder_id}"
+
+    if playlist_count:
+        st.warning(
+            f"Delete the folder '{folder['name']}'? Its {playlist_count} playlist(s) won't be "
+            "deleted — they'll move back to ungrouped."
+        )
+    else:
+        st.warning(f"Delete the empty folder '{folder['name']}'?")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, delete", key=f"confirm_delete_folder_yes_{folder_id}"):
+            with store.connect() as conn:
+                store.delete_playlist_folder(conn, folder_id)
+                conn.commit()
+            st.session_state[confirm_key] = False
+            st.session_state["nav_kind"] = "collection"
+            st.session_state["nav_folder_id"] = None
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key=f"confirm_delete_folder_no_{folder_id}"):
+            st.session_state[confirm_key] = False
+            st.rerun()
+
+
+def _render_folder_detail(folder: sqlite3.Row) -> None:
+    """A folder's detail page: its contained playlists with a track count each (clicking one
+    opens its own detail view — the only way to reach a grouped playlist now that folders no
+    longer expand inline in the sidebar), plus the delete affordance for the folder itself."""
+    folder_id = folder["id"]
+    with store.connect() as conn:
+        playlists = [p for p in store.list_playlists(conn) if p["folder_id"] == folder_id]
+        track_counts = {p["id"]: len(store.list_playlist_track_ids(conn, p["id"])) for p in playlists}
+
+    st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
+    title_col, actions_col = st.columns([3, 2], vertical_alignment="center")
+    with title_col:
+        st.subheader(folder["name"])
+    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
+        _render_folder_delete_button(folder)
+
+    if st.session_state.get(f"confirm_delete_folder_{folder_id}"):
+        _render_folder_delete_confirmation(folder, len(playlists))
+
+    if not playlists:
+        st.caption("No playlists in this folder yet.")
+    st.markdown(_FOLDER_PLAYLIST_LIST_CSS, unsafe_allow_html=True)
+    with st.container(key="folder_playlist_list"):
+        for p in sorted(playlists, key=lambda p: p["name"].lower()):
+            count = track_counts[p["id"]]
+            label = f"{p['name']} - {count} track{'' if count == 1 else 's'}"
+            if st.button(label, key=f"folder_playlist_{p['id']}", type="tertiary", width="stretch"):
+                st.session_state["nav_kind"] = "playlist"
+                st.session_state["nav_playlist_id"] = p["id"]
+                st.session_state["nav_folder_id"] = None
+                st.rerun()
+
+
 def main() -> None:
     """Streamlit entry point: dispatch to a pane based on the sidebar's current selection.
 
-    `render_sidebar_nav` both renders the sidebar and returns what it should drive —
-    a specific playlist's detail view, the YT Music connection page, or (the default)
-    `render_collection_tab`. This is the module-level script Streamlit re-runs top to
-    bottom on every interaction, so nothing here persists across reruns except what's
-    explicitly stashed in `st.session_state` or read back from `store`.
+    `render_sidebar_nav` both renders the sidebar and returns what it should drive — a
+    specific playlist's detail view, a folder's detail view, the YT Music connection
+    page, or (the default) `render_collection_tab`. This is the module-level script
+    Streamlit re-runs top to bottom on every interaction, so nothing here persists
+    across reruns except what's explicitly stashed in `st.session_state` or read back
+    from `store`.
     """
-    kind, playlist_id = render_sidebar_nav()
-    if kind == "playlist" and playlist_id is not None:
+    kind, selected_id = render_sidebar_nav()
+    if kind == "playlist" and selected_id is not None:
         with store.connect() as conn:
-            playlist = store.get_playlist(conn, playlist_id)
+            playlist = store.get_playlist(conn, selected_id)
         assert playlist is not None  # render_sidebar_nav already dropped stale/deleted ids
         _render_playlist_detail(playlist)
+    elif kind == "folder" and selected_id is not None:
+        with store.connect() as conn:
+            folder = store.get_playlist_folder(conn, selected_id)
+        assert folder is not None  # render_sidebar_nav already dropped stale/deleted ids
+        _render_folder_detail(folder)
     elif kind == "ytmusic":
         _render_ytmusic_page()
     else:

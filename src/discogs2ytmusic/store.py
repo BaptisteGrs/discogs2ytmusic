@@ -535,6 +535,13 @@ def get_track(conn: sqlite3.Connection, track_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
 
 
+def get_release_tracks(conn: sqlite3.Connection, release_id: int) -> list[sqlite3.Row]:
+    """All tracks for one release, in tracklist order. See `iter_releases_with_tracks` for
+    the whole-collection equivalent this mirrors."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM tracks WHERE release_id = ? ORDER BY id", (release_id,)).fetchall()
+
+
 def set_track_search_artist(conn: sqlite3.Connection, track_id: int, artist: str | None) -> None:
     """Set (or, with `artist=None`, clear) the manual search-artist override for a track."""
     conn.execute("UPDATE tracks SET search_artist = ? WHERE id = ?", (artist, track_id))

@@ -126,6 +126,14 @@ class TrackRow:
     # A manual correction (artist/title/style/genre override and/or picked video)
     # protects this row from scan/sync overwrites.
     locked: bool
+    # Per-field breakdown of what makes up `locked` above, so the UI can offer a
+    # "reset to Discogs" action scoped to just the field a user actually touched
+    # (there's no `title_overridden` — `releases.title_override` has no editable
+    # UI/CLI path today, so nothing can reset it either).
+    artist_overridden: bool
+    styles_overridden: bool
+    genres_overridden: bool
+    video_overridden: bool
 
 
 def _build_track_row(
@@ -143,6 +151,10 @@ def _build_track_row(
     if match is not None:
         searched_at = datetime.fromtimestamp(match["searched_at"]).isoformat(timespec="seconds")
     source = (match["source"] if match else None) or ""
+    artist_overridden = (track is not None and bool(track["search_artist"])) or bool(release["artist_override"])
+    styles_overridden = bool(release["styles_override"]) or (track is not None and bool(track["styles_override"]))
+    genres_overridden = bool(release["genres_override"]) or (track is not None and bool(track["genres_override"]))
+    video_overridden = source == "manual"
     return TrackRow(
         track_id=track_id,
         release_id=release["release_id"],
@@ -165,14 +177,15 @@ def _build_track_row(
         score=match["score"] if match is not None else None,
         channel=(match["channel"] if match is not None else None) or "",
         searched_at=searched_at,
-        locked=(track is not None and bool(track["search_artist"]))
-        or source == "manual"
-        or bool(release["artist_override"])
-        or bool(release["title_override"])
-        or bool(release["styles_override"])
-        or bool(release["genres_override"])
-        or (track is not None and bool(track["styles_override"]))
-        or (track is not None and bool(track["genres_override"])),
+        locked=artist_overridden
+        or styles_overridden
+        or genres_overridden
+        or video_overridden
+        or bool(release["title_override"]),
+        artist_overridden=artist_overridden,
+        styles_overridden=styles_overridden,
+        genres_overridden=genres_overridden,
+        video_overridden=video_overridden,
     )
 
 

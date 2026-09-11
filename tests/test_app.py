@@ -597,12 +597,20 @@ def test_app_shows_a_manually_corrected_match_as_locked(isolated_cache, dummy_li
 # --- Collection tab edit panel (#57) ---
 
 
-def _edit_field_keys(track_id: int, key_prefix: str = "collection") -> tuple[str, str, str, str, str]:
+def _edit_field_keys(track_id: int, key_prefix: str = "collection", gen: int = 0) -> tuple[str, str, str, str, str]:
     """The edit panel's widget keys for `track_id` under `key_prefix` — (artist, styles, genres,
     youtube_url, save). `key_prefix` defaults to the Collection tab's; a playlist detail view
-    uses `playlist_{playlist_id}` (see `_render_edit_panel`)."""
+    uses `playlist_{playlist_id}` (see `_render_edit_panel`). The four text_input keys carry a
+    per-field "generation" suffix that a Reset action bumps (see `_render_edit_panel`'s
+    docstring) — `gen` defaults to 0, the value every field starts at before any reset."""
     base = f"{key_prefix}_edit_{track_id}"
-    return (f"{base}_artist", f"{base}_styles", f"{base}_genres", f"{base}_youtube_url", f"{base}_save")
+    return (
+        f"{base}_artist_{gen}",
+        f"{base}_styles_{gen}",
+        f"{base}_genres_{gen}",
+        f"{base}_youtube_url_{gen}",
+        f"{base}_save",
+    )
 
 
 def test_edit_panel_shows_a_prompt_when_nothing_is_selected(isolated_cache, dummy_library):
@@ -699,6 +707,126 @@ def test_selecting_a_different_row_shows_that_rows_own_values(isolated_cache, du
     at = _select_table_rows(at, table_key, [other_pos])
     assert not at.exception
     assert at.text_input(key=artist_key_1).value == row_1["track_artist"]
+
+
+# --- Edit panel per-field "Reset" buttons (#66) ---
+
+
+def _select_collection_row_by_track_id(at: AppTest, table_key: str, track_id: int) -> tuple[AppTest, int]:
+    df = _collection_table_df(at)
+    position = next(i for i in range(len(df)) if int(df.iloc[i]["track_id"]) == track_id)
+    return _select_table_rows(at, table_key, [position]), position
+
+
+def _click_reset_button(at: AppTest, table_key: str, position: int, reset_key: str) -> AppTest:
+    """Click a per-field Reset button and land on the state after the `st.rerun()` it
+    triggers, with the row still selected. Same restaging idiom `_edit_field_keys`'s
+    save-button callers use: a raw `session_state[table_key] = ...` assignment (unlike
+    `.click()`) only applies to the one `.run()` right after it, so the selection has to be
+    reasserted alongside the click to land in the same rerun."""
+    at.button(key=reset_key).click()
+    at.session_state[table_key] = {"selection": {"rows": [position], "columns": [], "cells": []}}
+    return at.run()
+
+
+def test_reset_buttons_are_disabled_when_their_field_has_no_override(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    track_id = int(_collection_table_df(at).iloc[0]["track_id"])
+    at = _select_table_rows(at, table_key, [0])
+
+    for field in ("artist", "styles", "genres", "video"):
+        assert at.button(key=f"collection_edit_{track_id}_reset_{field}").disabled is True
+
+
+def test_reset_artist_button_clears_the_override_and_reverts_the_field(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        release, tracks = next(iter(store.iter_releases_with_tracks(conn)))
+        track_id = tracks[0]["id"]
+        store.set_track_search_artist(conn, track_id, "Corrected Artist")
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at, position = _select_collection_row_by_track_id(at, table_key, track_id)
+
+    reset_key = f"collection_edit_{track_id}_reset_artist"
+    assert at.button(key=reset_key).disabled is False
+    at = _click_reset_button(at, table_key, position, reset_key)
+
+    # Same as the save-button tests above: AppTest settles on the state after
+    # `_render_edit_panel`'s post-reset `st.rerun()`, where the reset row's `track_artist`
+    # changed — and `resolve_rows` sorts by `(track_artist, track_title)` — so the row's own
+    # table position (and thus whether the just-reasserted selection still lands on it) can
+    # shift. The persisted DB change is what actually confirms the reset happened.
+    assert not at.exception
+    with store.connect() as conn2:
+        rows = filters.resolve_rows(conn2)
+    updated = next(r for r in rows if r.track_id == track_id)
+    assert updated.artist_overridden is False
+    assert updated.locked is False
+    assert updated.track_artist != "Corrected Artist"
+
+
+def test_reset_styles_button_clears_the_override_and_reverts_the_field(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        release, tracks = next(iter(store.iter_releases_with_tracks(conn)))
+        track_id = tracks[0]["id"]
+        store.set_track_styles_override(conn, track_id, ["Track-Only Style"])
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at, position = _select_collection_row_by_track_id(at, table_key, track_id)
+
+    reset_key = f"collection_edit_{track_id}_reset_styles"
+    assert at.button(key=reset_key).disabled is False
+    at = _click_reset_button(at, table_key, position, reset_key)
+
+    assert not at.exception
+    with store.connect() as conn2:
+        rows = filters.resolve_rows(conn2)
+    updated = next(r for r in rows if r.track_id == track_id)
+    assert updated.styles_overridden is False
+    assert "Track-Only Style" not in updated.styles
+
+
+def test_reset_video_button_deletes_the_match_and_searches_again(isolated_cache, dummy_library, monkeypatch):
+    """Unlike blanking-and-saving the YouTube link cell (which rejects — `source='manual',
+    video_id=None`, and is then left alone by `sync`/`rematch` forever), the Reset button
+    must delete the match outright and search again immediately (#66)."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        release, tracks = next(iter(store.iter_releases_with_tracks(conn)))
+        track_id, artist, title = store.effective_track_queries(release, tracks)[0]
+        store.save_match(conn, artist, title, "manual-vid", "Manual pick", "manual", None)
+
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic import matcher
+    from discogs2ytmusic.matcher import MatchResult
+
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        matcher, "find_match", lambda yt, artist, title: MatchResult("fresh-id", title, "ytmusic", 90.0)
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at, position = _select_collection_row_by_track_id(at, table_key, track_id)
+
+    reset_key = f"collection_edit_{track_id}_reset_video"
+    assert at.button(key=reset_key).disabled is False
+    at = _click_reset_button(at, table_key, position, reset_key)
+
+    assert not at.exception
+    with store.connect() as conn2:
+        match = store.get_match(conn2, artist, title)
+    assert match is not None
+    assert match["video_id"] == "fresh-id"
+    assert match["source"] == "ytmusic"
 
 
 # --- Scan / Sync matches / Rematch buttons ---
@@ -938,7 +1066,20 @@ def test_sidebar_shows_empty_state_when_no_playlists_exist(isolated_cache, dummy
 # --- Playlist folders ---
 
 
-def test_sidebar_folder_starts_collapsed_and_hides_its_playlists(isolated_cache, dummy_library):
+def _open_folder(at: AppTest, folder_id: int) -> AppTest:
+    """Click the sidebar nav button for `folder_id`, opening its detail page in the main pane."""
+    return at.button(key=f"nav_folder_{folder_id}").click().run()
+
+
+def _open_playlist_in_folder(at: AppTest, folder_id: int, playlist_id: int) -> AppTest:
+    """Open a folder's detail page, then click one of its playlists from there — one of two
+    ways to reach a grouped playlist's detail view, the other being the sidebar's own
+    expand/collapse chevron (see `test_clicking_the_folder_chevron_...` below)."""
+    at = _open_folder(at, folder_id)
+    return at.button(key=f"folder_playlist_{playlist_id}").click().run()
+
+
+def test_a_collapsed_folder_hides_its_playlists_from_the_sidebar(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         folder_id = store.create_playlist_folder(conn, "Genres")
@@ -952,7 +1093,7 @@ def test_sidebar_folder_starts_collapsed_and_hides_its_playlists(isolated_cache,
     assert not any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)  # but its contents are hidden
 
 
-def test_clicking_a_folder_expands_it_to_show_its_playlists(isolated_cache, dummy_library):
+def test_clicking_the_folder_chevron_expands_it_to_show_its_playlists_in_the_sidebar(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
         folder_id = store.create_playlist_folder(conn, "Genres")
@@ -960,10 +1101,11 @@ def test_clicking_a_folder_expands_it_to_show_its_playlists(isolated_cache, dumm
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at.button(key=f"nav_folder_toggle_{folder_id}").click().run()
 
     assert not at.exception
     assert any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)
+    assert any(h.value == "My Discogs Collection" for h in at.main.header)  # expanding didn't navigate anywhere
 
 
 def test_clicking_a_playlist_inside_an_expanded_folder_opens_its_detail_view(isolated_cache, dummy_library):
@@ -974,8 +1116,54 @@ def test_clicking_a_playlist_inside_an_expanded_folder_opens_its_detail_view(iso
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
     at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at.button(key=f"nav_folder_toggle_{folder_id}").click().run()
     at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "playlist"
+    assert at.session_state["nav_playlist_id"] == playlist_id
+    assert any(h.value == "My Favorites" for h in at.main.subheader)
+
+
+def test_clicking_a_folder_opens_its_detail_page_listing_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "folder"
+    assert any(h.value == "Genres" for h in at.main.subheader)
+    assert any(
+        b.key == f"folder_playlist_{playlist_id}" and b.label == "My Favorites - 1 track" for b in at.main.button
+    )
+
+
+def test_folder_detail_page_shows_a_placeholder_when_empty(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+
+    assert not at.exception
+    assert any("No playlists in this folder yet" in c.value for c in at.main.caption)
+
+
+def test_clicking_a_playlist_in_the_folder_detail_page_opens_its_detail_view(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = _open_playlist_in_folder(AppTest.from_file(APP_PATH).run(), folder_id, playlist_id)
 
     assert not at.exception
     assert at.session_state["nav_kind"] == "playlist"
@@ -1024,9 +1212,7 @@ def test_playlist_detail_can_move_a_playlist_back_to_ungrouped(isolated_cache, d
         playlist_id = store.create_playlist(conn, "My Favorites")
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
-    at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
-    at = _select_playlist(at, playlist_id)
+    at = _open_playlist_in_folder(AppTest.from_file(APP_PATH).run(), folder_id, playlist_id)
     at.selectbox(key=f"playlist_folder_choice_{playlist_id}").select("No folder").run()
     at.button(key=f"playlist_folder_move_{playlist_id}").click().run()
 
@@ -1043,12 +1229,73 @@ def test_playlist_detail_folder_picker_defaults_to_the_playlists_current_folder(
         playlist_id = store.create_playlist(conn, "My Favorites")
         store.set_playlist_folder(conn, playlist_id, folder_id)
 
-    at = AppTest.from_file(APP_PATH).run()
-    at.button(key=f"nav_folder_{folder_id}").click().run()
-    at = _select_playlist(at, playlist_id)
+    at = _open_playlist_in_folder(AppTest.from_file(APP_PATH).run(), folder_id, playlist_id)
 
     assert not at.exception
     assert at.selectbox(key=f"playlist_folder_choice_{playlist_id}").value == "Genres"
+
+
+def test_clicking_delete_on_a_folder_page_shows_a_confirmation_and_does_not_delete_yet(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any("won't be deleted" in w.value for w in at.main.warning)
+    with store.connect() as conn:
+        assert len(store.list_playlist_folders(conn)) == 1  # not deleted yet — only warned
+
+
+def test_confirming_folder_delete_removes_the_folder_but_not_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+    at.button(key=f"confirm_delete_folder_yes_{folder_id}").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "collection"  # the folder page no longer exists
+    with store.connect() as conn:
+        assert store.list_playlist_folders(conn) == []
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist is not None
+    assert playlist["folder_id"] is None
+
+
+def test_cancelling_folder_delete_keeps_the_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+    at.button(key=f"confirm_delete_folder_no_{folder_id}").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "folder"
+    with store.connect() as conn:
+        assert len(store.list_playlist_folders(conn)) == 1
+
+
+def test_deleting_an_empty_folder_shows_a_simpler_confirmation(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = _open_folder(AppTest.from_file(APP_PATH).run(), folder_id)
+    at.button(key=f"delete_folder_button_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any("empty folder" in w.value for w in at.main.warning)
 
 
 def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_library):
