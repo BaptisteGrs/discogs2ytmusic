@@ -843,3 +843,137 @@ def test_playlists_table_migrates_in_pushed_at_column(isolated_cache):
     assert "pushed_at" in cols
     assert playlist["pushed_at"] is None
     assert playlist["ytmusic_playlist_id"] == "PL-old"  # pre-existing data preserved
+
+
+# --- Playlist folders ---
+
+
+def test_create_playlist_folder_starts_empty(isolated_cache):
+    with store.connect() as conn:
+        folder_id = store.create_playlist_folder(conn, "My Folder")
+        folders = store.list_playlist_folders(conn)
+
+    assert len(folders) == 1
+    assert folders[0]["id"] == folder_id
+    assert folders[0]["name"] == "My Folder"
+
+
+def test_create_playlist_folder_rejects_duplicate_names(isolated_cache):
+    with store.connect() as conn:
+        store.create_playlist_folder(conn, "My Folder")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.create_playlist_folder(conn, "My Folder")
+
+
+def test_get_playlist_folder_by_id(isolated_cache):
+    with store.connect() as conn:
+        folder_id = store.create_playlist_folder(conn, "My Folder")
+
+        folder = store.get_playlist_folder(conn, folder_id)
+
+    assert folder is not None
+    assert folder["name"] == "My Folder"
+
+
+def test_rename_playlist_folder(isolated_cache):
+    with store.connect() as conn:
+        folder_id = store.create_playlist_folder(conn, "Old Name")
+
+        store.rename_playlist_folder(conn, folder_id, "New Name")
+
+        folder = store.get_playlist_folder(conn, folder_id)
+
+    assert folder["name"] == "New Name"
+
+
+def test_new_playlist_has_no_folder_by_default(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+
+        playlist = store.get_playlist(conn, playlist_id)
+        playlists = store.list_playlists(conn)
+
+    assert playlist["folder_id"] is None
+    assert playlists[0]["folder_id"] is None
+
+
+def test_set_playlist_folder_assigns_a_playlist_to_a_folder(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        folder_id = store.create_playlist_folder(conn, "My Folder")
+
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+        playlist = store.get_playlist(conn, playlist_id)
+
+    assert playlist["folder_id"] == folder_id
+
+
+def test_set_playlist_folder_can_move_a_playlist_back_to_ungrouped(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        folder_id = store.create_playlist_folder(conn, "My Folder")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+        store.set_playlist_folder(conn, playlist_id, None)
+
+        playlist = store.get_playlist(conn, playlist_id)
+
+    assert playlist["folder_id"] is None
+
+
+def test_deleting_a_playlist_folder_unassigns_but_does_not_delete_its_playlists(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        folder_id = store.create_playlist_folder(conn, "My Folder")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+        store.delete_playlist_folder(conn, folder_id)
+
+        playlist = store.get_playlist(conn, playlist_id)
+        folders = store.list_playlist_folders(conn)
+
+    assert playlist is not None  # the playlist itself survives
+    assert playlist["folder_id"] is None  # but is no longer filed under the deleted folder
+    assert folders == []
+
+
+def test_list_playlist_folders_orders_by_name(isolated_cache):
+    with store.connect() as conn:
+        store.create_playlist_folder(conn, "Zebra")
+        store.create_playlist_folder(conn, "Alpha")
+
+        folders = store.list_playlist_folders(conn)
+
+    assert [f["name"] for f in folders] == ["Alpha", "Zebra"]
+
+
+def test_playlists_table_migrates_in_folder_id_column(isolated_cache):
+    """Curated-playlist caches created before `folder_id` existed must upgrade in place,
+    without disturbing pre-existing data."""
+    now = 1700000000.0
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            ytmusic_playlist_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            pushed_at REAL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO playlists (name, ytmusic_playlist_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("Old Playlist", "PL-old", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Old Playlist")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(playlists)")}
+
+    assert "folder_id" in cols
+    assert playlist["folder_id"] is None
+    assert playlist["ytmusic_playlist_id"] == "PL-old"  # pre-existing data preserved

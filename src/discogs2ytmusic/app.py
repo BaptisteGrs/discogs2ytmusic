@@ -116,6 +116,8 @@ SHARED_COLUMN_CONFIG: dict[str, Any] = {
 }
 
 _NEW_PLAYLIST_SENTINEL = "+ Create new playlist"
+_NO_FOLDER_SENTINEL = "No folder"
+_NEW_FOLDER_SENTINEL = "+ Create new folder"
 
 # Shared "pill" button style: small, rounded, icon+text buttons placed close together in a
 # horizontal container (see `_render_playlist_detail`'s Sync/Delete row and
@@ -660,14 +662,44 @@ def render_collection_tab() -> None:
     _render_add_to_playlist(selected_ids, table_key)
 
 
+def _folder_picker_options(conn: sqlite3.Connection) -> tuple[list[str], dict[str, int]]:
+    folders = store.list_playlist_folders(conn)
+    return [f["name"] for f in folders], {f["name"]: f["id"] for f in folders}
+
+
+def _resolve_new_folder_choice(
+    conn: sqlite3.Connection, choice: str, new_folder_name: str, folder_by_name: dict[str, int]
+) -> tuple[int | None, str | None]:
+    """Turn a folder-picker choice into a folder_id (or None for ungrouped), creating a new
+    folder on the fly for the `_NEW_FOLDER_SENTINEL` choice.
+
+    Returns:
+        A (folder_id, error_message) pair — error_message is set (and folder_id is None)
+        only when the "+ Create new folder" choice was made without a name.
+    """
+    if choice == _NO_FOLDER_SENTINEL:
+        return None, None
+    if choice == _NEW_FOLDER_SENTINEL:
+        name = new_folder_name.strip()
+        if not name:
+            return None, "Enter a name for the new folder, or choose 'No folder'."
+        existing = store.list_playlist_folders(conn)
+        match = next((f for f in existing if f["name"] == name), None)
+        folder_id = int(match["id"]) if match is not None else store.create_playlist_folder(conn, name)
+        return folder_id, None
+    return folder_by_name.get(choice), None
+
+
 def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
     """Selected rows in the Collection tab's main table (or every filtered track, if
-    "select all" is on) -> add to an existing or new playlist."""
+    "select all" is on) -> add to an existing or new playlist, optionally filing a newly
+    created playlist into a folder."""
 
     with store.connect() as conn:
         playlist_names = [p["name"] for p in store.list_playlists(conn)]
+        folder_names, folder_by_name = _folder_picker_options(conn)
 
-    col1, col2, col3 = st.columns([2, 2, 1])
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
         choice = st.selectbox(
             f"Add {len(selected_ids)} selected track(s) to",
@@ -678,7 +710,18 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
     with col2:
         if choice == _NEW_PLAYLIST_SENTINEL:
             new_name = st.text_input("New playlist name", key="collection_new_playlist_name")
+    folder_choice = _NO_FOLDER_SENTINEL
+    new_folder_name = ""
     with col3:
+        if choice == _NEW_PLAYLIST_SENTINEL:
+            folder_choice = st.selectbox(
+                "Folder (optional)",
+                [_NO_FOLDER_SENTINEL, _NEW_FOLDER_SENTINEL, *folder_names],
+                key="collection_new_playlist_folder",
+            )
+            if folder_choice == _NEW_FOLDER_SENTINEL:
+                new_folder_name = st.text_input("New folder name", key="collection_new_playlist_folder_name")
+    with col4:
         st.write("")
         add_clicked = st.button("Add to playlist", key="collection_add_button", disabled=not selected_ids)
 
@@ -694,11 +737,17 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
             if not name:
                 st.error("Enter a name for the new playlist.")
                 return
+            folder_id, folder_error = _resolve_new_folder_choice(conn, folder_choice, new_folder_name, folder_by_name)
+            if folder_error:
+                st.error(folder_error)
+                return
             try:
                 playlist_id = store.create_playlist(conn, name)
             except sqlite3.IntegrityError:
                 st.error(f"A playlist named '{name}' already exists.")
                 return
+            if folder_id is not None:
+                store.set_playlist_folder(conn, playlist_id, folder_id)
         else:
             playlist_row = store.get_playlist_by_name(conn, choice)
             assert playlist_row is not None  # choice comes from the same list_playlists() call above
@@ -719,7 +768,8 @@ def _playlist_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
 _SIDEBAR_NAV_CSS = """
 <style>
 .st-key-nav_top,
-.st-key-nav_playlists {
+.st-key-nav_playlists,
+[class*="st-key-nav_folder_playlists_"] {
     gap: 0.15rem !important;
 }
 [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
@@ -771,6 +821,9 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_top button:hover p,
 .st-key-nav_playlists button:hover p {
     color: #CC785C;
+}
+[class*="st-key-nav_folder_playlists_"] {
+    padding-left: 0.9rem;
 }
 .st-key-nav_selected button p {
     color: #CC785C !important;
@@ -846,12 +899,52 @@ def _nav_button(label: str, *, key: str, selected: bool, width: str = "stretch",
     return st.button(label, key=key, type="tertiary", width=width, **button_kwargs)  # type: ignore[arg-type]
 
 
+def _render_playlist_nav_button(playlist: sqlite3.Row, kind: str, selected_playlist_id: int | None) -> None:
+    """Render one playlist's sidebar row, wherever it appears (ungrouped, or inside a folder)."""
+    is_selected = kind == "playlist" and playlist["id"] == selected_playlist_id
+    if _nav_button(playlist["name"], key=f"nav_playlist_{playlist['id']}", selected=is_selected):
+        st.session_state["nav_kind"] = "playlist"
+        st.session_state["nav_playlist_id"] = playlist["id"]
+        st.rerun()
+
+
+def _render_folder_nav_entry(
+    folder: sqlite3.Row, playlists: list[sqlite3.Row], kind: str, selected_playlist_id: int | None
+) -> None:
+    """Render one playlist folder's sidebar row: same row style as a playlist entry, expanding
+    and collapsing — via the same mechanism as the Playlists section itself — to reveal the
+    playlists filed under it.
+    """
+    expanded_key = f"nav_folder_expanded_{folder['id']}"
+    expanded = st.session_state.get(expanded_key, False)
+    if st.button(
+        folder["name"],
+        key=f"nav_folder_{folder['id']}",
+        type="tertiary",
+        width="stretch",
+        icon=":material/expand_more:" if expanded else ":material/chevron_right:",
+    ):
+        st.session_state[expanded_key] = not expanded
+        st.rerun()
+
+    if expanded:
+        with st.container(key=f"nav_folder_playlists_{folder['id']}"):
+            if not playlists:
+                st.caption("No playlists in this folder yet.")
+            for p in sorted(playlists, key=lambda p: p["name"].lower()):
+                _render_playlist_nav_button(p, kind, selected_playlist_id)
+
+
 def render_sidebar_nav() -> tuple[str, int | None]:
-    """Render the sidebar: a Collection link, then a Playlists section with one button per
-    curated playlist. Returns the current selection as ("collection", None) or ("playlist", id).
+    """Render the sidebar: a Collection link, then a Playlists section listing playlist
+    folders and ungrouped playlists together (one row per entry, alphabetically) — folders
+    expand/collapse, like the Playlists section itself, to reveal the playlists filed under
+    them. Returns the current selection as ("collection", None), ("playlist", id), or
+    ("ytmusic", None).
     """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
+        folders = store.list_playlist_folders(conn)
     playlist_ids = {p["id"] for p in playlists}
 
     kind = st.session_state.get("nav_kind", "collection")
@@ -861,6 +954,12 @@ def render_sidebar_nav() -> tuple[str, int | None]:
         kind, playlist_id = "collection", None
 
     expanded = st.session_state.get("nav_playlists_expanded", True)
+
+    ungrouped = [p for p in playlists if p["folder_id"] is None]
+    playlists_by_folder: dict[int, list[sqlite3.Row]] = {}
+    for p in playlists:
+        if p["folder_id"] is not None:
+            playlists_by_folder.setdefault(p["folder_id"], []).append(p)
 
     with st.sidebar:
         st.markdown(_SIDEBAR_NAV_CSS, unsafe_allow_html=True)
@@ -885,14 +984,20 @@ def render_sidebar_nav() -> tuple[str, int | None]:
 
         if expanded:
             with st.container(key="nav_playlists"):
-                if not playlists:
+                if not playlists and not folders:
                     st.caption("No playlists yet — create one from the Collection view.")
-                for p in playlists:
-                    is_selected = kind == "playlist" and p["id"] == playlist_id
-                    if _nav_button(p["name"], key=f"nav_playlist_{p['id']}", selected=is_selected):
-                        st.session_state["nav_kind"] = "playlist"
-                        st.session_state["nav_playlist_id"] = p["id"]
-                        st.rerun()
+                entries: list[tuple[str, int, str]] = sorted(
+                    [(f["name"], f["id"], "folder") for f in folders]
+                    + [(p["name"], p["id"], "playlist") for p in ungrouped],
+                    key=lambda entry: entry[0].lower(),
+                )
+                for _name, entry_id, entry_kind in entries:
+                    if entry_kind == "folder":
+                        folder = next(f for f in folders if f["id"] == entry_id)
+                        _render_folder_nav_entry(folder, playlists_by_folder.get(entry_id, []), kind, playlist_id)
+                    else:
+                        playlist = next(p for p in ungrouped if p["id"] == entry_id)
+                        _render_playlist_nav_button(playlist, kind, playlist_id)
 
         st.divider()
         _render_ytmusic_nav_item(kind == "ytmusic")
@@ -1015,6 +1120,44 @@ def _relative_time(timestamp: float) -> str:
     return "just now"
 
 
+def _render_playlist_folder_picker(playlist: sqlite3.Row) -> None:
+    """Let the user file a curated playlist into a folder (existing or new), or move it back
+    to ungrouped, from its detail view."""
+    playlist_id = playlist["id"]
+    with store.connect() as conn:
+        folder_names, folder_by_name = _folder_picker_options(conn)
+    folder_by_id = {folder_id: name for name, folder_id in folder_by_name.items()}
+    current_choice = folder_by_id.get(playlist["folder_id"], _NO_FOLDER_SENTINEL)
+    options = [_NO_FOLDER_SENTINEL, _NEW_FOLDER_SENTINEL, *folder_names]
+
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        choice = st.selectbox(
+            "Folder",
+            options,
+            index=options.index(current_choice) if current_choice in options else 0,
+            key=f"playlist_folder_choice_{playlist_id}",
+        )
+    new_folder_name = ""
+    with col2:
+        if choice == _NEW_FOLDER_SENTINEL:
+            new_folder_name = st.text_input("New folder name", key=f"playlist_folder_new_name_{playlist_id}")
+    with col3:
+        st.write("")
+        move_clicked = st.button("Move", key=f"playlist_folder_move_{playlist_id}")
+
+    if not move_clicked:
+        return
+    with store.connect() as conn:
+        folder_id, error = _resolve_new_folder_choice(conn, choice, new_folder_name, folder_by_name)
+        if error:
+            st.error(error)
+            return
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+        conn.commit()
+    st.rerun()
+
+
 def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     playlist_id = playlist["id"]
     with store.connect() as conn:
@@ -1052,6 +1195,8 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     pushed_at = playlist["pushed_at"]
     pushed_caption = f"Pushed to YT Music {_relative_time(pushed_at)}" if pushed_at else "Not yet pushed to YT Music"
     st.caption(f"{pushed_caption} · Last modified {_relative_time(playlist['updated_at'])}")
+
+    _render_playlist_folder_picker(playlist)
 
     if rows:
         df = _playlist_dataframe(rows)
