@@ -69,13 +69,22 @@ CREATE TABLE IF NOT EXISTS playlist_defs (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS playlist_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS playlists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     ytmusic_playlist_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,   -- bumped by content edits only (add/remove tracks), not by pushing
-    pushed_at REAL              -- last successful push to YT Music; NULL if never pushed
+    pushed_at REAL,             -- last successful push to YT Music; NULL if never pushed
+    -- optional grouping folder; a playlist belongs to at most one folder, or none (no nesting)
+    folder_id INTEGER REFERENCES playlist_folders(id)
 );
 
 CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -191,8 +200,8 @@ def _migrate_playlists_to_playlist_defs(conn: sqlite3.Connection) -> None:
 
 def _migrate_playlists_table(conn: sqlite3.Connection) -> None:
     """One-time upgrade for curated-playlist caches created before `playlists` had a
-    `pushed_at` column, which tracks the last successful push to YT Music separately from
-    `updated_at` (content edits only).
+    `pushed_at` column (last successful push to YT Music, separate from `updated_at`, which
+    tracks content edits only) and/or a `folder_id` column (optional grouping folder).
 
     Only touches the table when it actually looks like the curated-playlists shape — not the
     legacy style->playlist_id shape (handled, and possibly dropped, by
@@ -204,6 +213,8 @@ def _migrate_playlists_table(conn: sqlite3.Connection) -> None:
         return
     if "pushed_at" not in cols:
         conn.execute("ALTER TABLE playlists ADD COLUMN pushed_at REAL")
+    if "folder_id" not in cols:
+        conn.execute("ALTER TABLE playlists ADD COLUMN folder_id INTEGER REFERENCES playlist_folders(id)")
     conn.commit()
 
 
@@ -629,6 +640,66 @@ def set_playlist_pushed_at(conn: sqlite3.Connection, playlist_id: int) -> None:
     `updated_at` (content edits only).
     """
     conn.execute("UPDATE playlists SET pushed_at = ? WHERE id = ?", (time.time(), playlist_id))
+
+
+def create_playlist_folder(conn: sqlite3.Connection, name: str) -> int:
+    """Create a new, empty playlist folder for organizing curated playlists.
+
+    Args:
+        conn: Open cache connection.
+        name: Folder name; must be unique.
+
+    Returns:
+        The new folder's id.
+
+    Raises:
+        sqlite3.IntegrityError: if the name is already taken.
+    """
+    now = time.time()
+    conn.execute("INSERT INTO playlist_folders (name, created_at, updated_at) VALUES (?, ?, ?)", (name, now, now))
+    return conn.execute("SELECT id FROM playlist_folders WHERE name = ?", (name,)).fetchone()[0]
+
+
+def get_playlist_folder(conn: sqlite3.Connection, folder_id: int) -> sqlite3.Row | None:
+    """Look up a playlist folder by its id."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM playlist_folders WHERE id = ?", (folder_id,)).fetchone()
+
+
+def list_playlist_folders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every playlist folder, ordered by name."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM playlist_folders ORDER BY name").fetchall()
+
+
+def rename_playlist_folder(conn: sqlite3.Connection, folder_id: int, name: str) -> None:
+    """Rename a playlist folder.
+
+    Raises:
+        sqlite3.IntegrityError: if the new name is already taken by another folder.
+    """
+    conn.execute("UPDATE playlist_folders SET name = ?, updated_at = ? WHERE id = ?", (name, time.time(), folder_id))
+
+
+def delete_playlist_folder(conn: sqlite3.Connection, folder_id: int) -> None:
+    """Delete a playlist folder.
+
+    Playlists inside the folder are not deleted — they're unassigned (`folder_id` set to
+    NULL), consistent with a playlist belonging to at most one folder, or none.
+    """
+    conn.execute("UPDATE playlists SET folder_id = NULL WHERE folder_id = ?", (folder_id,))
+    conn.execute("DELETE FROM playlist_folders WHERE id = ?", (folder_id,))
+
+
+def set_playlist_folder(conn: sqlite3.Connection, playlist_id: int, folder_id: int | None) -> None:
+    """Move a curated playlist into a folder, or back to ungrouped.
+
+    Args:
+        conn: Open cache connection.
+        playlist_id: The playlist to (re)assign.
+        folder_id: The destination folder's id, or None to unassign it.
+    """
+    conn.execute("UPDATE playlists SET folder_id = ? WHERE id = ?", (folder_id, playlist_id))
 
 
 def list_playlist_track_ids(conn: sqlite3.Connection, playlist_id: int) -> list[int]:

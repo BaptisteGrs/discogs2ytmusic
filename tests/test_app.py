@@ -222,6 +222,61 @@ def test_selecting_rows_on_the_main_table_and_adding_them_to_a_new_playlist(isol
     assert {r.track_title for r in rows} == expected_titles
 
 
+def test_creating_a_new_playlist_can_file_it_into_a_brand_new_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.checkbox(key="collection_select_all").check().run()
+    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
+    at.text_input(key="collection_new_playlist_name").input("Acid Picks").run()
+    at.selectbox(key="collection_new_playlist_folder").select("+ Create new folder").run()
+    at.text_input(key="collection_new_playlist_folder_name").input("Genres").run()
+    at.button(key="collection_add_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Acid Picks")
+        folders = store.list_playlist_folders(conn)
+    assert len(folders) == 1
+    assert folders[0]["name"] == "Genres"
+    assert playlist["folder_id"] == folders[0]["id"]
+
+
+def test_creating_a_new_playlist_can_file_it_into_an_existing_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.checkbox(key="collection_select_all").check().run()
+    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
+    at.text_input(key="collection_new_playlist_name").input("Acid Picks").run()
+    at.selectbox(key="collection_new_playlist_folder").select("Genres").run()
+    at.button(key="collection_add_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Acid Picks")
+    assert playlist["folder_id"] == folder_id
+
+
+def test_creating_a_new_playlist_with_no_folder_choice_leaves_it_ungrouped(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.checkbox(key="collection_select_all").check().run()
+    at.selectbox(key="collection_add_target").select("+ Create new playlist").run()
+    at.text_input(key="collection_new_playlist_name").input("Acid Picks").run()
+    at.button(key="collection_add_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Acid Picks")
+    assert playlist["folder_id"] is None
+
+
 def test_select_all_overrides_whatever_is_selected_on_the_main_table(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -843,6 +898,122 @@ def test_sidebar_shows_empty_state_when_no_playlists_exist(isolated_cache, dummy
 
     assert not at.exception
     assert any("No playlists yet" in c.value for c in at.sidebar.caption)
+
+
+# --- Playlist folders ---
+
+
+def test_sidebar_folder_starts_collapsed_and_hides_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert any(b.key == f"nav_folder_{folder_id}" for b in at.button)  # the folder row itself renders
+    assert not any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)  # but its contents are hidden
+
+
+def test_clicking_a_folder_expands_it_to_show_its_playlists(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_{folder_id}").click().run()
+
+    assert not at.exception
+    assert any(b.key == f"nav_playlist_{playlist_id}" for b in at.button)
+
+
+def test_clicking_a_playlist_inside_an_expanded_folder_opens_its_detail_view(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "playlist"
+    assert at.session_state["nav_playlist_id"] == playlist_id
+    assert any(h.value == "My Favorites" for h in at.main.subheader)
+
+
+def test_playlists_outside_any_folder_still_render_directly_in_the_sidebar(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        grouped_id = store.create_playlist(conn, "Grouped")
+        store.set_playlist_folder(conn, grouped_id, folder_id)
+        ungrouped_id = store.create_playlist(conn, "Ungrouped")
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert any(b.key == f"nav_playlist_{ungrouped_id}" for b in at.button)  # rendered directly, no expand needed
+    assert not any(b.key == f"nav_playlist_{grouped_id}" for b in at.button)  # still hidden inside its collapsed folder
+
+
+def test_playlist_detail_can_move_a_playlist_into_a_new_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        playlist_id = store.create_playlist(conn, "My Favorites")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _select_playlist(at, playlist_id)
+    at.selectbox(key=f"playlist_folder_choice_{playlist_id}").select("+ Create new folder").run()
+    at.text_input(key=f"playlist_folder_new_name_{playlist_id}").input("Genres").run()
+    at.button(key=f"playlist_folder_move_{playlist_id}").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist(conn, playlist_id)
+        folders = store.list_playlist_folders(conn)
+    assert len(folders) == 1
+    assert playlist["folder_id"] == folders[0]["id"]
+
+
+def test_playlist_detail_can_move_a_playlist_back_to_ungrouped(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at = _select_playlist(at, playlist_id)
+    at.selectbox(key=f"playlist_folder_choice_{playlist_id}").select("No folder").run()
+    at.button(key=f"playlist_folder_move_{playlist_id}").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist(conn, playlist_id)
+    assert playlist["folder_id"] is None
+
+
+def test_playlist_detail_folder_picker_defaults_to_the_playlists_current_folder(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        folder_id = store.create_playlist_folder(conn, "Genres")
+        playlist_id = store.create_playlist(conn, "My Favorites")
+        store.set_playlist_folder(conn, playlist_id, folder_id)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key=f"nav_folder_{folder_id}").click().run()
+    at = _select_playlist(at, playlist_id)
+
+    assert not at.exception
+    assert at.selectbox(key=f"playlist_folder_choice_{playlist_id}").value == "Genres"
 
 
 def test_playlist_detail_shows_track_and_matched_counts(isolated_cache, dummy_library):
