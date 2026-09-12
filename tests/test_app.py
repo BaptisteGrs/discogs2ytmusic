@@ -903,6 +903,38 @@ def test_scan_button_populates_the_cache_from_discogs(isolated_cache, fake_disco
     assert sum(len(tracks) for _release, tracks in releases) == 18
 
 
+def test_scan_button_skips_a_release_discogs_cant_return_instead_of_aborting(
+    isolated_cache, fake_discogs_client, monkeypatch
+):
+    """A release detail fetch can 404 (e.g. a wantlist item merged into another release id,
+    or pulled from Discogs entirely) — that must not abort the whole scan and strand every
+    release already committed before it, only skip that one."""
+    from discogs2ytmusic.discogs import DiscogsError
+
+    poisoned_id = fake_discogs_client._releases[2]["release_id"]
+    real_get_release_detail = fake_discogs_client.get_release_detail
+
+    def flaky_get_release_detail(release_id: int):
+        if release_id == poisoned_id:
+            raise DiscogsError(f"Discogs API error 404 for /releases/{release_id}: not found")
+        return real_get_release_detail(release_id)
+
+    monkeypatch.setattr(fake_discogs_client, "get_release_detail", flaky_get_release_detail)
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="scan_button").click().run()
+
+    # `_run_scan`'s own st.warning/st.success calls don't survive its immediate
+    # `st.rerun()` on success (same as every other scan_button test here, which likewise
+    # only assert on the resulting cache state) — so assert on what was actually persisted.
+    assert not at.exception
+    with store.connect() as conn:
+        releases = list(store.iter_releases_with_tracks(conn))
+    assert len(releases) == 14  # every release except the poisoned one
+    assert poisoned_id not in {r["release_id"] for r, _tracks in releases}
+
+
 def test_scan_button_never_clobbers_a_manual_artist_override(isolated_cache, fake_discogs_client, monkeypatch):
     """Regression guard for the CLAUDE.md locking invariant: a Scan (`scan --refresh`
     equivalent) must never wipe out a manual `search_artist` correction."""
@@ -2381,6 +2413,55 @@ def test_adding_a_source_via_a_pasted_label_url_creates_and_opens_a_page(
     assert sources[0]["source_key"] == "123"
     assert at.session_state["nav_kind"] == "other_source"
     assert at.session_state["nav_other_source_id"] == sources[0]["id"]
+
+
+def test_adding_a_source_via_a_pasted_seller_url_creates_and_opens_a_page(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/fr/seller/adamlee1995/profile").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        sources = store.list_other_sources(conn)
+    assert len(sources) == 1
+    assert sources[0]["source_type"] == "seller"
+    assert sources[0]["source_key"] == "adamlee1995"
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == sources[0]["id"]
+
+
+def test_adding_a_source_via_the_my_wantlist_url_resolves_to_the_authenticated_username(
+    isolated_cache, fake_discogs_client, monkeypatch
+):
+    """`/mywantlist` has no username in it — it must resolve to the locally authenticated
+    Discogs username instead of being rejected as unrecognized."""
+    _mock_discogs_client(monkeypatch, fake_discogs_client, username="dummyuser")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/fr/mywantlist").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        sources = store.list_other_sources(conn)
+    assert len(sources) == 1
+    assert sources[0]["source_type"] == "wantlist"
+    assert sources[0]["source_key"] == "dummyuser"
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == sources[0]["id"]
+
+
+def test_adding_a_source_via_the_my_wantlist_url_without_credentials_shows_an_error(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/mywantlist").run()
+
+    assert not at.exception
+    assert any("Not authenticated with Discogs" in e.value for e in at.error)
+    with store.connect() as conn:
+        assert store.list_other_sources(conn) == []
 
 
 def test_adding_a_source_with_an_unrecognized_url_shows_an_error_and_creates_nothing(isolated_cache):

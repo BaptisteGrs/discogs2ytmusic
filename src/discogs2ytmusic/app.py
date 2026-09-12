@@ -2,7 +2,7 @@
 
 `main` renders a sidebar (`render_sidebar_nav`) that picks between several panes — the
 Collection tab (`render_collection_tab`), an Other-source page (`_render_other_source_page`
-— a label/wantlist/other user's collection, kept strictly separate from the Collection
+— a label/wantlist/seller/other user's collection, kept strictly separate from the Collection
 tab's own tracks and playlists), a playlist's detail view, or the YT Music connection
 page — each a thin view over `filters.resolve_rows`/`resolve_playlist_rows` and `store`.
 `_render_source_browser` is the shared renderer behind both the Collection tab and every
@@ -32,7 +32,7 @@ from discogs2ytmusic.collection_edits import (
     apply_video_link_edits,
 )
 from discogs2ytmusic.config import Config
-from discogs2ytmusic.discogs import DiscogsClient, DiscogsError, parse_source_url, source_url
+from discogs2ytmusic.discogs import DiscogsClient, DiscogsError, is_my_wantlist_url, parse_source_url, source_url
 from discogs2ytmusic.filters import (
     BoolOp,
     PlaylistFilter,
@@ -228,6 +228,12 @@ def _run_scan(refresh: bool, source_type: str = "collection", source_key: str = 
     applies that source's persisted Style/Format/Year pre-filter (`scan_engine.ImportFilter`),
     if it has one, pruning any previously-imported release that no longer matches.
 
+    A release that Discogs itself can't return anymore (its detail fetch 404s — common in a
+    wantlist, since people wantlist releases that later get merged into a different release
+    id or pulled from the database entirely; rarer but possible in a collection/label/seller
+    listing too) is skipped rather than aborting the whole scan — earlier releases already
+    committed to the cache would otherwise be all a failure like that left behind.
+
     Returns:
         True if the scan completed, False if it couldn't start (no Discogs credentials
         saved, or the Discogs API call itself failed).
@@ -255,6 +261,8 @@ def _run_scan(refresh: bool, source_type: str = "collection", source_key: str = 
                 items = list(client.iter_wantlist_basic(source_key))
             elif source_type == "label":
                 items = list(client.iter_label_releases(int(source_key)))
+            elif source_type == "seller":
+                items = list(client.iter_seller_inventory(source_key))
             else:
                 raise ValueError(f"Unknown source type: {source_type}")
     except DiscogsError as e:
@@ -264,26 +272,37 @@ def _run_scan(refresh: bool, source_type: str = "collection", source_key: str = 
     total = len(items)
     progress = st.progress(0.0, text=f"Fetching tracklists... (0/{total})")
     matched_ids: set[int] = set()
+    failed = 0
     with store.connect() as conn:
         for i, item in enumerate(items, start=1):
-            if source_type == "label":
-                release_id = item["id"]
-                kept = scan_engine.scan_label_release(
-                    conn, client, item, refresh, source_key=source_key, import_filter=import_filter
-                )
+            try:
+                if source_type in ("label", "seller"):
+                    release_id = item["id"]
+                    kept = scan_engine.scan_label_release(
+                        conn,
+                        client,
+                        item,
+                        refresh,
+                        source_key=source_key,
+                        source_type=source_type,
+                        import_filter=import_filter,
+                    )
+                else:
+                    release_id = item["basic_information"]["id"]
+                    kept = scan_engine.scan_release(
+                        conn,
+                        client,
+                        item,
+                        refresh,
+                        source_type=source_type,
+                        source_key=source_key,
+                        import_filter=import_filter,
+                    )
+            except DiscogsError:
+                failed += 1
             else:
-                release_id = item["basic_information"]["id"]
-                kept = scan_engine.scan_release(
-                    conn,
-                    client,
-                    item,
-                    refresh,
-                    source_type=source_type,
-                    source_key=source_key,
-                    import_filter=import_filter,
-                )
-            if kept:
-                matched_ids.add(release_id)
+                if kept:
+                    matched_ids.add(release_id)
             progress.progress(i / total if total else 1.0, text=f"Fetching tracklists... ({i}/{total})")
     progress.empty()
 
@@ -292,7 +311,9 @@ def _run_scan(refresh: bool, source_type: str = "collection", source_key: str = 
             store.prune_release_source_tags(conn, source_type, source_key, matched_ids)
             conn.commit()
 
-    st.success(f"Scanned {total} release(s).")
+    if failed:
+        st.warning(f"Skipped {failed} release(s) Discogs couldn't return (removed or merged listings).")
+    st.success(f"Scanned {total - failed} release(s).")
     return True
 
 
@@ -709,7 +730,7 @@ def _render_source_browser(
     subtitle_link: str | None = None,
 ) -> None:
     """Render one Discogs source's browsable/filterable/editable pane: the Collection tab
-    ("my own collection") or an Other-source page (a label/wantlist/other user's
+    ("my own collection") or an Other-source page (a label/wantlist/seller/other user's
     collection) — same experience either way, just scoped to that source's own releases.
 
     Loads every track for this source via `filters.resolve_rows` (no filter), derives
@@ -846,11 +867,13 @@ _OTHER_SOURCE_LABELS = {
     "user_collection": "user's collection",
     "wantlist": "wantlist",
     "label": "label catalogue",
+    "seller": "seller inventory",
 }
 _OTHER_SOURCE_ICONS = {
     "user_collection": ":material/person:",
     "wantlist": ":material/favorite:",
     "label": ":material/sell:",
+    "seller": ":material/storefront:",
 }
 
 
@@ -1085,6 +1108,8 @@ def _resolve_new_source_display_name(source_type: str, source_key: str) -> str:
         return f"Label {source_key}"
     if source_type == "wantlist":
         return f"{source_key}'s wantlist"
+    if source_type == "seller":
+        return f"{source_key}'s inventory"
     return f"{source_key}'s collection"  # user_collection
 
 
@@ -1100,7 +1125,7 @@ def _import_year_max() -> int:
 def _render_add_source_page() -> None:
     """Dedicated page for registering a new "Other sources" entry (linked from the
     sidebar's "+ Add source" row instead of an inline form): paste a Discogs collection/
-    wantlist/label URL, optionally narrow what gets imported with a Style/Format/Year
+    wantlist/label/seller URL, optionally narrow what gets imported with a Style/Format/Year
     pre-filter, then create the page and jump to it.
 
     A URL that resolves to a source already registered shows a warning, but still renders
@@ -1123,19 +1148,31 @@ def _render_add_source_page() -> None:
     """
     st.header("Add a source")
     st.markdown("[Browse Discogs ↗](https://www.discogs.com)")
-    st.caption("Paste a Discogs collection, wantlist, or label URL.")
+    st.caption("Paste a Discogs collection, wantlist, label, or seller URL.")
     url = st.text_input(
         "Discogs URL",
         key="add_source_url",
         placeholder="https://www.discogs.com/label/123-Some-Label",
         label_visibility="collapsed",
     )
+    stripped = url.strip()
 
-    parsed = parse_source_url(url) if url.strip() else None
-    if url.strip() and parsed is None:
-        st.error("Paste a Discogs collection, wantlist, or label URL.")
+    if not stripped:
         return
+    if is_my_wantlist_url(stripped):
+        # Discogs' "my wantlist" page (`/mywantlist`) has no username in it at all — resolve
+        # it to the signed-in user's own username so it becomes an ordinary wantlist source,
+        # the same one `/user/<name>/wantlist` for that same name would produce.
+        creds = _load_discogs_client()
+        if creds is None:
+            st.error("Not authenticated with Discogs. Run `discogs2ytmusic auth discogs` first.")
+            return
+        _, username = creds
+        parsed: tuple[str, str] | None = ("wantlist", username)
+    else:
+        parsed = parse_source_url(stripped)
     if parsed is None:
+        st.error("Paste a Discogs collection, wantlist, label, or seller URL.")
         return
     source_type, source_key = parsed
 
@@ -1240,7 +1277,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
     folder's detail page in the main pane. Then an "Other sources" section, styled and
     structured just like the Playlists section (same expand/collapse header, same
     indented/lighter-weight sub-item rows — see `_SIDEBAR_NAV_CSS`'s `nav_other_sources_top`/
-    `nav_other_sources` rules), listing every registered label/wantlist/other-user-collection
+    `nav_other_sources` rules), listing every registered label/wantlist/seller/other-user-collection
     page plus a "+ Add source" link opening the dedicated add-source page
     (`_render_add_source_page`) rather than an inline form. Reads `playlists`/
     `playlist_folders`/`other_sources` from `store` directly (this is the one place in the

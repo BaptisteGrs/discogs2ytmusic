@@ -100,6 +100,21 @@ def test_scan_label_release_fetches_full_detail_for_a_new_release(isolated_cache
     assert [t["title"] for t in tracks] == ["Track One"]
 
 
+def test_scan_label_release_tags_a_seller_source_when_given_source_type_seller(isolated_cache):
+    """A seller-inventory item is fetched the same way as a label-catalogue one — only the
+    source_type it's tagged with differs (see `DiscogsClient.iter_seller_inventory`)."""
+    item = _label_item(1, "Rush", "Moving Pictures")
+
+    with store.connect() as conn:
+        scan_engine.scan_label_release(
+            conn, _FakeLabelClient(), item, refresh=False, source_key="brocshop21", source_type="seller"
+        )
+
+        releases = list(store.iter_releases_with_tracks(conn, source_type="seller", source_key="brocshop21"))
+
+    assert releases[0][0]["artist"] == "Rush"
+
+
 def test_scan_label_release_skips_the_detail_fetch_once_cached_but_still_tags_the_source(isolated_cache):
     item = _label_item(1, "Rush", "Moving Pictures")
 

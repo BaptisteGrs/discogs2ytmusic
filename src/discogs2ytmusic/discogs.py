@@ -79,12 +79,17 @@ _LOCALE = r"(?:/[a-z]{2}(?:-[a-z]{2})?)?"
 
 
 def parse_source_url(url: str) -> tuple[str, str] | None:
-    """Parse a pasted Discogs collection/wantlist/label page URL into (source_type, source_key).
+    """Parse a pasted Discogs collection/wantlist/label/seller page URL into (source_type, source_key).
 
     Recognizes a label page (`/label/<id>`), a user's collection (`/user/<name>/collection`),
-    and a wantlist (`/wantlist?user=<name>` or `/user/<name>/wantlist`) — each optionally
-    preceded by a locale segment (e.g. `/fr/user/<name>/collection`). Returns None if the
-    URL doesn't match any of these shapes.
+    a wantlist (`/wantlist?user=<name>` or `/user/<name>/wantlist`), and a seller's profile
+    page (`/seller/<name>` or `/seller/<name>/profile`) — each optionally preceded by a
+    locale segment (e.g. `/fr/user/<name>/collection`). Returns None if the URL doesn't
+    match any of these shapes.
+
+    Discogs' own "my wantlist" page (`/mywantlist`) has no username in it at all, so it
+    can't be resolved here — see `is_my_wantlist_url`, which the caller checks first and
+    resolves using the locally authenticated username instead.
     """
     url = url.strip()
     m = re.search(rf"discogs\.com{_LOCALE}/label/(\d+)", url)
@@ -98,7 +103,21 @@ def parse_source_url(url: str) -> tuple[str, str] | None:
     )
     if m:
         return "wantlist", m.group(1)
+    m = re.search(rf"discogs\.com{_LOCALE}/seller/([^/?#]+)", url)
+    if m:
+        return "seller", m.group(1)
     return None
+
+
+def is_my_wantlist_url(url: str) -> bool:
+    """Whether `url` is Discogs' own "my wantlist" page (`/mywantlist`, e.g.
+    `https://www.discogs.com/fr/mywantlist`) — the signed-in equivalent of
+    `/user/<name>/wantlist` that omits the username entirely, so `parse_source_url` can't
+    turn it into a (source_type, source_key) pair on its own. The caller resolves it to a
+    real username (the locally authenticated one) and treats it as an ordinary wantlist
+    source from there.
+    """
+    return re.search(rf"discogs\.com{_LOCALE}/mywantlist\b", url.strip()) is not None
 
 
 def source_url(source_type: str, source_key: str) -> str:
@@ -109,6 +128,8 @@ def source_url(source_type: str, source_key: str) -> str:
         return f"{WEB_BASE}/label/{source_key}"
     if source_type == "wantlist":
         return f"{WEB_BASE}/user/{source_key}/wantlist"
+    if source_type == "seller":
+        return f"{WEB_BASE}/seller/{source_key}/profile"
     return f"{WEB_BASE}/user/{source_key}/collection"  # user_collection
 
 
@@ -192,6 +213,29 @@ class DiscogsClient:
             if not releases:
                 return
             yield from releases
+            pagination = data.get("pagination", {})
+            if page >= pagination.get("pages", page):
+                return
+            page += 1
+
+    def iter_seller_inventory(self, username: str) -> Iterator[dict]:
+        """Yield release list items for a seller's marketplace inventory.
+
+        Like `iter_label_releases`, each item is a flat `id`/`title`/`artist`/`year`/
+        `format` dict rather than a `basic_information` one — Discogs nests it as the
+        `release` key of each inventory listing, so it's unwrapped here to the same shape
+        `scan_engine.scan_label_release` already expects.
+        """
+        page = 1
+        while True:
+            data = self._get(f"/users/{username}/inventory", params={"page": page, "per_page": 100})
+            listings = data.get("listings", [])
+            if not listings:
+                return
+            for listing in listings:
+                release = listing.get("release")
+                if release:
+                    yield release
             pagination = data.get("pagination", {})
             if page >= pagination.get("pages", page):
                 return

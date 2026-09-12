@@ -115,11 +115,11 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_id ON playlist_tracks(playlist_id);
 
 -- Registry of "Other sources" pages the user has added (see app.py's sidebar) — one row
--- per pasted Discogs collection/wantlist/label link. "My Discogs Collection" itself is
--- not in here: it's the implicit default source, always present.
+-- per pasted Discogs collection/wantlist/label/seller link. "My Discogs Collection" itself
+-- is not in here: it's the implicit default source, always present.
 CREATE TABLE IF NOT EXISTS other_sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_type TEXT NOT NULL,      -- 'user_collection' | 'wantlist' | 'label'
+    source_type TEXT NOT NULL,      -- 'user_collection' | 'wantlist' | 'label' | 'seller'
     source_key TEXT NOT NULL,       -- username, or label id as text
     display_name TEXT NOT NULL,
     created_at REAL NOT NULL,

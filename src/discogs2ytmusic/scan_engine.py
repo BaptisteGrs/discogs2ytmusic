@@ -194,20 +194,26 @@ def scan_label_release(
     item: dict[str, Any],
     refresh: bool,
     source_key: str,
+    source_type: str = "label",
     import_filter: ImportFilter | None = None,
 ) -> bool:
-    """Upsert one label-catalogue release (and its tracklist, if needed) into the cache.
+    """Upsert one label-catalogue or seller-inventory release (and its tracklist, if
+    needed) into the cache.
 
     Args:
         conn: Open sqlite connection.
         client: An authenticated Discogs client.
-        item: One item as yielded by `DiscogsClient.iter_label_releases` — unlike a
-            collection/wantlist item, this has no `basic_information`: no styles/genres/
-            labels at all, just flat id/title/artist/year/format fields. So, unlike
-            `scan_release`, core release fields always come from a full
-            `get_release_detail` fetch rather than the listing item itself.
+        item: One item as yielded by `DiscogsClient.iter_label_releases` or
+            `iter_seller_inventory` — unlike a collection/wantlist item, this has no
+            `basic_information`: no styles/genres/labels at all, just flat
+            id/title/artist/year/format fields. So, unlike `scan_release`, core release
+            fields always come from a full `get_release_detail` fetch rather than the
+            listing item itself.
         refresh: Re-fetch and replace the tracklist/release fields even if already cached.
-        source_key: The label id (as text), paired with source_type="label".
+        source_key: The label id or seller username (as text), paired with `source_type`.
+        source_type: Either "label" or "seller" — both list bare releases the same way,
+            just from different Discogs endpoints (`iter_label_releases`/
+            `iter_seller_inventory`), so they share this same scan path.
         import_filter: An Other-source page's pre-import Style/Format/Year filter, if any.
             Format/year are already on the raw listing item, so those are checked first
             (cheaply, no API call) to skip an obviously-excluded release before ever
@@ -237,7 +243,7 @@ def scan_label_release(
             year=existing["year"],
         ):
             return False
-        store.record_release_source(conn, release_id, "label", source_key)
+        store.record_release_source(conn, release_id, source_type, source_key)
         conn.commit()
         return True
 
@@ -269,7 +275,7 @@ def scan_label_release(
         year=detail.year,
         labels=detail.labels,
         videos=videos,
-        source_type="label",
+        source_type=source_type,
         source_key=source_key,
     )
     conn.commit()

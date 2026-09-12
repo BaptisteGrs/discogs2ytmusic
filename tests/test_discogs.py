@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from discogs2ytmusic import discogs as discogs_module
-from discogs2ytmusic.discogs import DiscogsClient, parse_source_url, source_url
+from discogs2ytmusic.discogs import DiscogsClient, is_my_wantlist_url, parse_source_url, source_url
 
 
 @pytest.fixture(autouse=True)
@@ -36,8 +36,30 @@ def test_parse_source_url_tolerates_a_locale_prefix():
     assert parse_source_url("https://www.discogs.com/pt-br/wantlist?user=alice") == ("wantlist", "alice")
 
 
-def test_parse_source_url_still_rejects_a_seller_profile_page():
-    assert parse_source_url("https://www.discogs.com/fr/seller/brocshop21/profile") is None
+def test_parse_source_url_recognizes_a_seller_profile_page():
+    assert parse_source_url("https://www.discogs.com/fr/seller/brocshop21/profile") == ("seller", "brocshop21")
+
+
+def test_parse_source_url_recognizes_a_bare_seller_page():
+    assert parse_source_url("https://www.discogs.com/seller/brocshop21") == ("seller", "brocshop21")
+
+
+def test_parse_source_url_returns_none_for_the_my_wantlist_page():
+    # /mywantlist has no username in it — is_my_wantlist_url + the authenticated user's
+    # own username is what resolves this one, not parse_source_url.
+    assert parse_source_url("https://www.discogs.com/fr/mywantlist") is None
+
+
+def test_is_my_wantlist_url_recognizes_the_my_wantlist_page():
+    assert is_my_wantlist_url("https://www.discogs.com/mywantlist")
+    assert is_my_wantlist_url("https://www.discogs.com/fr/mywantlist")
+    assert is_my_wantlist_url("  https://www.discogs.com/fr/mywantlist  ")
+
+
+def test_is_my_wantlist_url_rejects_other_urls():
+    assert not is_my_wantlist_url("https://www.discogs.com/user/alice/wantlist")
+    assert not is_my_wantlist_url("https://www.discogs.com/mywantlistfoo")
+    assert not is_my_wantlist_url("not a url at all")
 
 
 def test_parse_source_url_strips_surrounding_whitespace():
@@ -54,6 +76,7 @@ def test_source_url_round_trips_with_parse_source_url():
         "https://www.discogs.com/label/123-Some-Label",
         "https://www.discogs.com/user/alice/collection",
         "https://www.discogs.com/user/alice/wantlist",
+        "https://www.discogs.com/seller/brocshop21/profile",
     ]:
         parsed = parse_source_url(url)
         assert parsed is not None
@@ -122,3 +145,29 @@ def test_iter_label_releases_stops_on_an_empty_page():
     client, _session = _client_with_pages(pages)
 
     assert list(client.iter_label_releases(123)) == []
+
+
+def test_iter_seller_inventory_unwraps_each_listing_to_its_release():
+    pages = [
+        {
+            "listings": [{"id": 1, "release": {"id": 111, "title": "A", "format": "LP"}}],
+            "pagination": {"pages": 2},
+        },
+        {
+            "listings": [{"id": 2, "release": {"id": 222, "title": "B", "format": "CD"}}],
+            "pagination": {"pages": 2},
+        },
+    ]
+    client, session = _client_with_pages(pages)
+
+    items = list(client.iter_seller_inventory("brocshop21"))
+
+    assert [i["id"] for i in items] == [111, 222]
+    assert session.calls[0][0] == "https://api.discogs.com/users/brocshop21/inventory"
+
+
+def test_iter_seller_inventory_skips_a_listing_with_no_release():
+    pages = [{"listings": [{"id": 1, "release": None}], "pagination": {"pages": 1}}]
+    client, _session = _client_with_pages(pages)
+
+    assert list(client.iter_seller_inventory("brocshop21")) == []
