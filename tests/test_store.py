@@ -984,3 +984,246 @@ def test_playlists_table_migrates_in_folder_id_column(isolated_cache):
     assert "folder_id" in cols
     assert playlist["folder_id"] is None
     assert playlist["ytmusic_playlist_id"] == "PL-old"  # pre-existing data preserved
+
+
+def test_playlists_table_migrates_in_source_columns(isolated_cache):
+    """Curated-playlist caches created before source_type/source_key existed must default
+    every pre-existing playlist to the implicit "my own collection" source."""
+    now = 1700000000.0
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            ytmusic_playlist_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            pushed_at REAL,
+            folder_id INTEGER
+        )"""
+    )
+    conn.execute("INSERT INTO playlists (name, created_at, updated_at) VALUES (?, ?, ?)", ("Old Playlist", now, now))
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Old Playlist")
+
+    assert playlist["source_type"] == "collection"
+    assert playlist["source_key"] == ""
+
+
+def test_other_sources_table_migrates_in_filter_json_column(isolated_cache):
+    """other_sources rows created before the Style/Format/Year pre-filter existed must
+    upgrade in place, defaulting to "no filter" rather than erroring on the missing column."""
+    now = 1700000000.0
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE other_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(source_type, source_key)
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO other_sources (source_type, source_key, display_name, created_at) VALUES (?, ?, ?, ?)",
+        ("label", "123", "Old Label", now),
+    )
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        source = store.get_other_source_by_key(conn, "label", "123")
+
+    assert json.loads(source["filter_json"]) == {}
+
+
+def test_release_sources_backfill_tags_pre_existing_releases_as_collection(isolated_cache):
+    """A release upserted (and thus source-tagged) before this migration existed must
+    still resolve as collection-sourced once release_sources is backfilled."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Artist", "Title", [], [])
+        conn.execute("DELETE FROM release_sources WHERE release_id = 1")  # simulate a pre-migration cache
+        conn.commit()
+
+    with store.connect() as conn:  # re-opening runs the migrations again
+        releases = list(store.iter_releases_with_tracks(conn))
+
+    assert [r[0]["release_id"] for r in releases] == [1]
+
+
+def test_upsert_release_tags_the_given_source_additively(isolated_cache):
+    """A release already known from one source keeps that tag when it's also scanned from
+    another — many-to-many, per issue #13's own recommendation."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Artist", "Title", [], [])  # defaults to "collection"
+        store.upsert_release(conn, 1, "Artist", "Title", [], [], source_type="label", source_key="123")
+
+        as_collection = list(store.iter_releases_with_tracks(conn))
+        as_label = list(store.iter_releases_with_tracks(conn, source_type="label", source_key="123"))
+
+    assert [r[0]["release_id"] for r in as_collection] == [1]
+    assert [r[0]["release_id"] for r in as_label] == [1]
+
+
+def test_iter_releases_with_tracks_does_not_mix_sources(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Collection Artist", "Collection Title", [], [])
+        store.upsert_release(conn, 2, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+
+        collection_ids = [r[0]["release_id"] for r in store.iter_releases_with_tracks(conn)]
+        label_ids = [r[0]["release_id"] for r in store.iter_releases_with_tracks(conn, "label", "123")]
+
+    assert collection_ids == [1]
+    assert label_ids == [2]
+
+
+def test_other_sources_add_is_idempotent_and_keeps_the_original_display_name(isolated_cache):
+    with store.connect() as conn:
+        first_id = store.add_other_source(conn, "label", "123", "Some Label")
+        second_id = store.add_other_source(conn, "label", "123", "A Different Name")
+
+        source = store.get_other_source(conn, first_id)
+
+    assert first_id == second_id
+    assert source["display_name"] == "Some Label"  # not overwritten by the second call
+
+
+def test_add_other_source_persists_its_import_filter(isolated_cache):
+    filt = {"styles": ["House"], "formats": ["Vinyl"], "year_min": 2000, "year_max": None}
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label", filt)
+
+        source = store.get_other_source(conn, source_id)
+
+    assert json.loads(source["filter_json"]) == filt
+
+
+def test_add_other_source_defaults_to_an_empty_filter(isolated_cache):
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label")
+
+        source = store.get_other_source(conn, source_id)
+
+    assert json.loads(source["filter_json"]) == {}
+
+
+def test_update_other_source_filter_replaces_it_in_place(isolated_cache):
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label", {"styles": ["House"]})
+
+        store.update_other_source_filter(conn, source_id, {"styles": ["Techno"], "formats": ["Vinyl"]})
+
+        source = store.get_other_source(conn, source_id)
+
+    assert json.loads(source["filter_json"]) == {"styles": ["Techno"], "formats": ["Vinyl"]}
+    assert source["display_name"] == "Some Label"  # unaffected
+
+
+def test_prune_release_source_tags_removes_only_untagged_releases(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "A", "A", [], [], source_type="label", source_key="123")
+        store.upsert_release(conn, 2, "B", "B", [], [], source_type="label", source_key="123")
+
+        removed = store.prune_release_source_tags(conn, "label", "123", keep_release_ids={1})
+
+        remaining = [r["release_id"] for r, _t in store.iter_releases_with_tracks(conn, "label", "123")]
+
+    assert removed == 1
+    assert remaining == [1]
+
+
+def test_prune_release_source_tags_never_touches_a_different_source(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "A", "A", [], [])  # collection-sourced
+        store.upsert_release(conn, 1, "A", "A", [], [], source_type="label", source_key="123")
+
+        store.prune_release_source_tags(conn, "label", "123", keep_release_ids=set())
+
+        collection_ids = [r["release_id"] for r, _t in store.iter_releases_with_tracks(conn)]
+
+    assert collection_ids == [1]  # untouched, even though the label tag for the same release was pruned
+
+
+def test_record_known_formats_dedupes_and_ignores_blanks(isolated_cache):
+    with store.connect() as conn:
+        store.record_known_formats(conn, ["Vinyl", '12"', "Vinyl", "", "  ", "Album"])
+        store.record_known_formats(conn, ["Vinyl", "CD"])  # a later scan sees more/overlapping tokens
+
+        names = store.list_known_formats(conn)
+
+    assert names == ['12"', "Album", "CD", "Vinyl"]
+
+
+def test_list_known_formats_is_empty_until_something_is_recorded(isolated_cache):
+    with store.connect() as conn:
+        assert store.list_known_formats(conn) == []
+
+
+def test_list_other_sources_is_ordered_by_display_name(isolated_cache):
+    with store.connect() as conn:
+        store.add_other_source(conn, "label", "2", "Zeta Records")
+        store.add_other_source(conn, "wantlist", "alice", "alice's wantlist")
+
+        names = [s["display_name"] for s in store.list_other_sources(conn)]
+
+    assert names == ["Zeta Records", "alice's wantlist"]
+
+
+def test_delete_other_source_forgets_release_tags_but_keeps_the_release(isolated_cache):
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label")
+        store.upsert_release(conn, 1, "Artist", "Title", [], [], source_type="label", source_key="123")
+
+        store.delete_other_source(conn, source_id)
+
+        assert store.get_other_source(conn, source_id) is None
+        assert list(store.iter_releases_with_tracks(conn, "label", "123")) == []
+        assert store.get_release(conn, 1) is not None  # release itself untouched
+
+
+def test_create_playlist_defaults_to_collection_source(isolated_cache):
+    with store.connect() as conn:
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        playlist = store.get_playlist(conn, playlist_id)
+
+    assert playlist["source_type"] == "collection"
+    assert playlist["source_key"] == ""
+
+
+def test_list_playlists_filters_by_source(isolated_cache):
+    with store.connect() as conn:
+        store.create_playlist(conn, "Collection Playlist")
+        store.create_playlist(conn, "Label Playlist", source_type="label", source_key="123")
+
+        collection_names = [p["name"] for p in store.list_playlists(conn, source_type="collection", source_key="")]
+        label_names = [p["name"] for p in store.list_playlists(conn, source_type="label", source_key="123")]
+        all_names = [p["name"] for p in store.list_playlists(conn)]
+
+    assert collection_names == ["Collection Playlist"]
+    assert label_names == ["Label Playlist"]
+    assert set(all_names) == {"Collection Playlist", "Label Playlist"}
+
+
+def test_add_tracks_to_playlist_drops_a_track_from_a_different_source(isolated_cache):
+    """The user's explicit strict-separation requirement: a playlist built from one
+    Discogs source can never end up holding a track scanned from a different one."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Collection Artist", "Collection Title", [], [])
+        store.replace_tracks(conn, 1, [("A1", "Collection Track", None, None)])
+        collection_track_id = conn.execute("SELECT id FROM tracks WHERE release_id = 1").fetchone()[0]
+
+        store.upsert_release(conn, 2, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+        store.replace_tracks(conn, 2, [("A1", "Label Track", None, None)])
+        label_track_id = conn.execute("SELECT id FROM tracks WHERE release_id = 2").fetchone()[0]
+
+        collection_playlist_id = store.create_playlist(conn, "Collection Playlist")
+
+        added = store.add_tracks_to_playlist(conn, collection_playlist_id, [collection_track_id, label_track_id])
+        ordered_ids = store.list_playlist_track_ids(conn, collection_playlist_id)
+
+    assert added == 1  # only the collection-sourced track was actually added
+    assert ordered_ids == [collection_track_id]

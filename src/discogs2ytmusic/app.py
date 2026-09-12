@@ -1,17 +1,22 @@
 """The Streamlit UI: a browsable/editable view over the same sqlite cache the CLI uses.
 
-`main` renders a sidebar (`render_sidebar_nav`) that picks between three panes — the
-Collection tab (`render_collection_tab`), a playlist's detail view, or the YT Music
-connection page — each a thin view over `filters.resolve_rows`/`resolve_playlist_rows`
-and `store`. In-place edits to a rendered table are persisted as manual corrections via
-`collection_edits`; Scan/Sync/Rematch/push-to-YT-Music all drive `scan_engine`/
+`main` renders a sidebar (`render_sidebar_nav`) that picks between several panes — the
+Collection tab (`render_collection_tab`), an Other-source page (`_render_other_source_page`
+— a label/wantlist/other user's collection, kept strictly separate from the Collection
+tab's own tracks and playlists), a playlist's detail view, or the YT Music connection
+page — each a thin view over `filters.resolve_rows`/`resolve_playlist_rows` and `store`.
+`_render_source_browser` is the shared renderer behind both the Collection tab and every
+Other-source page. In-place edits to a rendered table are persisted as manual corrections
+via `collection_edits`; Scan/Sync/Rematch/push-to-YT-Music all drive `scan_engine`/
 `sync_engine`, so none of that orchestration logic lives here — this module is just the
 view layer around it, plus the confirmation dialogs and error messages a UI needs.
 """
 
 from __future__ import annotations
 
+import datetime
 import hashlib
+import json
 import sqlite3
 import time
 from typing import Any, Literal, cast
@@ -19,7 +24,7 @@ from typing import Any, Literal, cast
 import pandas as pd
 import streamlit as st
 
-from discogs2ytmusic import scan_engine, store, sync_engine, ytmusic_client
+from discogs2ytmusic import discogs_taxonomy, scan_engine, store, sync_engine, ytmusic_client
 from discogs2ytmusic.collection_edits import (
     apply_artist_edits,
     apply_genre_edits,
@@ -27,7 +32,7 @@ from discogs2ytmusic.collection_edits import (
     apply_video_link_edits,
 )
 from discogs2ytmusic.config import Config
-from discogs2ytmusic.discogs import DiscogsClient, DiscogsError
+from discogs2ytmusic.discogs import DiscogsClient, DiscogsError, parse_source_url, source_url
 from discogs2ytmusic.filters import (
     BoolOp,
     PlaylistFilter,
@@ -110,9 +115,18 @@ _NO_FOLDER_SENTINEL = "No folder"
 _NEW_FOLDER_SENTINEL = "+ Create new folder"
 
 
-def _all_rows() -> list[TrackRow]:
+def _source_rows(source_type: str = "collection", source_key: str = "") -> list[TrackRow]:
     with store.connect() as conn:
-        return resolve_rows(conn)
+        return resolve_rows(conn, source_type=source_type, source_key=source_key)
+
+
+def _source_display_name(conn: sqlite3.Connection, source_type: str, source_key: str) -> str:
+    """Human-readable name for a source_type/source_key pair: "My Discogs Collection" for
+    the implicit collection source, else the matching Other-sources page's own name."""
+    if source_type == "collection":
+        return "My Discogs Collection"
+    other = store.get_other_source_by_key(conn, source_type, source_key)
+    return other["display_name"] if other is not None else f"{source_type}:{source_key}"
 
 
 def _tag_options(rows: list[TrackRow]) -> list[str]:
@@ -203,10 +217,16 @@ def _load_discogs_client() -> tuple[DiscogsClient, str] | None:
     return DiscogsClient(cfg.discogs_token), cfg.discogs_username
 
 
-def _run_scan(refresh: bool) -> bool:
-    """Fetch the Discogs collection (+ tracklists) into the cache — the UI equivalent of
-    `scan --refresh`. Shows its own progress bar and error/success messages; the caller
-    decides whether/how to refresh the page afterward.
+def _run_scan(refresh: bool, source_type: str = "collection", source_key: str = "") -> bool:
+    """Fetch a Discogs source's releases (+ tracklists) into the cache — the UI equivalent
+    of `scan --refresh`, generalized to any source. Shows its own progress bar and
+    error/success messages; the caller decides whether/how to refresh the page afterward.
+
+    `source_type`/`source_key` default to "my own collection". For any other source (an
+    Other-source page's own type/key), picks the matching Discogs listing endpoint and
+    per-item scan function — see `scan_engine.scan_release`/`scan_label_release` — and
+    applies that source's persisted Style/Format/Year pre-filter (`scan_engine.ImportFilter`),
+    if it has one, pruning any previously-imported release that no longer matches.
 
     Returns:
         True if the scan completed, False if it couldn't start (no Discogs credentials
@@ -218,27 +238,67 @@ def _run_scan(refresh: bool) -> bool:
         return False
     client, username = creds
 
+    import_filter = None
+    if source_type != "collection":
+        with store.connect() as conn:
+            source_row = store.get_other_source_by_key(conn, source_type, source_key)
+        if source_row is not None:
+            import_filter = scan_engine.ImportFilter.from_dict(json.loads(source_row["filter_json"]))
+
     try:
-        with st.spinner("Fetching collection listing..."):
-            basics = list(client.iter_collection_basic(username))
+        with st.spinner("Fetching listing..."):
+            if source_type == "collection":
+                items = list(client.iter_collection_basic(username))
+            elif source_type == "user_collection":
+                items = list(client.iter_collection_basic(source_key))
+            elif source_type == "wantlist":
+                items = list(client.iter_wantlist_basic(source_key))
+            elif source_type == "label":
+                items = list(client.iter_label_releases(int(source_key)))
+            else:
+                raise ValueError(f"Unknown source type: {source_type}")
     except DiscogsError as e:
-        st.error(f"Could not fetch your Discogs collection: {e}")
+        st.error(f"Could not fetch from Discogs: {e}")
         return False
 
-    total = len(basics)
+    total = len(items)
     progress = st.progress(0.0, text=f"Fetching tracklists... (0/{total})")
+    matched_ids: set[int] = set()
     with store.connect() as conn:
-        for i, item in enumerate(basics, start=1):
-            scan_engine.scan_release(conn, client, item, refresh)
+        for i, item in enumerate(items, start=1):
+            if source_type == "label":
+                release_id = item["id"]
+                kept = scan_engine.scan_label_release(
+                    conn, client, item, refresh, source_key=source_key, import_filter=import_filter
+                )
+            else:
+                release_id = item["basic_information"]["id"]
+                kept = scan_engine.scan_release(
+                    conn,
+                    client,
+                    item,
+                    refresh,
+                    source_type=source_type,
+                    source_key=source_key,
+                    import_filter=import_filter,
+                )
+            if kept:
+                matched_ids.add(release_id)
             progress.progress(i / total if total else 1.0, text=f"Fetching tracklists... ({i}/{total})")
     progress.empty()
+
+    if import_filter is not None and not import_filter.is_empty():
+        with store.connect() as conn:
+            store.prune_release_source_tags(conn, source_type, source_key, matched_ids)
+            conn.commit()
 
     st.success(f"Scanned {total} release(s).")
     return True
 
 
-def _run_sync_matches() -> bool:
-    """Match any unmatched tracks against YouTube/YT Music — the UI equivalent of `sync`.
+def _run_sync_matches(source_type: str = "collection", source_key: str = "") -> bool:
+    """Match any unmatched tracks against YouTube/YT Music — the UI equivalent of `sync`,
+    scoped to one Discogs source (defaults to "my own collection").
 
     Only populates the match cache; it never touches a real YT Music account (pushing a
     playlist to one has its own confirm-gated button in the Playlists tab).
@@ -247,10 +307,12 @@ def _run_sync_matches() -> bool:
         True if matching ran (even if it matched nothing), False if there was nothing to match.
     """
     with store.connect() as conn:
-        releases_with_tracks = list(store.iter_releases_with_tracks(conn))
+        releases_with_tracks = list(
+            store.iter_releases_with_tracks(conn, source_type=source_type, source_key=source_key)
+        )
         total = sum(len(store.effective_track_queries(r, t)) for r, t in releases_with_tracks)
         if total == 0:
-            st.info("Nothing to match yet — scan your collection first.")
+            st.info("Nothing to match yet — scan this source first.")
             return False
 
         yt = ytmusic_client.get_client(authenticated=False)
@@ -287,20 +349,24 @@ def _run_rematch(include_manual: bool) -> bool:
     return _run_sync_matches()
 
 
-def _render_scan_button() -> None:
+def _render_scan_button(source_type: str = "collection", source_key: str = "") -> None:
+    # A plain st.button's key never needs page-scoping (unlike a filter widget's) — its
+    # "clicked" state doesn't persist across reruns, and only one page's browser renders
+    # per rerun (see main()'s dispatch), so reusing this literal key across every
+    # Collection/Other-source page is safe and keeps the existing CSS/tests working.
     with st.container(key="scan_pill", width="content"):
         clicked = st.button(
             "Scan",
             key="scan_button",
             icon=":material/cloud_sync:",
-            help="Re-fetch your collection and tracklists from Discogs",
+            help="Re-fetch this source's releases and tracklists from Discogs",
         )
-    if clicked and _run_scan(refresh=True):
+    if clicked and _run_scan(refresh=True, source_type=source_type, source_key=source_key):
         st.session_state.pop("collection_editor", None)
         st.rerun()
 
 
-def _render_sync_matches_button() -> None:
+def _render_sync_matches_button(source_type: str = "collection", source_key: str = "") -> None:
     with st.container(key="sync_matches_pill", width="content"):
         clicked = st.button(
             "Sync matches",
@@ -308,7 +374,7 @@ def _render_sync_matches_button() -> None:
             icon=":material/search:",
             help="Match any unmatched tracks against YouTube/YT Music (doesn't touch your YT Music account)",
         )
-    if clicked and _run_sync_matches():
+    if clicked and _run_sync_matches(source_type=source_type, source_key=source_key):
         st.session_state.pop("collection_editor", None)
         st.rerun()
 
@@ -555,21 +621,25 @@ def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collect
         st.rerun()
 
 
-def _tag_group_ids() -> list[int]:
+def _tag_group_ids(key_prefix: str) -> list[int]:
     """Stable per-group ids backing the Style filter's AND/OR group builder (#20).
 
     Groups are addressed by an ever-incrementing id, not list position, so removing
     one group can't shift another group's widget state (its picked tags/mode) onto
-    the wrong slot.
+    the wrong slot. `key_prefix` scopes the backing session_state to one page (the
+    Collection tab, or a specific Other-source page), so switching pages doesn't leak
+    one page's group builder state into another's (#71-style key collision).
     """
-    if "collection_tag_group_ids" not in st.session_state:
-        st.session_state["collection_tag_group_ids"] = [0]
-        st.session_state["collection_tag_group_next_id"] = 1
-    ids: list[int] = st.session_state["collection_tag_group_ids"]
+    ids_key = f"{key_prefix}_tag_group_ids"
+    next_id_key = f"{key_prefix}_tag_group_next_id"
+    if ids_key not in st.session_state:
+        st.session_state[ids_key] = [0]
+        st.session_state[next_id_key] = 1
+    ids: list[int] = st.session_state[ids_key]
     return ids
 
 
-def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], BoolOp]:
+def _render_tag_group_filters(tag_options: list[str], key_prefix: str) -> tuple[list[TagGroup], BoolOp]:
     """Render the Style filter's AND/OR group builder and return the resulting groups
     and how they combine (see `PlaylistFilter.tag_groups`/`tag_groups_mode`).
 
@@ -577,14 +647,14 @@ def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], B
     appends another; a group beyond the first can be removed. Multiple groups only show
     a combinator (AND/OR between groups) once there's more than one to combine.
     """
-    group_ids = _tag_group_ids()
+    group_ids = _tag_group_ids(key_prefix)
     tag_groups: list[TagGroup] = []
     for i, gid in enumerate(group_ids):
         label_visibility: Literal["visible", "collapsed"] = "visible" if i == 0 else "collapsed"
         tag_col, mode_col, remove_col = st.columns([3, 1, 1])
         with tag_col:
             selected = st.multiselect(
-                "Style", tag_options, key=f"collection_tag_group_{gid}", label_visibility=label_visibility
+                "Style", tag_options, key=f"{key_prefix}_tag_group_{gid}", label_visibility=label_visibility
             )
         with mode_col:
             mode = cast(
@@ -593,14 +663,14 @@ def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], B
                     "Match",
                     options=["or", "and"],
                     format_func=lambda m: "any of" if m == "or" else "all of",
-                    key=f"collection_tag_group_mode_{gid}",
+                    key=f"{key_prefix}_tag_group_mode_{gid}",
                     label_visibility=label_visibility,
                 ),
             )
         with remove_col:
             if i == 0:
                 st.write("")  # align with the labeled widgets in this row
-            if len(group_ids) > 1 and st.button("Remove", key=f"collection_tag_group_remove_{gid}"):
+            if len(group_ids) > 1 and st.button("Remove", key=f"{key_prefix}_tag_group_remove_{gid}"):
                 group_ids.remove(gid)
                 st.rerun()
         if selected:
@@ -608,9 +678,10 @@ def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], B
 
     add_col, combinator_col = st.columns([1, 3])
     with add_col:
-        if st.button("+ Add style group", key="collection_tag_group_add"):
-            new_id = st.session_state["collection_tag_group_next_id"]
-            st.session_state["collection_tag_group_next_id"] = new_id + 1
+        if st.button("+ Add style group", key=f"{key_prefix}_tag_group_add"):
+            next_id_key = f"{key_prefix}_tag_group_next_id"
+            new_id = st.session_state[next_id_key]
+            st.session_state[next_id_key] = new_id + 1
             group_ids.append(new_id)
             st.rerun()
     tag_groups_mode: BoolOp = "or"
@@ -622,41 +693,64 @@ def _render_tag_group_filters(tag_options: list[str]) -> tuple[list[TagGroup], B
                     "Combine style groups with",
                     options=["or", "and"],
                     format_func=lambda m: "Match ANY group (OR)" if m == "or" else "Match ALL groups (AND)",
-                    key="collection_tag_groups_mode",
+                    key=f"{key_prefix}_tag_groups_mode",
                     horizontal=True,
                 ),
             )
     return tag_groups, tag_groups_mode
 
 
-def render_collection_tab() -> None:
-    """Render the Collection pane: the whole cache, browsable/filterable/editable.
+def _render_source_browser(
+    source_type: str,
+    source_key: str,
+    header: str,
+    empty_message: str,
+    key_prefix: str,
+    subtitle_link: str | None = None,
+) -> None:
+    """Render one Discogs source's browsable/filterable/editable pane: the Collection tab
+    ("my own collection") or an Other-source page (a label/wantlist/other user's
+    collection) — same experience either way, just scoped to that source's own releases.
 
-    Loads every track via `filters.resolve_rows` (no filter — the whole collection),
-    derives filter option lists (tags/labels/channels/year range) from those rows, then
+    Loads every track for this source via `filters.resolve_rows` (no filter), derives
+    filter option lists (tags/labels/channels/year range) from those rows, then
     re-resolves with a `PlaylistFilter` built from whatever the user picked. The
-    Scan/Sync/Rematch buttons at the top drive `scan_engine`/`sync_engine` directly
-    (the same cache-populating logic `cli.py`'s `scan`/`sync`/`rematch` commands use);
-    edits made in the table itself are persisted via `collection_edits`.
+    Scan/Sync buttons at the top drive `scan_engine`/`sync_engine` directly (the same
+    cache-populating logic `cli.py`'s `scan`/`sync` commands use, generalized to any
+    source); edits made in the table itself are persisted via `collection_edits`.
+    Rematch is collection-only (not offered on Other-source pages).
+
+    `key_prefix` scopes every widget/session_state key used here to this one page, so
+    switching between the Collection tab and an Other-source page (or between two
+    Other-source pages) can't leak one page's filter/selection state into another's.
+
+    `subtitle_link`, when given (Other-source pages only — the Collection tab has no
+    corresponding Discogs page of its own), renders a link back to the exact Discogs page
+    this source was imported from, right under the header.
     """
     st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
     title_col, actions_col = st.columns([1, 1], vertical_alignment="center")
     with title_col:
-        st.header("My Discogs Collection")
+        st.header(header)
+        if subtitle_link is not None:
+            st.markdown(f"[View on Discogs ↗]({subtitle_link})")
     with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
-        _render_scan_button()
-        _render_sync_matches_button()
-        _render_rematch_button()
-    if st.session_state.get("confirm_rematch"):
+        _render_scan_button(source_type, source_key)
+        _render_sync_matches_button(source_type, source_key)
+        if source_type == "collection":
+            _render_rematch_button()
+    if source_type == "collection" and st.session_state.get("confirm_rematch"):
         _render_rematch_confirmation()
 
-    all_rows = _all_rows()
+    all_rows = _source_rows(source_type, source_key)
     if not all_rows:
-        st.info("No collection cached yet. Click Scan above, or run `discogs2ytmusic scan`.")
+        st.info(empty_message)
         return
 
     search = st.text_input(
-        "Search by artist, track title, or release title", key="collection_search", placeholder="e.g. daft punk"
+        "Search by artist, track title, or release title",
+        key=f"{key_prefix}_search",
+        placeholder="e.g. daft punk",
     )
 
     tag_options = _tag_options(all_rows)
@@ -664,24 +758,24 @@ def render_collection_tab() -> None:
     channel_options = _channel_options(all_rows)
     year_lo, year_hi = _year_bounds(all_rows)
 
-    tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options)
+    tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options, key_prefix)
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
-        labels = st.multiselect("Label", label_options, key="collection_labels")
+        labels = st.multiselect("Label", label_options, key=f"{key_prefix}_labels")
     with col2:
-        channels = st.multiselect("Channel", channel_options, key="collection_channels")
+        channels = st.multiselect("Channel", channel_options, key=f"{key_prefix}_channels")
     with col3:
         if year_lo < year_hi:
             year_range = st.slider(
-                "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key="collection_year"
+                "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key=f"{key_prefix}_year"
             )
         else:
             st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
             year_range = (year_lo, year_hi)
     with col4:
         st.write("")  # vertical alignment with the widgets above
-        matched_only = st.checkbox("Matched only", key="collection_matched_only")
+        matched_only = st.checkbox("Matched only", key=f"{key_prefix}_matched_only")
 
     narrowed = bool(tag_groups or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
@@ -699,16 +793,16 @@ def render_collection_tab() -> None:
     )
 
     with store.connect() as conn:
-        rows = resolve_rows(conn, filt)
+        rows = resolve_rows(conn, filt, source_type=source_type, source_key=source_key)
     rows = filter_rows_by_query(rows, search)
 
     st.caption(f"{len(rows)} tracks ({sum(1 for r in rows if r.matched)} matched)")
     select_all = st.checkbox(
-        f"Select all {len(rows)} filtered track(s)", key="collection_select_all", disabled=not rows
+        f"Select all {len(rows)} filtered track(s)", key=f"{key_prefix}_select_all", disabled=not rows
     )
 
     df = _rows_to_dataframe(rows)
-    table_key = _table_key("collection_table", rows)
+    table_key = _table_key(f"{key_prefix}_table", rows)
     event = st.dataframe(
         df,
         key=table_key,
@@ -721,7 +815,7 @@ def render_collection_tab() -> None:
     )
     selected_rows = [rows[i] for i in event.selection.rows]
 
-    _render_edit_panel(selected_rows)
+    _render_edit_panel(selected_rows, key_prefix=key_prefix)
 
     # "Select all" overrides whatever's highlighted in the table rather than merely
     # pre-selecting it, so the table's own selection can't be used to carve out
@@ -730,7 +824,78 @@ def render_collection_tab() -> None:
         selected_ids = [r.track_id for r in rows if r.track_id is not None]
     else:
         selected_ids = [r.track_id for r in selected_rows if r.track_id is not None]
-    _render_add_to_playlist(selected_ids, table_key)
+    _render_add_to_playlist(selected_ids, table_key, source_type, source_key, key_prefix)
+
+
+def render_collection_tab() -> None:
+    """Render the Collection pane: "my own Discogs collection", browsable/filterable/editable.
+
+    A thin wrapper around `_render_source_browser` scoped to the implicit "collection"
+    source — see its docstring for what's actually rendered.
+    """
+    _render_source_browser(
+        source_type="collection",
+        source_key="",
+        header="My Discogs Collection",
+        empty_message="No collection cached yet. Click Scan above, or run `discogs2ytmusic scan`.",
+        key_prefix="collection",
+    )
+
+
+_OTHER_SOURCE_LABELS = {
+    "user_collection": "user's collection",
+    "wantlist": "wantlist",
+    "label": "label catalogue",
+}
+_OTHER_SOURCE_ICONS = {
+    "user_collection": ":material/person:",
+    "wantlist": ":material/favorite:",
+    "label": ":material/sell:",
+}
+
+
+def _render_other_source_page(source: sqlite3.Row) -> None:
+    """Render one "Other sources" page: same experience as the Collection tab
+    (`_render_source_browser`), scoped to this source's own releases, plus a "Remove this
+    source" affordance that forgets the page (and its release tags) without touching any
+    cached release/track/match data that might still be used elsewhere.
+    """
+    source_type, source_key, source_id = source["source_type"], source["source_key"], source["id"]
+    kind_label = _OTHER_SOURCE_LABELS[source_type]
+    _render_source_browser(
+        source_type=source_type,
+        source_key=source_key,
+        header=source["display_name"],
+        empty_message=f"No releases scanned yet from this {kind_label}. Click Scan above.",
+        key_prefix=f"othersrc_{source_id}",
+        subtitle_link=source_url(source_type, source_key),
+    )
+
+    st.divider()
+    confirm_key = f"confirm_remove_othersrc_{source_id}"
+    if not st.session_state.get(confirm_key):
+        if st.button("Remove this source", key=f"remove_othersrc_{source_id}", icon=":material/delete:"):
+            st.session_state[confirm_key] = True
+            st.rerun()
+        return
+
+    st.warning(
+        "This removes the page and forgets which releases came from it. Cached release/"
+        "track/match data is kept — it may still be used by another source or a playlist."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, remove", key=f"confirm_remove_othersrc_yes_{source_id}"):
+            with store.connect() as conn:
+                store.delete_other_source(conn, source_id)
+                conn.commit()
+            st.session_state["nav_kind"] = "collection"
+            st.session_state.pop(confirm_key, None)
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key=f"confirm_remove_othersrc_no_{source_id}"):
+            st.session_state[confirm_key] = False
+            st.rerun()
 
 
 def _folder_picker_options(conn: sqlite3.Connection) -> tuple[list[str], dict[str, int]]:
@@ -761,13 +926,24 @@ def _resolve_new_folder_choice(
     return folder_by_name.get(choice), None
 
 
-def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
-    """Selected rows in the Collection tab's main table (or every filtered track, if
-    "select all" is on) -> add to an existing or new playlist, optionally filing a newly
-    created playlist into a folder."""
+def _render_add_to_playlist(
+    selected_ids: list[int],
+    table_key: str,
+    source_type: str = "collection",
+    source_key: str = "",
+    key_prefix: str = "collection",
+) -> None:
+    """Selected rows in a source's main table (or every filtered track, if "select all" is
+    on) -> add to an existing or new playlist, optionally filing a newly created playlist
+    into a folder.
+
+    Only playlists already built from this same `source_type`/`source_key` are offered as
+    a target — and a newly-created one is tagged with it — so a playlist never ends up
+    mixing tracks from more than one Discogs source (see `store.add_tracks_to_playlist`).
+    """
 
     with store.connect() as conn:
-        playlist_names = [p["name"] for p in store.list_playlists(conn)]
+        playlist_names = [p["name"] for p in store.list_playlists(conn, source_type=source_type, source_key=source_key)]
         folder_names, folder_by_name = _folder_picker_options(conn)
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
@@ -775,12 +951,12 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
         choice = st.selectbox(
             f"Add {len(selected_ids)} selected track(s) to",
             [_NEW_PLAYLIST_SENTINEL, *playlist_names],
-            key="collection_add_target",
+            key=f"{key_prefix}_add_target",
         )
     new_name = ""
     with col2:
         if choice == _NEW_PLAYLIST_SENTINEL:
-            new_name = st.text_input("New playlist name", key="collection_new_playlist_name")
+            new_name = st.text_input("New playlist name", key=f"{key_prefix}_new_playlist_name")
     folder_choice = _NO_FOLDER_SENTINEL
     new_folder_name = ""
     with col3:
@@ -788,13 +964,13 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
             folder_choice = st.selectbox(
                 "Folder (optional)",
                 [_NO_FOLDER_SENTINEL, _NEW_FOLDER_SENTINEL, *folder_names],
-                key="collection_new_playlist_folder",
+                key=f"{key_prefix}_new_playlist_folder",
             )
             if folder_choice == _NEW_FOLDER_SENTINEL:
-                new_folder_name = st.text_input("New folder name", key="collection_new_playlist_folder_name")
+                new_folder_name = st.text_input("New folder name", key=f"{key_prefix}_new_playlist_folder_name")
     with col4:
         st.write("")
-        add_clicked = st.button("Add to playlist", key="collection_add_button", disabled=not selected_ids)
+        add_clicked = st.button("Add to playlist", key=f"{key_prefix}_add_button", disabled=not selected_ids)
 
     if not add_clicked:
         return
@@ -813,7 +989,7 @@ def _render_add_to_playlist(selected_ids: list[int], table_key: str) -> None:
                 st.error(folder_error)
                 return
             try:
-                playlist_id = store.create_playlist(conn, name)
+                playlist_id = store.create_playlist(conn, name, source_type=source_type, source_key=source_key)
             except sqlite3.IntegrityError:
                 st.error(f"A playlist named '{name}' already exists.")
                 return
@@ -893,6 +1069,167 @@ def _render_folder_nav_entry(
                 _render_playlist_nav_button(p, kind, selected_id)
 
 
+def _resolve_new_source_display_name(source_type: str, source_key: str) -> str:
+    """Best-effort human-readable name for a newly-added Other-sources page."""
+    if source_type == "label":
+        creds = _load_discogs_client()
+        if creds is not None:
+            client, _ = creds
+            try:
+                info = client.get_label(int(source_key))
+            except (DiscogsError, ValueError):
+                info = {}
+            name = info.get("name")
+            if name:
+                return str(name)
+        return f"Label {source_key}"
+    if source_type == "wantlist":
+        return f"{source_key}'s wantlist"
+    return f"{source_key}'s collection"  # user_collection
+
+
+_IMPORT_YEAR_MIN = 1960
+
+
+def _import_year_max() -> int:
+    """Upper bound for the Add-source page's Year pre-filter slider — always the current
+    year, so a newly-released record is never out of range."""
+    return datetime.date.today().year
+
+
+def _render_add_source_page() -> None:
+    """Dedicated page for registering a new "Other sources" entry (linked from the
+    sidebar's "+ Add source" row instead of an inline form): paste a Discogs collection/
+    wantlist/label URL, optionally narrow what gets imported with a Style/Format/Year
+    pre-filter, then create the page and jump to it.
+
+    A URL that resolves to a source already registered shows a warning, but still renders
+    the pre-filter form — prefilled with that source's current filter — so its pre-filter
+    can be revised later; without this, once a source existed, there was no way to ever
+    change what it was set up to import (a "Go to existing page" button is offered too,
+    for jumping over there unchanged).
+
+    The pre-filter is persisted on the source (`scan_engine.ImportFilter`, via
+    `store.add_other_source`'s `filter_json`) and re-applied on every future Scan, not
+    just this first import — see `_run_scan`. Style options come from Discogs' own
+    genre/style taxonomy (`discogs_taxonomy`), available up front with no API call, since
+    a label's own release styles aren't knowable until each one's full detail is fetched
+    (which only happens once you actually decide to import). Format has no such
+    ready-made picklist anywhere (no API endpoint, no dataset, unlike Style) — instead
+    `store.list_known_formats` grows organically from every release any scan has ever
+    actually looked at (`scan_engine.scan_release`/`scan_label_release` both record their
+    format tokens regardless of any filter outcome), so it's empty until something's been
+    scanned at least once.
+    """
+    st.header("Add a source")
+    st.markdown("[Browse Discogs ↗](https://www.discogs.com)")
+    st.caption("Paste a Discogs collection, wantlist, or label URL.")
+    url = st.text_input(
+        "Discogs URL",
+        key="add_source_url",
+        placeholder="https://www.discogs.com/label/123-Some-Label",
+        label_visibility="collapsed",
+    )
+
+    parsed = parse_source_url(url) if url.strip() else None
+    if url.strip() and parsed is None:
+        st.error("Paste a Discogs collection, wantlist, or label URL.")
+        return
+    if parsed is None:
+        return
+    source_type, source_key = parsed
+
+    with store.connect() as conn:
+        existing = store.get_other_source_by_key(conn, source_type, source_key)
+    existing_filter = None
+    if existing is not None:
+        st.warning(
+            f"You've already added this source, as **{existing['display_name']}**. You "
+            "can update its pre-filter below, or jump to the existing page unchanged."
+        )
+        if st.button("Go to existing page", key="add_source_go_to_existing"):
+            st.session_state["nav_kind"] = "other_source"
+            st.session_state["nav_other_source_id"] = existing["id"]
+            st.rerun()
+        existing_filter = scan_engine.ImportFilter.from_dict(json.loads(existing["filter_json"]))
+
+    year_max = _import_year_max()
+
+    st.divider()
+    st.subheader("Pre-filter what gets imported")
+    st.caption(
+        "Optional — only releases matching all of these get imported, and this is "
+        "re-applied every time you Scan this source again, not just the first time."
+    )
+    styles = st.multiselect(
+        "Style",
+        discogs_taxonomy.STYLE_FILTER_OPTIONS,
+        default=existing_filter.styles if existing_filter else [],
+        key="add_source_styles",
+    )
+    with store.connect() as conn:
+        known_formats = store.list_known_formats(conn)
+    formats = st.multiselect(
+        "Format",
+        known_formats,
+        default=[f for f in existing_filter.formats if f in known_formats] if existing_filter else [],
+        key="add_source_formats",
+    )
+    if not known_formats:
+        st.caption("No formats seen yet — options appear here once you've scanned at least one source.")
+    year_range_min, year_range_max = st.slider(
+        "Year",
+        min_value=_IMPORT_YEAR_MIN,
+        max_value=year_max,
+        value=(
+            existing_filter.year_min if existing_filter and existing_filter.year_min is not None else _IMPORT_YEAR_MIN,
+            existing_filter.year_max if existing_filter and existing_filter.year_max is not None else year_max,
+        ),
+        key="add_source_year_range",
+    )
+
+    st.divider()
+    submit_label = "Update source" if existing is not None else "Add source"
+    if not st.button(submit_label, key="add_source_submit", type="primary"):
+        return
+
+    filter_dict = {
+        "styles": styles,
+        "formats": formats,
+        "year_min": int(year_range_min) if year_range_min > _IMPORT_YEAR_MIN else None,
+        "year_max": int(year_range_max) if year_range_max < year_max else None,
+    }
+    with store.connect() as conn:
+        if existing is not None:
+            store.update_other_source_filter(conn, existing["id"], filter_dict)
+            source_id = existing["id"]
+        else:
+            display_name = _resolve_new_source_display_name(source_type, source_key)
+            source_id = store.add_other_source(conn, source_type, source_key, display_name, filter_dict)
+        conn.commit()
+    st.session_state["nav_kind"] = "other_source"
+    st.session_state["nav_other_source_id"] = source_id
+    st.rerun()
+
+
+def _render_other_sources_nav_entries(other_sources: list[sqlite3.Row], kind: str, selected_id: int | None) -> None:
+    """The "Other sources" sidebar sub-items: one nav row per registered source, plus a
+    "+ Add source" link opening the dedicated add-source page (`_render_add_source_page`).
+    """
+    if not other_sources:
+        st.caption("No other sources yet.")
+    for source in other_sources:
+        is_selected = kind == "other_source" and source["id"] == selected_id
+        icon = _OTHER_SOURCE_ICONS[source["source_type"]]
+        if _nav_button(source["display_name"], key=f"nav_othersrc_{source['id']}", selected=is_selected, icon=icon):
+            st.session_state["nav_kind"] = "other_source"
+            st.session_state["nav_other_source_id"] = source["id"]
+            st.rerun()
+    if _nav_button("+ Add source", key="nav_add_source_page", selected=kind == "add_source", icon=":material/add:"):
+        st.session_state["nav_kind"] = "add_source"
+        st.rerun()
+
+
 def render_sidebar_nav() -> tuple[str, int | None]:
     """Render the sidebar, and report which pane `main` should show next.
 
@@ -900,30 +1237,46 @@ def render_sidebar_nav() -> tuple[str, int | None]:
     playlists together (one row per entry, alphabetically) — folders expand/collapse,
     like the Playlists section itself, to reveal the playlists filed under them right
     there in the sidebar, while the folder name is its own click target opening the
-    folder's detail page in the main pane. Reads `playlists`/`playlist_folders` from
-    `store` directly (this is the one place in the app that queries them outside
-    `filters.py`, since sidebar rows aren't `TrackRow`s). Selection state lives in
-    `st.session_state`, set by the nav buttons here and cleared back to "collection" if
-    it points at a since-deleted playlist/folder. Returns the current selection as
-    ("collection", None), ("playlist", id), ("folder", id), or ("ytmusic", None).
+    folder's detail page in the main pane. Then an "Other sources" section, styled and
+    structured just like the Playlists section (same expand/collapse header, same
+    indented/lighter-weight sub-item rows — see `_SIDEBAR_NAV_CSS`'s `nav_other_sources_top`/
+    `nav_other_sources` rules), listing every registered label/wantlist/other-user-collection
+    page plus a "+ Add source" link opening the dedicated add-source page
+    (`_render_add_source_page`) rather than an inline form. Reads `playlists`/
+    `playlist_folders`/`other_sources` from `store` directly (this is the one place in the
+    app that queries them outside `filters.py`, since sidebar rows aren't `TrackRow`s).
+    Selection state lives in `st.session_state`, set by the nav buttons here and cleared
+    back to "collection" if it points at a since-deleted playlist/folder/source. Returns
+    the current selection as ("collection", None), ("playlist", id), ("folder", id),
+    ("other_source", id), ("add_source", None), or ("ytmusic", None).
     """
     with store.connect() as conn:
         playlists = store.list_playlists(conn)
         folders = store.list_playlist_folders(conn)
+        other_sources = store.list_other_sources(conn)
     playlist_ids = {p["id"] for p in playlists}
     folder_ids = {f["id"] for f in folders}
+    other_source_ids = {s["id"] for s in other_sources}
 
     kind = st.session_state.get("nav_kind", "collection")
-    selected_id = (
-        st.session_state.get("nav_playlist_id") if kind == "playlist" else st.session_state.get("nav_folder_id")
+    if kind == "playlist":
+        selected_id = st.session_state.get("nav_playlist_id")
+    elif kind == "folder":
+        selected_id = st.session_state.get("nav_folder_id")
+    elif kind == "other_source":
+        selected_id = st.session_state.get("nav_other_source_id")
+    else:
+        selected_id = None
+    stale = (
+        (kind == "playlist" and selected_id not in playlist_ids)
+        or (kind == "folder" and selected_id not in folder_ids)
+        or (kind == "other_source" and selected_id not in other_source_ids)
     )
-    stale = (kind == "playlist" and selected_id not in playlist_ids) or (
-        kind == "folder" and selected_id not in folder_ids
-    )
-    if stale or kind not in ("collection", "playlist", "folder", "ytmusic"):
+    if stale or kind not in ("collection", "playlist", "folder", "other_source", "add_source", "ytmusic"):
         kind, selected_id = "collection", None
 
     expanded = st.session_state.get("nav_playlists_expanded", True)
+    other_sources_expanded = st.session_state.get("nav_other_sources_expanded", True)
 
     ungrouped = [p for p in playlists if p["folder_id"] is None]
     playlists_by_folder: dict[int, list[sqlite3.Row]] = {}
@@ -939,6 +1292,7 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                 st.session_state["nav_kind"] = "collection"
                 st.session_state["nav_playlist_id"] = None
                 st.session_state["nav_folder_id"] = None
+                st.session_state["nav_other_source_id"] = None
                 st.rerun()
 
             st.divider()
@@ -969,6 +1323,22 @@ def render_sidebar_nav() -> tuple[str, int | None]:
                     else:
                         playlist = next(p for p in ungrouped if p["id"] == entry_id)
                         _render_playlist_nav_button(playlist, kind, selected_id)
+
+        st.divider()
+        with st.container(key="nav_other_sources_top"):
+            if st.button(
+                "Other sources",
+                key="nav_other_sources_toggle",
+                type="tertiary",
+                width="stretch",
+                icon=":material/expand_more:" if other_sources_expanded else ":material/chevron_right:",
+            ):
+                st.session_state["nav_other_sources_expanded"] = not other_sources_expanded
+                st.rerun()
+
+        if other_sources_expanded:
+            with st.container(key="nav_other_sources"):
+                _render_other_sources_nav_entries(other_sources, kind, selected_id)
 
         st.divider()
         _render_ytmusic_nav_item(kind == "ytmusic")
@@ -1165,7 +1535,9 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
 
     pushed_at = playlist["pushed_at"]
     pushed_caption = f"Pushed to YT Music {_relative_time(pushed_at)}" if pushed_at else "Not yet pushed to YT Music"
-    st.caption(f"{pushed_caption} · Last modified {_relative_time(playlist['updated_at'])}")
+    with store.connect() as conn:
+        origin = _source_display_name(conn, playlist["source_type"], playlist["source_key"])
+    st.caption(f"{pushed_caption} · Last modified {_relative_time(playlist['updated_at'])} · From: {origin}")
 
     _render_playlist_folder_picker(playlist)
 
@@ -1197,13 +1569,13 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
         st.caption("No tracks yet — search below to add some.")
 
     st.markdown("**Add tracks**")
-    search = st.text_input("Search your collection by artist or title", key=f"playlist_search_{playlist_id}")
+    search = st.text_input(f"Search {origin} by artist or title", key=f"playlist_search_{playlist_id}")
     if search.strip():
         needle = search.strip().lower()
         already_in = {r.track_id for r in rows}
         matches = [
             r
-            for r in _all_rows()
+            for r in _source_rows(playlist["source_type"], playlist["source_key"])
             if r.track_id is not None
             and r.track_id not in already_in
             and (needle in r.track_artist.lower() or needle in r.track_title.lower())
@@ -1519,6 +1891,7 @@ _SIDEBAR_NAV_CSS = """
 <style>
 .st-key-nav_top,
 .st-key-nav_playlists,
+.st-key-nav_other_sources,
 [class*="st-key-nav_folder_playlists_"] {
     gap: 0.15rem !important;
 }
@@ -1532,7 +1905,9 @@ _SIDEBAR_NAV_CSS = """
     margin-bottom: 0 !important;
 }
 .st-key-nav_top button,
-.st-key-nav_playlists button {
+.st-key-nav_other_sources_top button,
+.st-key-nav_playlists button,
+.st-key-nav_other_sources button {
     background-color: transparent !important;
     border: none !important;
     box-shadow: none !important;
@@ -1542,34 +1917,45 @@ _SIDEBAR_NAV_CSS = """
     justify-content: flex-start !important;
 }
 .st-key-nav_top button > div,
-.st-key-nav_playlists button > div {
+.st-key-nav_other_sources_top button > div,
+.st-key-nav_playlists button > div,
+.st-key-nav_other_sources button > div {
     justify-content: flex-start !important;
 }
 .st-key-nav_top button p,
-.st-key-nav_playlists button p {
+.st-key-nav_other_sources_top button p,
+.st-key-nav_playlists button p,
+.st-key-nav_other_sources button p {
     color: #1F1E1D;
     text-align: left !important;
 }
-.st-key-nav_top button p {
+.st-key-nav_top button p,
+.st-key-nav_other_sources_top button p {
     font-weight: 600;
     font-size: 0.95rem;
 }
-.st-key-nav_playlists {
+.st-key-nav_playlists,
+.st-key-nav_other_sources {
     padding-left: 0.9rem;
 }
-.st-key-nav_playlists .stButton {
+.st-key-nav_playlists .stButton,
+.st-key-nav_other_sources .stButton {
     line-height: 1.3;
 }
-.st-key-nav_playlists button {
+.st-key-nav_playlists button,
+.st-key-nav_other_sources button {
     padding: 0.1rem 0 !important;
 }
-.st-key-nav_playlists button p {
+.st-key-nav_playlists button p,
+.st-key-nav_other_sources button p {
     font-weight: 400;
     font-size: 0.85rem;
     line-height: 1.3;
 }
 .st-key-nav_top button:hover p,
-.st-key-nav_playlists button:hover p {
+.st-key-nav_other_sources_top button:hover p,
+.st-key-nav_playlists button:hover p,
+.st-key-nav_other_sources button:hover p {
     color: #CC785C;
 }
 [class*="st-key-nav_folder_playlists_"] {
@@ -1645,11 +2031,11 @@ def main() -> None:
     """Streamlit entry point: dispatch to a pane based on the sidebar's current selection.
 
     `render_sidebar_nav` both renders the sidebar and returns what it should drive — a
-    specific playlist's detail view, a folder's detail view, the YT Music connection
-    page, or (the default) `render_collection_tab`. This is the module-level script
-    Streamlit re-runs top to bottom on every interaction, so nothing here persists
-    across reruns except what's explicitly stashed in `st.session_state` or read back
-    from `store`.
+    specific playlist's detail view, a folder's detail view, an Other-source page, the
+    YT Music connection page, or (the default) `render_collection_tab`. This is the
+    module-level script Streamlit re-runs top to bottom on every interaction, so nothing
+    here persists across reruns except what's explicitly stashed in `st.session_state`
+    or read back from `store`.
     """
     kind, selected_id = render_sidebar_nav()
     if kind == "playlist" and selected_id is not None:
@@ -1662,6 +2048,13 @@ def main() -> None:
             folder = store.get_playlist_folder(conn, selected_id)
         assert folder is not None  # render_sidebar_nav already dropped stale/deleted ids
         _render_folder_detail(folder)
+    elif kind == "other_source" and selected_id is not None:
+        with store.connect() as conn:
+            source = store.get_other_source(conn, selected_id)
+        assert source is not None  # render_sidebar_nav already dropped stale/deleted ids
+        _render_other_source_page(source)
+    elif kind == "add_source":
+        _render_add_source_page()
     elif kind == "ytmusic":
         _render_ytmusic_page()
     else:

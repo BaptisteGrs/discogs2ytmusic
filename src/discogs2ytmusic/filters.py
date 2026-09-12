@@ -189,13 +189,21 @@ def _build_track_row(
     )
 
 
-def resolve_rows(conn: sqlite3.Connection, filt: PlaylistFilter | None = None) -> list[TrackRow]:
-    """One row per track across the whole collection, optionally narrowed by a filter.
+def resolve_rows(
+    conn: sqlite3.Connection,
+    filt: PlaylistFilter | None = None,
+    source_type: str = store.DEFAULT_SOURCE_TYPE,
+    source_key: str = store.DEFAULT_SOURCE_KEY,
+) -> list[TrackRow]:
+    """One row per track for the given Discogs source, optionally narrowed by a filter.
 
-    Pass `filt=None` to browse everything (the Collection tab's default view).
+    Pass `filt=None` to browse everything for that source (a page's default view).
+    `source_type`/`source_key` default to "my own collection" (the Collection tab); pass
+    an Other-source page's own type/key to browse that source instead — these are never
+    mixed together (see CLAUDE.md/issue #13's strict-separation requirement).
     """
     rows: list[TrackRow] = []
-    for release, tracks in store.iter_releases_with_tracks(conn):
+    for release, tracks in store.iter_releases_with_tracks(conn, source_type=source_type, source_key=source_key):
         if filt is not None and not release_matches(release, filt):
             continue
         tracks_by_id = {t["id"]: t for t in tracks}

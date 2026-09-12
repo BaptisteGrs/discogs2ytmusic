@@ -519,3 +519,17 @@ def test_resolve_rows_combines_criteria_with_and(isolated_cache, dummy_library):
     expected_releases = {r["release_id"] for r in dummy_library if "Acid" in r["styles"] and r["year"] >= 2020}
     assert {r.release_id for r in rows} == expected_releases
     assert expected_releases  # sanity: fixture actually has at least one match, else this test proves nothing
+
+
+def test_resolve_rows_defaults_to_the_collection_source_and_excludes_others(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Collection Artist", "Collection Title", [], [])
+        store.replace_tracks(conn, 1, [("A1", "Collection Track", None, None)])
+        store.upsert_release(conn, 2, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+        store.replace_tracks(conn, 2, [("A1", "Label Track", None, None)])
+
+        collection_rows = filters.resolve_rows(conn)
+        label_rows = filters.resolve_rows(conn, source_type="label", source_key="123")
+
+    assert [r.track_title for r in collection_rows] == ["Collection Track"]
+    assert [r.track_title for r in label_rows] == ["Label Track"]
