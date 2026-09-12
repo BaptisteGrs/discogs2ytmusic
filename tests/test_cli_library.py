@@ -4,7 +4,7 @@ import sqlite3
 
 from typer.testing import CliRunner
 
-from discogs2ytmusic import cli, matcher
+from discogs2ytmusic import cli, matcher, store
 from discogs2ytmusic.matcher import MatchResult
 
 runner = CliRunner()
@@ -47,7 +47,7 @@ def _table_row_count(db_path, table: str) -> int:
         conn.close()
 
 
-def test_library_dummy_sync_and_export_round_trip(isolated_cache, tmp_path, monkeypatch):
+def test_library_dummy_sync_populates_the_dummy_cache(isolated_cache, monkeypatch):
     scan_result = runner.invoke(cli.app, ["--library", "dummy", "scan"])
     assert scan_result.exit_code == 0, scan_result.output
 
@@ -58,19 +58,15 @@ def test_library_dummy_sync_and_export_round_trip(isolated_cache, tmp_path, monk
     assert sync_result.exit_code == 0, sync_result.output
     assert "Match preview" in sync_result.output
 
-    out = tmp_path / "dummy_matches.csv"
-    export_result = runner.invoke(cli.app, ["--library", "dummy", "export", "--output", str(out)])
-    assert export_result.exit_code == 0, export_result.output
-
-    import csv
-
-    with out.open() as f:
-        rows = list(csv.DictReader(f))
-    assert len(rows) == 18
-    assert all(r["matched"] == "yes" for r in rows)
+    # The `--library dummy` flag repoints store.CACHE_DB for the rest of this process, so this
+    # reads the dummy cache the invocations above just populated.
+    with store.connect() as conn:
+        video_ids = [row[0] for row in conn.execute("SELECT video_id FROM matches")]
+    assert len(video_ids) == 18
+    assert all(video_ids)
 
 
 def test_library_defaults_to_real(isolated_cache):
-    result = runner.invoke(cli.app, ["export", "--output", str(isolated_cache.parent / "out.csv")])
+    result = runner.invoke(cli.app, ["sync"])
     assert result.exit_code == 0, result.output
-    assert "Nothing to export" in result.output
+    assert "No releases found" in result.output

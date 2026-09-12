@@ -31,15 +31,18 @@ Discogs API  →  sqlite cache (store.py)  →  matcher.py  →  YT Music API
   yt-dlp YouTube search as a last resort.
 - **`sync_engine.py`** — orchestrates `matcher` + `store` to make sure every
   track across a set of releases has a cached match; shared by the CLI's
-  `sync`/`rematch` and reusable from the UI.
+  `sync`/`rematch` and reusable from the UI. Also owns pushing a playlist's
+  matched tracks to a real YT Music playlist and diffing it against what's
+  already there (`push_to_ytmusic`), used by the UI's Playlists Sync button.
+- **`scan_engine.py`** — fetches one release's tracklist from Discogs and
+  upserts it into the cache; shared by the CLI's `scan` and reusable from
+  the UI.
 - **`ytmusic_client.py`** — thin wrapper around `ytmusicapi` (auth setup,
   playlist create/lookup, adding tracks).
 - **`filters.py`** — `PlaylistFilter` (ad-hoc Collection-tab filter criteria)
   and `resolve_rows`/`resolve_playlist_rows`, which flatten the cache into one
   `TrackRow` per track (the whole collection, or one curated playlist's
   tracks in playlist order) for the UI to render.
-- **`views.py`** — the older one-row-per-(style, track) shape used by the
-  legacy `export`/`push-style-playlists` CLI commands.
 - **`collection_edits.py`** — diffs the Streamlit data editor's before/after
   DataFrames and persists changes as manual corrections via `store`.
 - **`cli.py`** — the Typer app; thin command layer over the modules above.
@@ -103,16 +106,18 @@ uv run discogs2ytmusic --library dummy sync
 ## Gotchas
 
 - **Two unrelated "playlist" concepts coexist — don't conflate them.**
-  `playlist_defs` (+ `PlaylistFilter.to_json`/`from_json`) is the older
-  filter-based persistence used only by the legacy `push-style-playlists` CLI
-  command (one playlist per Discogs style tag, auto-built from a filter).
-  `playlists`/`playlist_tracks` is the newer hand-curated playlist feature
-  behind the UI's Playlists sidebar section (`store.create_playlist`/
-  `add_tracks_to_playlist`/etc.) — an explicit, ordered list of tracks a user assembled themselves, no
-  filter involved. They don't share rows or code paths. The table name
-  `playlists` was reused for the new feature, which is exactly what made
-  `_migrate_playlists_to_playlist_defs` (below) need a real column check
-  instead of a bare existence check — a bug that shipped once already.
+  `playlist_defs` was the older filter-based persistence for the now-removed
+  `push-style-playlists` CLI command (one playlist per Discogs style tag,
+  auto-built from a filter). The table still exists so old caches migrate
+  cleanly (`_migrate_playlists_to_playlist_defs`, below), but nothing reads
+  or writes it anymore. `playlists`/`playlist_tracks` is the current
+  hand-curated playlist feature behind the UI's Playlists sidebar section
+  (`store.create_playlist`/`add_tracks_to_playlist`/etc.) — an explicit,
+  ordered list of tracks a user assembled themselves, no filter involved.
+  They never shared rows or code paths. The table name `playlists` was
+  reused for the new feature, which is exactly what made
+  `_migrate_playlists_to_playlist_defs` need a real column check instead of
+  a bare existence check — a bug that shipped once already.
 - **Schema changes are additive migrations, not destructive ones.** `store.py`
   guards every `ALTER TABLE` with a `PRAGMA table_info` check (see
   `_migrate_*_table`) so an existing user's cache upgrades in place. Follow

@@ -1,6 +1,15 @@
+"""Persist edits made in the Streamlit data editor as manual corrections.
+
+The Collection/Playlist tables render as an editable `st.data_editor`; each `apply_*_edits`
+function diffs one column's before/after DataFrames and writes the changed cells to `store`
+as the same kind of manual override the CLI's `fix-artist`/`fix-style`/`fix-genre`/`correct`
+commands make — so a row edited here gets "locked" the same way (see CLAUDE.md's Gotchas).
+"""
+
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -23,6 +32,38 @@ def _str(value: Any) -> str:
     return "" if pd.isna(value) else str(value)
 
 
+def _apply_field_edit(
+    conn: sqlite3.Connection,
+    original: pd.DataFrame,
+    edited: pd.DataFrame,
+    column: str,
+    to_override: Callable[[str], Any],
+    set_track_override: Callable[[sqlite3.Connection, int, Any], None],
+    set_release_override: Callable[[sqlite3.Connection, int, Any], None],
+) -> int:
+    """Diff `column` and persist changes as a per-track override, falling back to a
+    per-release override for a row with no tracklist on file (track_id is None) — the
+    "diff a column, apply per-track override else per-release fallback" pattern shared by
+    `apply_artist_edits`/`apply_style_edits`/`apply_genre_edits`. Returns the number of
+    rows updated.
+    """
+    count = 0
+    for idx in original.index:
+        old_val, new_val = _str(original.at[idx, column]), _str(edited.at[idx, column])
+        if new_val == old_val:
+            continue
+        override = to_override(new_val)
+        track_id = _int_or_none(original.at[idx, "track_id"])
+        if track_id is not None:
+            set_track_override(conn, track_id, override)
+        else:
+            release_id = _int_or_none(original.at[idx, "release_id"])
+            assert release_id is not None  # every row has a release_id
+            set_release_override(conn, release_id, override)
+        count += 1
+    return count
+
+
 def apply_artist_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame) -> int:
     """Diff the `track_artist` column and persist changes as artist overrides.
 
@@ -32,21 +73,15 @@ def apply_artist_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited:
     Discogs-sourced (or heuristically-split) artist. Returns the number of
     rows updated.
     """
-    count = 0
-    for idx in original.index:
-        old_val, new_val = _str(original.at[idx, "track_artist"]), _str(edited.at[idx, "track_artist"])
-        if new_val == old_val:
-            continue
-        override = new_val.strip() or None
-        track_id = _int_or_none(original.at[idx, "track_id"])
-        if track_id is not None:
-            store.set_track_search_artist(conn, track_id, override)
-        else:
-            release_id = _int_or_none(original.at[idx, "release_id"])
-            assert release_id is not None  # every row has a release_id
-            store.set_release_artist_override(conn, release_id, override)
-        count += 1
-    return count
+    return _apply_field_edit(
+        conn,
+        original,
+        edited,
+        "track_artist",
+        to_override=lambda v: v.strip() or None,
+        set_track_override=store.set_track_search_artist,
+        set_release_override=store.set_release_artist_override,
+    )
 
 
 def _split_comma_list(value: str) -> list[str]:
@@ -63,21 +98,15 @@ def apply_style_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: 
     instead. Clearing the cell reverts to the inherited (release, or Discogs') styles.
     Returns the number of rows updated.
     """
-    count = 0
-    for idx in original.index:
-        old_val, new_val = _str(original.at[idx, "styles"]), _str(edited.at[idx, "styles"])
-        if new_val == old_val:
-            continue
-        override = _split_comma_list(new_val) or None
-        track_id = _int_or_none(original.at[idx, "track_id"])
-        if track_id is not None:
-            store.set_track_styles_override(conn, track_id, override)
-        else:
-            release_id = _int_or_none(original.at[idx, "release_id"])
-            assert release_id is not None  # every row has a release_id
-            store.set_release_styles_override(conn, release_id, override)
-        count += 1
-    return count
+    return _apply_field_edit(
+        conn,
+        original,
+        edited,
+        "styles",
+        to_override=lambda v: _split_comma_list(v) or None,
+        set_track_override=store.set_track_styles_override,
+        set_release_override=store.set_release_styles_override,
+    )
 
 
 def apply_genre_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: pd.DataFrame) -> int:
@@ -86,21 +115,15 @@ def apply_genre_edits(conn: sqlite3.Connection, original: pd.DataFrame, edited: 
     Same per-track/release-fallback split as `apply_style_edits` — see its docstring.
     Returns the number of rows updated.
     """
-    count = 0
-    for idx in original.index:
-        old_val, new_val = _str(original.at[idx, "genres"]), _str(edited.at[idx, "genres"])
-        if new_val == old_val:
-            continue
-        override = _split_comma_list(new_val) or None
-        track_id = _int_or_none(original.at[idx, "track_id"])
-        if track_id is not None:
-            store.set_track_genres_override(conn, track_id, override)
-        else:
-            release_id = _int_or_none(original.at[idx, "release_id"])
-            assert release_id is not None  # every row has a release_id
-            store.set_release_genres_override(conn, release_id, override)
-        count += 1
-    return count
+    return _apply_field_edit(
+        conn,
+        original,
+        edited,
+        "genres",
+        to_override=lambda v: _split_comma_list(v) or None,
+        set_track_override=store.set_track_genres_override,
+        set_release_override=store.set_release_genres_override,
+    )
 
 
 def apply_video_link_edits(

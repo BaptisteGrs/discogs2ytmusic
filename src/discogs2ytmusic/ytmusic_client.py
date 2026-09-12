@@ -1,3 +1,12 @@
+"""Thin wrapper around `ytmusicapi`: auth setup, and playlist read/write operations.
+
+Authentication reuses a logged-in browser session's cookie/authuser headers (pulled from
+DevTools, see `run_setup`/`save_auth_headers`) rather than a Google Cloud OAuth app — no
+API credentials to register. `matcher.py` uses this module's `YTMusic` client for search;
+`app.py`/`cli.py` use its playlist helpers (`get_or_create_playlist`/`add_tracks`/etc.) to
+actually push matched tracks.
+"""
+
 from __future__ import annotations
 
 import os

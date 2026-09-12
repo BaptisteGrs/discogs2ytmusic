@@ -105,9 +105,7 @@ def test_correct_unknown_match_id_errors(isolated_cache):
     assert "No cached match" in result.output
 
 
-def test_fix_artist_overrides_search_query_used_by_sync_and_export(
-    isolated_cache, dummy_library, tmp_path, monkeypatch
-):
+def test_fix_artist_overrides_search_query_used_by_sync(isolated_cache, dummy_library, monkeypatch):
     release = dummy_library[0]
     track = release["tracklist"][0]
 
@@ -136,16 +134,10 @@ def test_fix_artist_overrides_search_query_used_by_sync_and_export(
     assert ("Corrected Artist", track["title"]) in seen_queries
     assert not any(q[0] == release["artist"] and q[1] == track["title"] for q in seen_queries)
 
-    out = tmp_path / "out.csv"
-    export_result = runner.invoke(cli.app, ["export", "--output", str(out), "--style", release["styles"][0]])
-    assert export_result.exit_code == 0, export_result.output
-
-    import csv
-
-    with out.open() as f:
-        rows = list(csv.DictReader(f))
-    corrected_row = next(r for r in rows if r["track_id"] == str(track_id))
-    assert corrected_row["artist"] == "Corrected Artist"
+    with store.connect() as conn:
+        match = store.get_match(conn, "Corrected Artist", track["title"])
+    assert match is not None
+    assert match["video_id"] == "vid"
 
 
 def test_fix_artist_clear_reverts_to_release_artist(isolated_cache, dummy_library):

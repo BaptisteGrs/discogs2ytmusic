@@ -136,22 +136,14 @@ def test_matches_table_migrates_from_pre_id_schema(isolated_cache, dummy_library
     assert row["id"] is not None
 
 
-def test_playlist_def_round_trip(isolated_cache):
-    with store.connect() as conn:
-        assert store.get_playlist_def_by_name(conn, "Electro / Tech House") is None
-        filter_json = json.dumps({"tags": ["Electro", "Tech House"], "year_min": 1990, "year_max": 2010})
-        def_id = store.upsert_playlist_def(conn, "Electro / Tech House", filter_json)
-        store.set_playlist_def_ytmusic_id(conn, def_id, "PL123")
-
-    with store.connect() as conn:
-        row = store.get_playlist_def_by_name(conn, "Electro / Tech House")
-        assert row["id"] == def_id
-        assert row["ytmusic_playlist_id"] == "PL123"
-        assert json.loads(row["filter_json"])["tags"] == ["Electro", "Tech House"]
-
-
 def test_playlists_table_migrates_into_playlist_defs(isolated_cache, dummy_library):
-    """Caches created before playlist_defs existed must fold the old style->playlist_id table in."""
+    """Caches created before playlist_defs existed must fold the old style->playlist_id table in.
+
+    `playlist_defs` itself is now inert (only the now-removed `push-style-playlists` command
+    ever wrote/read it), but the migration still has to run cleanly against old caches without
+    losing data or crashing — hence querying the table directly rather than through any store
+    helper, since none of the read/write helpers exist anymore.
+    """
     conn = sqlite3.connect(isolated_cache)
     conn.execute("CREATE TABLE playlists (style TEXT PRIMARY KEY, playlist_id TEXT NOT NULL, created_at REAL NOT NULL)")
     conn.execute("INSERT INTO playlists VALUES (?, ?, ?)", ("House", "PL-legacy", 1700000000.0))
@@ -159,7 +151,8 @@ def test_playlists_table_migrates_into_playlist_defs(isolated_cache, dummy_libra
     conn.close()
 
     with store.connect() as conn:
-        row = store.get_playlist_def_by_name(conn, "Discogs - House")
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM playlist_defs WHERE name = ?", ("Discogs - House",)).fetchone()
         legacy_cols = {r[1] for r in conn.execute("PRAGMA table_info(playlists)")}
 
     assert row["ytmusic_playlist_id"] == "PL-legacy"

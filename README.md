@@ -93,34 +93,16 @@ Limit to specific styles:
 uv run discogs2ytmusic sync --style "Deep House" --style "Dub Techno"
 ```
 
-### Review matches before creating anything
+### Review matches, and fix a wrong one or a bad search query
 
-`sync` (even in dry-run mode) caches every YouTube match it finds, hit or
-miss. Export that cache to a CSV to sanity-check match quality on a subset
-before trusting `--apply`, or to find tracks with no YouTube match at all:
+The [browsable UI](#browsable-web-ui) is the easiest way to do this — its
+Collection table shows every cached match (with a Matched checkbox to filter
+on), and you fix a wrong match or query by editing a row in place, with no
+ids to look up.
 
-```bash
-uv run discogs2ytmusic sync --style "Deep House"     # populate the cache, no changes made
-uv run discogs2ytmusic export --style "Deep House" --output deep_house.csv
-```
-
-Columns: `match_id, track_id, style, artist, title, discogs_url, matched,
-video_id, youtube_url, video_title, source, score, searched_at`. Filter/sort
-on the `matched` column (yes/no) in your spreadsheet tool to isolate tracks
-with no confident match — candidates for ripping/uploading yourself.
-`discogs_url` links back to the release on Discogs. `match_id`/`track_id` are
-the ids to pass to `correct`/`fix-artist` below (see "artist" note there:
-this column shows the artist actually used for the search, which may already
-reflect a `fix-artist` override).
-
-This only reads the local cache — it never hits YouTube itself, so it's
-cheap to re-run as you narrow things down. There's no interactive browser
-for the cache yet, just CSV export for now.
-
-### Fix a wrong match or a bad search query by hand
-
-Two commands, addressed by the ids from `export`, for the two different
-things that can go wrong:
+The same two corrections are available from the CLI, addressed by a
+match/track id from the local sqlite cache (`matches.id`/`tracks.id` — the
+UI is the more convenient way to find these):
 
 **`correct <match_id>`** — the search picked the wrong video (or none), but
 the query itself was fine. Give it the right video yourself, mark it as
@@ -147,28 +129,18 @@ uv run discogs2ytmusic fix-artist 9 --clear   # revert to the release's artist
 ```
 
 The override lives on the track row, so it survives normal re-runs of
-`sync`/`export` — but is lost if that release's tracklist is later replaced
-via `scan --refresh` (tracks are fully deleted and re-inserted). Re-apply it
-if that happens.
+`sync` — but is lost if that release's tracklist is later replaced via
+`scan --refresh` (tracks are fully deleted and re-inserted). Re-apply it if
+that happens.
 
 Neither command touches YouTube — both just edit the local cache.
 
 ### Actually create/update the playlists
 
-`sync` only searches and caches matches — it never touches your YT Music account.
-Pushing a playlist is a separate, explicitly confirmed step:
-
-```bash
-uv run discogs2ytmusic push-style-playlists --apply
-```
-
-This is the original one-playlist-per-Discogs-style-tag flow (`[Legacy]` in
-`--help`): every style tag with matches gets its own YT Music playlist, named
-`Discogs - <style>` and safe to re-run — existing playlists are reused (not
-duplicated), and matched tracks are cached so re-syncing only searches for new
-tracks. For hand-picking exactly which tracks go where instead of one
-playlist per style tag, build a curated playlist in the
-[browsable UI](#browsable-web-ui) instead.
+`sync` only searches and caches matches — it never touches your YT Music
+account. Building and pushing a playlist is a separate, explicit step done
+in the [browsable UI](#browsable-web-ui)'s Playlists tab, which lets you
+hand-pick exactly which tracks go into each playlist.
 
 ### Re-match tracks after a matcher/schema change
 
@@ -192,14 +164,13 @@ fixture instead of calling the Discogs API — no Discogs token needed:
 ```bash
 uv run discogs2ytmusic --library dummy scan
 uv run discogs2ytmusic --library dummy sync            # still needs YT Music reachable for real searches
-uv run discogs2ytmusic --library dummy export -o dummy_matches.csv
 ```
 
-Handy for sanity-checking a change to the matcher/export logic, or just
-seeing the whole `scan` → `sync` → `export` flow end-to-end in seconds. This
-only works from a full repo checkout (it reads `tests/fixtures/dummy_library.json`
-directly, it isn't packaged) — omit the flag, or pass `--library real`
-(the default), to use your actual collection.
+Handy for sanity-checking a change to the matcher logic, or just seeing the
+whole `scan` → `sync` flow end-to-end in seconds. This only works from a
+full repo checkout (it reads `tests/fixtures/dummy_library.json` directly,
+it isn't packaged) — omit the flag, or pass `--library real` (the default),
+to use your actual collection.
 
 ## Browsable web UI
 
@@ -231,8 +202,8 @@ those too. Rematch can take a while and is destructive to the match cache, so
 it asks for confirmation first, the same as the Playlists tab's delete/push
 buttons.
 
-**Playlists** manages hand-curated playlists — unlike `push-style-playlists`'
-one-playlist-per-style-tag, you build these track by track: create a playlist
+**Playlists** manages hand-curated playlists — you build these track by
+track rather than one playlist per style tag: create a playlist
 from the sidebar's "+ New playlist" form, add tracks from the Collection view
 or by searching by artist/title within a playlist itself, reorder by removing
 and re-adding, and push the result to a real YT Music playlist (named

@@ -24,43 +24,6 @@ def _seed(conn, dummy_library):
         )
 
 
-# --- PlaylistFilter (de)serialization ---
-
-
-def test_playlist_filter_json_round_trip():
-    filt = filters.PlaylistFilter(
-        tag_groups=[
-            filters.TagGroup(tags=["Electro", "Tech House"], mode="or"),
-            filters.TagGroup(tags=["Vinyl Only", "Reissue"], mode="and"),
-        ],
-        tag_groups_mode="and",
-        labels=["Warp"],
-        year_min=1990,
-        year_max=2010,
-        matched_only=True,
-        channels=["Warp Records"],
-    )
-    restored = filters.PlaylistFilter.from_json(filt.to_json())
-    assert restored == filt
-
-
-def test_playlist_filter_from_json_fills_in_missing_keys():
-    filt = filters.PlaylistFilter.from_json('{"tag_groups": [{"tags": ["House"]}]}')
-    assert filt == filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=["House"])])
-
-
-def test_playlist_filter_from_json_migrates_the_pre_20_flat_tags_list_to_one_or_group():
-    """`playlist_defs.filter_json` rows saved before #20 store a flat `tags: [...]` list —
-    it should load as a single OR group, reproducing the old flat-list-of-tags behavior."""
-    filt = filters.PlaylistFilter.from_json('{"tags": ["Acid", "House"]}')
-    assert filt == filters.PlaylistFilter(tag_groups=[filters.TagGroup(tags=["Acid", "House"], mode="or")])
-
-
-def test_playlist_filter_from_json_migrates_an_empty_legacy_tags_list_to_no_groups():
-    filt = filters.PlaylistFilter.from_json('{"tags": []}')
-    assert filt == filters.PlaylistFilter()
-
-
 # --- release_matches (unit-level, plain dicts stand in for sqlite3.Row) ---
 
 
