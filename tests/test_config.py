@@ -29,8 +29,8 @@ def test_save_and_load_round_trip_includes_playlist_name_prefix(tmp_path, monkey
 
 def test_load_defaults_playlist_name_prefix_to_discogs_when_missing():
     """A config file with no saved value yet (never touched this feature) must still
-    resolve to "Discogs" so existing users get byte-for-byte identical playlist names."""
-    assert Config().playlist_name_prefix == "Discogs" == config_module.DEFAULT_PLAYLIST_NAME_PREFIX
+    resolve to "Discogs -" so existing users get byte-for-byte identical playlist names."""
+    assert Config().playlist_name_prefix == "Discogs -" == config_module.DEFAULT_PLAYLIST_NAME_PREFIX
 
 
 def test_load_defaults_playlist_name_prefix_for_a_config_file_saved_before_this_field_existed(tmp_path, monkeypatch):
@@ -41,7 +41,7 @@ def test_load_defaults_playlist_name_prefix_for_a_config_file_saved_before_this_
     loaded = Config.load()
 
     assert loaded.discogs_token == "tok"
-    assert loaded.playlist_name_prefix == "Discogs"
+    assert loaded.playlist_name_prefix == "Discogs -"
 
 
 def test_load_with_no_saved_file_returns_defaults(tmp_path, monkeypatch):
