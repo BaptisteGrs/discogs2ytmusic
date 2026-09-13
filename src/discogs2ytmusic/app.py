@@ -877,6 +877,7 @@ def _render_source_browser(
         column_config=SHARED_COLUMN_CONFIG,
         on_select="rerun",
         selection_mode="multi-row",
+        row_height=44,
     )
     selected_rows = [rows[i] for i in event.selection.rows]
 
@@ -1588,8 +1589,9 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
     matched = sum(1 for r in rows if r.matched)
 
     st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
+    st.markdown(_PAGE_TITLE_CSS, unsafe_allow_html=True)
     title_col, actions_col = st.columns([3, 2], vertical_alignment="center")
-    with title_col:
+    with title_col, st.container(key="playlist_title"):
         st.subheader(playlist["name"])
     with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
         _render_sync_button(playlist, rows)
@@ -1634,6 +1636,7 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
             column_config=SHARED_COLUMN_CONFIG,
             on_select="rerun",
             selection_mode="multi-row",
+            row_height=44,
         )
         selected_rows = [rows[i] for i in event.selection.rows]
 
@@ -1675,6 +1678,7 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
                 column_config=SHARED_COLUMN_CONFIG,
                 on_select="rerun",
                 selection_mode="multi-row",
+                row_height=44,
             )
             selected_matches = [matches[i] for i in search_event.selection.rows]
             to_add = [r.track_id for r in selected_matches if r.track_id is not None]
@@ -1893,8 +1897,9 @@ def _render_folder_detail(folder: sqlite3.Row) -> None:
         track_counts = {p["id"]: len(store.list_playlist_track_ids(conn, p["id"])) for p in playlists}
 
     st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
+    st.markdown(_PAGE_TITLE_CSS, unsafe_allow_html=True)
     title_col, actions_col = st.columns([3, 2], vertical_alignment="center")
-    with title_col:
+    with title_col, st.container(key="folder_title"):
         st.subheader(folder["name"])
     with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
         _render_folder_delete_button(folder)
@@ -1964,6 +1969,20 @@ _FOLDER_PLAYLIST_LIST_CSS = """
 }
 .st-key-folder_playlist_list button p {
     text-align: left !important;
+}
+</style>
+"""
+
+# A playlist's or folder's detail page uses `st.subheader` (h3) for its own name, rather than
+# `st.header` (h2), to sit shorter next to the Sync/Delete pill buttons beside it — but it's
+# still playing a page-title role there (same as `_HEADER_CSS`'s h2 treatment on the
+# Collection/Other-source pages), so it gets the same accent green rather than the plain body
+# color `st.subheader` normally renders in.
+_PAGE_TITLE_CSS = """
+<style>
+.st-key-playlist_title h3,
+.st-key-folder_title h3 {
+    color: #1E5136 !important;
 }
 </style>
 """
