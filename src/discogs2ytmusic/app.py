@@ -803,55 +803,57 @@ def _render_source_browser(
             st.info(empty_message)
             return
 
-        search = st.text_input(
-            "Search by artist, track title, or release title",
-            key=f"{key_prefix}_search",
-            placeholder="Search by artist, track title, or release title",
-            label_visibility="collapsed",
-            icon=":material/search:",
-        )
-
-        tag_options = _tag_options(all_rows)
-        label_options = _label_options(all_rows)
-        channel_options = _channel_options(all_rows)
-        year_lo, year_hi = _year_bounds(all_rows)
-
-        tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options, key_prefix)
-
-        col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.5])
-        with col1:
-            labels = st.multiselect(
-                "Label",
-                label_options,
-                key=f"{key_prefix}_labels",
+        st.markdown(_FILTERS_CSS, unsafe_allow_html=True)
+        with st.container(key="filters_block"):
+            search = st.text_input(
+                "Search by artist, track title, or release title",
+                key=f"{key_prefix}_search",
+                placeholder="Search by artist, track title, or release title",
                 label_visibility="collapsed",
-                placeholder="Label",
+                icon=":material/search:",
             )
-        with col2:
-            channels = st.multiselect(
-                "Channel",
-                channel_options,
-                key=f"{key_prefix}_channels",
-                label_visibility="collapsed",
-                placeholder="Channel",
-            )
-        with col3:
-            if year_lo < year_hi:
-                year_range = st.slider(
-                    "Year",
-                    min_value=year_lo,
-                    max_value=year_hi,
-                    value=(year_lo, year_hi),
-                    key=f"{key_prefix}_year",
+
+            tag_options = _tag_options(all_rows)
+            label_options = _label_options(all_rows)
+            channel_options = _channel_options(all_rows)
+            year_lo, year_hi = _year_bounds(all_rows)
+
+            tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options, key_prefix)
+
+            col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.5])
+            with col1:
+                labels = st.multiselect(
+                    "Label",
+                    label_options,
+                    key=f"{key_prefix}_labels",
                     label_visibility="collapsed",
+                    placeholder="Label",
                 )
-            else:
-                st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
-                year_range = (year_lo, year_hi)
-        with col4:
-            matched_only = st.checkbox(
-                "Matched", key=f"{key_prefix}_matched_only", help="Only show already-matched tracks"
-            )
+            with col2:
+                channels = st.multiselect(
+                    "Channel",
+                    channel_options,
+                    key=f"{key_prefix}_channels",
+                    label_visibility="collapsed",
+                    placeholder="Channel",
+                )
+            with col3:
+                if year_lo < year_hi:
+                    year_range = st.slider(
+                        "Year",
+                        min_value=year_lo,
+                        max_value=year_hi,
+                        value=(year_lo, year_hi),
+                        key=f"{key_prefix}_year",
+                        label_visibility="collapsed",
+                    )
+                else:
+                    st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
+                    year_range = (year_lo, year_hi)
+            with col4:
+                matched_only = st.checkbox(
+                    "Matched", key=f"{key_prefix}_matched_only", help="Only show already-matched tracks"
+                )
 
     narrowed = bool(tag_groups or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
@@ -2224,6 +2226,20 @@ h2 {
 }
 .st-key-source_header [data-testid="stWidgetLabel"] {
     margin-bottom: 0.1rem;
+}
+</style>
+"""
+
+# Shrinks the filter controls (search box, style groups, Label/Channel/Year/Matched row) below
+# the title/action buttons — `zoom` rather than a smaller `font-size`, since these widgets size
+# their own box (padding, min-height) from `rem`s anchored to the page's root font-size
+# (`theme.baseFontSize`), not their own font-size: a font-size-only override leaves the box
+# unchanged and just shrinks the text inside it. `zoom` rescales the box itself before
+# layout/paint, the same trick `[data-testid="stDataFrame"]`'s zoom above uses to grow text.
+_FILTERS_CSS = """
+<style>
+.st-key-filters_block {
+    zoom: 0.85;
 }
 </style>
 """
