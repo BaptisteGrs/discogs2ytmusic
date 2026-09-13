@@ -2132,10 +2132,17 @@ _SIDEBAR_NAV_CSS = """
 # for why this is scoped to `h2` rather than every heading level: `st.subheader` is used for
 # in-page section labels, not page titles, and shouldn't pick up this treatment) plus the
 # boombox artwork (`static/vectorstock_23584899.png`) as a decorative watermark next to the
-# whole title/subtitle/actions/filters block — recolored via `mask-image` (not shown at its
-# native blue) so it always renders in the fixed accent blue regardless of the rest of the
-# palette, and stretched to the block's own height (`top`/`bottom: 0` rather than a fixed
-# `height`) so it scales with however tall that block ends up being.
+# title/subtitle/actions — recolored via `mask-image` (not shown at its native blue) so it
+# always renders in the fixed accent blue regardless of the rest of the palette.
+#
+# Deliberately NOT stretched to match the filters' height below it: the source PNG is
+# ~square, so `mask-size: contain` inside a box far taller than it is wide (which is what
+# a `top/bottom: 0` box becomes once the filters grow) letterboxes it, leaving a large dead
+# gap above and below — worse, the filters' height is unbounded (each "+ Add style group"
+# click adds another row), so there's no fixed block height to size against in the first
+# place. A fixed square anchored to the top, sized against the title/subtitle/actions block
+# alone (whose height is stable), stays correct regardless of window width or how many
+# filter rows are showing.
 _HEADER_CSS = """
 <style>
 h2 {
@@ -2148,10 +2155,10 @@ h2 {
 .st-key-source_header::before {
     content: "";
     position: absolute;
-    top: 0.15rem;
-    bottom: 0.15rem;
+    top: 0;
     right: 20px;
-    width: 145px;
+    width: 150px;
+    height: 150px;
     background-color: #84BCFC;
     -webkit-mask: url("app/static/vectorstock_23584899.png") no-repeat center / contain;
     mask: url("app/static/vectorstock_23584899.png") no-repeat center / contain;
