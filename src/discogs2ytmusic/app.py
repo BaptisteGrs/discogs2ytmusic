@@ -19,7 +19,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import pandas as pd
 import streamlit as st
@@ -687,12 +687,15 @@ def _render_tag_group_filters(tag_options: list[str], key_prefix: str) -> tuple[
     """
     group_ids = _tag_group_ids(key_prefix)
     tag_groups: list[TagGroup] = []
-    for i, gid in enumerate(group_ids):
-        label_visibility: Literal["visible", "collapsed"] = "visible" if i == 0 else "collapsed"
+    for gid in group_ids:
         tag_col, mode_col, remove_col = st.columns([3, 1, 1])
         with tag_col:
             selected = st.multiselect(
-                "Style", tag_options, key=f"{key_prefix}_tag_group_{gid}", label_visibility=label_visibility
+                "Style",
+                tag_options,
+                key=f"{key_prefix}_tag_group_{gid}",
+                label_visibility="collapsed",
+                placeholder="All styles",
             )
         with mode_col:
             mode = cast(
@@ -702,12 +705,11 @@ def _render_tag_group_filters(tag_options: list[str], key_prefix: str) -> tuple[
                     options=["or", "and"],
                     format_func=lambda m: "any of" if m == "or" else "all of",
                     key=f"{key_prefix}_tag_group_mode_{gid}",
-                    label_visibility=label_visibility,
+                    label_visibility="collapsed",
+                    help="How the selected styles in this group combine",
                 ),
             )
         with remove_col:
-            if i == 0:
-                st.write("")  # align with the labeled widgets in this row
             if len(group_ids) > 1 and st.button("Remove", key=f"{key_prefix}_tag_group_remove_{gid}"):
                 group_ids.remove(gid)
                 st.rerun()
@@ -793,7 +795,9 @@ def _render_source_browser(
         search = st.text_input(
             "Search by artist, track title, or release title",
             key=f"{key_prefix}_search",
-            placeholder="e.g. daft punk",
+            placeholder="Search by artist, track title, or release title",
+            label_visibility="collapsed",
+            icon=":material/search:",
         )
 
         tag_options = _tag_options(all_rows)
@@ -805,19 +809,35 @@ def _render_source_browser(
 
         col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.5])
         with col1:
-            labels = st.multiselect("Label", label_options, key=f"{key_prefix}_labels")
+            labels = st.multiselect(
+                "Label",
+                label_options,
+                key=f"{key_prefix}_labels",
+                label_visibility="collapsed",
+                placeholder="Label",
+            )
         with col2:
-            channels = st.multiselect("Channel", channel_options, key=f"{key_prefix}_channels")
+            channels = st.multiselect(
+                "Channel",
+                channel_options,
+                key=f"{key_prefix}_channels",
+                label_visibility="collapsed",
+                placeholder="Channel",
+            )
         with col3:
             if year_lo < year_hi:
                 year_range = st.slider(
-                    "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key=f"{key_prefix}_year"
+                    "Year",
+                    min_value=year_lo,
+                    max_value=year_hi,
+                    value=(year_lo, year_hi),
+                    key=f"{key_prefix}_year",
+                    label_visibility="collapsed",
                 )
             else:
                 st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
                 year_range = (year_lo, year_hi)
         with col4:
-            st.write("")  # vertical alignment with the widgets above
             matched_only = st.checkbox(
                 "Matched", key=f"{key_prefix}_matched_only", help="Only show already-matched tracks"
             )
