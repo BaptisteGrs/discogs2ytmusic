@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 
 from .config import CACHE_DB, ensure_dirs
@@ -95,7 +95,12 @@ CREATE TABLE IF NOT EXISTS playlists (
     updated_at REAL NOT NULL,   -- bumped by content edits only (add/remove tracks), not by pushing
     pushed_at REAL,             -- last successful push to YT Music; NULL if never pushed
     -- optional grouping folder; a playlist belongs to at most one folder, or none (no nesting)
-    folder_id INTEGER REFERENCES playlist_folders(id)
+    folder_id INTEGER REFERENCES playlist_folders(id),
+    -- which Discogs source this playlist was built from ('collection' for "My Discogs
+    -- Collection", else matches an other_sources row) — a playlist may only ever contain
+    -- tracks from this one source (see add_tracks_to_playlist)
+    source_type TEXT NOT NULL DEFAULT 'collection',
+    source_key TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -108,7 +113,48 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     FOREIGN KEY (track_id) REFERENCES tracks(id)
 );
 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_id ON playlist_tracks(playlist_id);
+
+-- Registry of "Other sources" pages the user has added (see app.py's sidebar) — one row
+-- per pasted Discogs collection/wantlist/label/seller link. "My Discogs Collection" itself
+-- is not in here: it's the implicit default source, always present.
+CREATE TABLE IF NOT EXISTS other_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,      -- 'user_collection' | 'wantlist' | 'label' | 'seller'
+    source_key TEXT NOT NULL,       -- username, or label id as text
+    display_name TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    -- json {"styles": [...], "formats": [...], "year_min": int|null, "year_max": int|null}
+    -- pre-filter applied on every scan (see scan_engine.ImportFilter) so only matching
+    -- releases are ever imported under this source; '{}' means "import everything"
+    filter_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_type, source_key)
+);
+
+-- Many-to-many: which Discogs source(s) each cached release was scanned from. A release
+-- can belong to more than one source at once (e.g. it's in both your collection and a
+-- label's catalogue) — see issue #13's own recommendation. 'collection' (source_key '')
+-- is the implicit "my own collection" tag; other rows mirror an other_sources entry.
+CREATE TABLE IF NOT EXISTS release_sources (
+    release_id INTEGER NOT NULL,
+    source_type TEXT NOT NULL,
+    source_key TEXT NOT NULL DEFAULT '',
+    added_at REAL NOT NULL,
+    PRIMARY KEY (release_id, source_type, source_key),
+    FOREIGN KEY (release_id) REFERENCES releases(release_id)
+);
+CREATE INDEX IF NOT EXISTS idx_release_sources_type_key ON release_sources(source_type, source_key);
+
+-- Format name/description tokens (e.g. "Vinyl", "12\"", "Album") ever seen on a scanned
+-- release. Discogs exposes no API endpoint or dataset enumerating its format vocabulary
+-- (unlike genres/styles — see discogs_taxonomy.py), so the Add-source page's Format
+-- picklist is instead grown organically from real scan results (`scan_engine`).
+CREATE TABLE IF NOT EXISTS known_formats (
+    name TEXT PRIMARY KEY
+);
 """
+
+DEFAULT_SOURCE_TYPE = "collection"
+DEFAULT_SOURCE_KEY = ""
 
 
 def _migrate_matches_table(conn: sqlite3.Connection) -> None:
@@ -226,6 +272,36 @@ def _migrate_playlists_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE playlists ADD COLUMN pushed_at REAL")
     if "folder_id" not in cols:
         conn.execute("ALTER TABLE playlists ADD COLUMN folder_id INTEGER REFERENCES playlist_folders(id)")
+    if "source_type" not in cols:
+        conn.execute("ALTER TABLE playlists ADD COLUMN source_type TEXT NOT NULL DEFAULT 'collection'")
+    if "source_key" not in cols:
+        conn.execute("ALTER TABLE playlists ADD COLUMN source_key TEXT NOT NULL DEFAULT ''")
+    conn.commit()
+
+
+def _migrate_other_sources_table(conn: sqlite3.Connection) -> None:
+    """One-time upgrade for `other_sources` rows created before `filter_json` existed."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(other_sources)")}
+    if not cols:
+        return
+    if "filter_json" not in cols:
+        conn.execute("ALTER TABLE other_sources ADD COLUMN filter_json TEXT NOT NULL DEFAULT '{}'")
+    conn.commit()
+
+
+def _migrate_release_sources_backfill(conn: sqlite3.Connection) -> None:
+    """Tag every pre-existing release as collection-sourced.
+
+    Before this feature, the only scan path was the user's own collection — so a release
+    with no `release_sources` row yet (an upgrade from an older cache) belongs there, not
+    nowhere. Additive and idempotent: only inserts for releases missing every source tag.
+    """
+    conn.execute(
+        """INSERT OR IGNORE INTO release_sources (release_id, source_type, source_key, added_at)
+           SELECT release_id, ?, ?, ? FROM releases
+           WHERE release_id NOT IN (SELECT release_id FROM release_sources)""",
+        (DEFAULT_SOURCE_TYPE, DEFAULT_SOURCE_KEY, time.time()),
+    )
     conn.commit()
 
 
@@ -240,6 +316,8 @@ def connect() -> Iterator[sqlite3.Connection]:
     _migrate_releases_table(conn)
     _migrate_playlists_to_playlist_defs(conn)
     _migrate_playlists_table(conn)
+    _migrate_other_sources_table(conn)
+    _migrate_release_sources_backfill(conn)
     try:
         yield conn
         conn.commit()
@@ -252,6 +330,65 @@ def match_key(artist: str, title: str) -> str:
     return f"{artist.strip().lower()}||{title.strip().lower()}"
 
 
+def record_release_source(conn: sqlite3.Connection, release_id: int, source_type: str, source_key: str) -> None:
+    """Tag a release as belonging to a given source (many-to-many — see `release_sources`).
+
+    A no-op if the release is already tagged with this exact (source_type, source_key).
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO release_sources (release_id, source_type, source_key, added_at) VALUES (?, ?, ?, ?)",
+        (release_id, source_type, source_key, time.time()),
+    )
+
+
+def prune_release_source_tags(
+    conn: sqlite3.Connection, source_type: str, source_key: str, keep_release_ids: set[int]
+) -> int:
+    """Untag every release currently linked to this source whose id isn't in `keep_release_ids`.
+
+    Used after re-scanning a *filtered* Other-source (see `scan_engine.ImportFilter`) to
+    keep the source's tags an exact reflection of "what currently matches the filter" —
+    a release that no longer matches (or was removed upstream) stops showing up under this
+    source, without touching its cached `releases`/`tracks`/`matches` rows (it may still be
+    tagged under another source, or referenced by a playlist). Never called for an
+    unfiltered scan (the collection/wantlist/label default), which has never pruned stale
+    releases and shouldn't start now.
+
+    Returns:
+        How many release_sources tags were removed.
+    """
+    existing_ids = {
+        row[0]
+        for row in conn.execute(
+            "SELECT release_id FROM release_sources WHERE source_type = ? AND source_key = ?",
+            (source_type, source_key),
+        )
+    }
+    stale_ids = existing_ids - keep_release_ids
+    if stale_ids:
+        conn.executemany(
+            "DELETE FROM release_sources WHERE release_id = ? AND source_type = ? AND source_key = ?",
+            [(rid, source_type, source_key) for rid in stale_ids],
+        )
+    return len(stale_ids)
+
+
+def record_known_formats(conn: sqlite3.Connection, names: Iterable[str]) -> None:
+    """Remember format name/description tokens seen on a scanned release (e.g. "Vinyl",
+    "12\"", "Album"), growing the Add-source page's Format picklist organically — see
+    `known_formats`'s schema comment for why this exists instead of a static list.
+    """
+    conn.executemany(
+        "INSERT OR IGNORE INTO known_formats (name) VALUES (?)",
+        [(n.strip(),) for n in names if n and n.strip()],
+    )
+
+
+def list_known_formats(conn: sqlite3.Connection) -> list[str]:
+    """Every format name/description token seen so far across any scan, sorted."""
+    return [row[0] for row in conn.execute("SELECT name FROM known_formats ORDER BY name")]
+
+
 def upsert_release(
     conn: sqlite3.Connection,
     release_id: int,
@@ -262,8 +399,10 @@ def upsert_release(
     year: int | None = None,
     labels: list[str] | None = None,
     videos: list[dict] | None = None,
+    source_type: str = DEFAULT_SOURCE_TYPE,
+    source_key: str = DEFAULT_SOURCE_KEY,
 ) -> None:
-    """Insert or refresh a release's Discogs-sourced fields.
+    """Insert or refresh a release's Discogs-sourced fields, and tag it with the given source.
 
     `videos` is Discogs' own embedded YouTube links for the release (each a
     dict with "uri"/"title"/"duration"), used by the sync matcher before it
@@ -271,6 +410,13 @@ def upsert_release(
     whatever's already cached untouched — `scan`'s basic-collection pass calls
     this for every release on every run, but only the (rarer) full tracklist
     fetch actually has fresh video data to offer.
+
+    `source_type`/`source_key` record which Discogs source this release was scanned from
+    (see `release_sources`) — defaults to "my own collection", so every existing call site
+    (a plain collection scan) keeps tagging releases exactly as before. Scanning a label
+    catalogue, another user's collection, or a wantlist passes its own source_type/key;
+    the tag is additive (`record_release_source`), so a release already known from one
+    source doesn't lose that tag by also turning up in another.
 
     Deliberately does not touch artist_override/title_override/styles_override/
     genres_override — a re-scan (e.g. `scan --refresh`) must not wipe out manual
@@ -298,6 +444,7 @@ def upsert_release(
             videos_json,
         ),
     )
+    record_release_source(conn, release_id, source_type, source_key)
 
 
 def set_release_artist_override(conn: sqlite3.Connection, release_id: int, artist: str | None) -> None:
@@ -553,14 +700,23 @@ def get_release(conn: sqlite3.Connection, release_id: int) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM releases WHERE release_id = ?", (release_id,)).fetchone()
 
 
-def create_playlist(conn: sqlite3.Connection, name: str) -> int:
-    """Create a new, empty curated playlist.
+def create_playlist(
+    conn: sqlite3.Connection, name: str, source_type: str = DEFAULT_SOURCE_TYPE, source_key: str = DEFAULT_SOURCE_KEY
+) -> int:
+    """Create a new, empty curated playlist, tagged with the Discogs source it's built from.
+
+    A playlist may only ever hold tracks from this one source (see `add_tracks_to_playlist`)
+    — `source_type`/`source_key` default to "my own collection", matching every playlist
+    created before this concept existed.
 
     Raises:
         sqlite3.IntegrityError: if the name is already taken.
     """
     now = time.time()
-    conn.execute("INSERT INTO playlists (name, created_at, updated_at) VALUES (?, ?, ?)", (name, now, now))
+    conn.execute(
+        "INSERT INTO playlists (name, source_type, source_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (name, source_type, source_key, now, now),
+    )
     return conn.execute("SELECT id FROM playlists WHERE name = ?", (name,)).fetchone()[0]
 
 
@@ -576,14 +732,25 @@ def get_playlist_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | N
     return conn.execute("SELECT * FROM playlists WHERE name = ?", (name,)).fetchone()
 
 
-def list_playlists(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every curated playlist with its track count, ordered by name."""
+def list_playlists(
+    conn: sqlite3.Connection, source_type: str | None = None, source_key: str | None = None
+) -> list[sqlite3.Row]:
+    """Curated playlists with their track count, ordered by name.
+
+    Pass `source_type`/`source_key` to narrow to playlists built from that one Discogs
+    source (used by the add-to-playlist picker, so a different source's playlists never
+    even appear as a target — see `add_tracks_to_playlist`). Omit both (the sidebar's use)
+    to list every playlist regardless of source.
+    """
     conn.row_factory = sqlite3.Row
-    return conn.execute(
-        """SELECT p.*, COUNT(pt.track_id) AS track_count
-           FROM playlists p LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
-           GROUP BY p.id ORDER BY p.name"""
-    ).fetchall()
+    query = """SELECT p.*, COUNT(pt.track_id) AS track_count
+               FROM playlists p LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id"""
+    params: tuple[str, ...] = ()
+    if source_type is not None:
+        query += " WHERE p.source_type = ? AND p.source_key = ?"
+        params = (source_type, source_key or "")
+    query += " GROUP BY p.id ORDER BY p.name"
+    return conn.execute(query, params).fetchall()
 
 
 def delete_playlist(conn: sqlite3.Connection, playlist_id: int) -> None:
@@ -613,6 +780,83 @@ def set_playlist_pushed_at(conn: sqlite3.Connection, playlist_id: int) -> None:
     `updated_at` (content edits only).
     """
     conn.execute("UPDATE playlists SET pushed_at = ? WHERE id = ?", (time.time(), playlist_id))
+
+
+def add_other_source(
+    conn: sqlite3.Connection,
+    source_type: str,
+    source_key: str,
+    display_name: str,
+    filter_json: dict | None = None,
+) -> int:
+    """Register a new "Other sources" sidebar page, or return the existing one's id.
+
+    `filter_json` is the source's pre-import Style/Format/Year filter (see
+    `scan_engine.ImportFilter`), applied on every scan so only matching releases are ever
+    imported under this source; omit/`None` for "import everything".
+
+    Idempotent (`ON CONFLICT ... DO NOTHING`) so the "add source" UI flow can call this
+    unconditionally for a pasted link — pasting the same link twice just navigates back
+    to the same page instead of erroring or renaming/re-filtering it.
+    """
+    conn.execute(
+        """INSERT INTO other_sources (source_type, source_key, display_name, filter_json, created_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(source_type, source_key) DO NOTHING""",
+        (source_type, source_key, display_name, json.dumps(filter_json or {}), time.time()),
+    )
+    return conn.execute(
+        "SELECT id FROM other_sources WHERE source_type = ? AND source_key = ?", (source_type, source_key)
+    ).fetchone()[0]
+
+
+def update_other_source_filter(conn: sqlite3.Connection, source_id: int, filter_json: dict) -> None:
+    """Replace an existing "Other sources" page's pre-import filter in place.
+
+    Lets a user revisit the Add-source page for a link they already added and change its
+    Style/Format/Year pre-filter — without this, once a source exists, pasting its link
+    again could only navigate to it, never change what it was set up to import.
+    """
+    conn.execute("UPDATE other_sources SET filter_json = ? WHERE id = ?", (json.dumps(filter_json), source_id))
+
+
+def list_other_sources(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every registered "Other sources" page, ordered by display name."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM other_sources ORDER BY display_name").fetchall()
+
+
+def get_other_source(conn: sqlite3.Connection, source_id: int) -> sqlite3.Row | None:
+    """Look up an "Other sources" page by its id."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM other_sources WHERE id = ?", (source_id,)).fetchone()
+
+
+def get_other_source_by_key(conn: sqlite3.Connection, source_type: str, source_key: str) -> sqlite3.Row | None:
+    """Look up an "Other sources" page by its (source_type, source_key) — used to display
+    a playlist's origin without needing to know the page's surrogate id."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute(
+        "SELECT * FROM other_sources WHERE source_type = ? AND source_key = ?", (source_type, source_key)
+    ).fetchone()
+
+
+def delete_other_source(conn: sqlite3.Connection, source_id: int) -> None:
+    """Remove an "Other sources" page and forget which releases came from it.
+
+    Leaves `releases`/`tracks`/`matches` rows untouched (same spirit as `delete_playlist`
+    not touching track rows) — a release also tagged under another source, or referenced
+    by a playlist, stays intact; one that was only ever tagged under this source simply
+    stops appearing anywhere.
+    """
+    row = get_other_source(conn, source_id)
+    if row is None:
+        return
+    conn.execute(
+        "DELETE FROM release_sources WHERE source_type = ? AND source_key = ?",
+        (row["source_type"], row["source_key"]),
+    )
+    conn.execute("DELETE FROM other_sources WHERE id = ?", (source_id,))
 
 
 def create_playlist_folder(conn: sqlite3.Connection, name: str) -> int:
@@ -685,12 +929,33 @@ def list_playlist_track_ids(conn: sqlite3.Connection, playlist_id: int) -> list[
     ]
 
 
+def _track_belongs_to_source(conn: sqlite3.Connection, track_id: int, source_type: str, source_key: str) -> bool:
+    row = conn.execute(
+        """SELECT 1 FROM tracks t JOIN release_sources rs ON rs.release_id = t.release_id
+           WHERE t.id = ? AND rs.source_type = ? AND rs.source_key = ? LIMIT 1""",
+        (track_id, source_type, source_key),
+    ).fetchone()
+    return row is not None
+
+
 def add_tracks_to_playlist(conn: sqlite3.Connection, playlist_id: int, track_ids: list[int]) -> int:
     """Append tracks to the end of a playlist, in order, skipping any already present.
 
+    Silently drops any track whose release doesn't belong to this playlist's own Discogs
+    source (`playlists.source_type`/`source_key`) — a playlist may only ever mix tracks
+    from the one source it was created under. The UI never offers a cross-source track as
+    a candidate in the first place (see `list_playlists`'s source filter); this is a
+    store-level safety net against any other caller, in the same spirit as the
+    manual-correction "locking" invariant documented in CLAUDE.md.
+
     Returns:
-        How many tracks were actually added.
+        How many tracks were actually added (excludes any dropped for a source mismatch).
     """
+    playlist = get_playlist(conn, playlist_id)
+    assert playlist is not None  # caller must pass a real playlist id
+    track_ids = [
+        tid for tid in track_ids if _track_belongs_to_source(conn, tid, playlist["source_type"], playlist["source_key"])
+    ]
     existing = {
         row[0] for row in conn.execute("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,))
     }
@@ -790,10 +1055,23 @@ def effective_track_queries(release: sqlite3.Row, tracks: Sequence[sqlite3.Row])
 
 def iter_releases_with_tracks(
     conn: sqlite3.Connection,
+    source_type: str = DEFAULT_SOURCE_TYPE,
+    source_key: str = DEFAULT_SOURCE_KEY,
 ) -> Iterator[tuple[sqlite3.Row, list[sqlite3.Row]]]:
-    """Yield (release_row, [track_rows]) for everything cached."""
+    """Yield (release_row, [track_rows]) for every release tagged under the given source.
+
+    Defaults to "my own collection", matching every call site that existed before the
+    "Other sources" feature — pass a different source_type/source_key (an other_sources
+    row's own) to browse a label/wantlist/other user's collection instead.
+    """
     conn.row_factory = sqlite3.Row
-    releases = conn.execute("SELECT * FROM releases").fetchall()
+    releases = conn.execute(
+        """SELECT r.* FROM releases r
+           JOIN release_sources rs ON rs.release_id = r.release_id
+           WHERE rs.source_type = ? AND rs.source_key = ?
+           ORDER BY r.release_id""",
+        (source_type, source_key),
+    ).fetchall()
     for r in releases:
         tracks = conn.execute("SELECT * FROM tracks WHERE release_id = ? ORDER BY id", (r["release_id"],)).fetchall()
         yield r, tracks

@@ -14,7 +14,8 @@ Runs entirely locally as a CLI, with an optional browsable/editable Streamlit UI
 ## Roadmap
 
 - [ ] Filter the Collection tab by channel (favorite a group of channels).
-- [ ] Wantlist tab.
+- [x] Wantlist tab — superseded by the broader "Other sources" sidebar section, which also
+      covers another user's collection and a label's catalogue.
 - [ ] A dedicated filter for low-confidence matches.
 
 ## Setup

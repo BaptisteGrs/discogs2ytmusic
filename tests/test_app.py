@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +15,12 @@ APP_PATH = str(Path(__file__).resolve().parents[1] / "src" / "discogs2ytmusic" /
 def _select_playlist(at: AppTest, playlist_id: int) -> AppTest:
     """Click the sidebar nav button for `playlist_id`, making it the active main-pane view."""
     return at.button(key=f"nav_playlist_{playlist_id}").click().run()
+
+
+def _open_other_source(at: AppTest, source_id: int) -> AppTest:
+    """Click the sidebar nav button for an "Other sources" page, making it the active
+    main-pane view."""
+    return at.button(key=f"nav_othersrc_{source_id}").click().run()
 
 
 def _dataframe_by_prefix(at: AppTest, prefix: str) -> pd.DataFrame:
@@ -893,6 +901,38 @@ def test_scan_button_populates_the_cache_from_discogs(isolated_cache, fake_disco
         releases = list(store.iter_releases_with_tracks(conn))
     assert len(releases) == 15
     assert sum(len(tracks) for _release, tracks in releases) == 18
+
+
+def test_scan_button_skips_a_release_discogs_cant_return_instead_of_aborting(
+    isolated_cache, fake_discogs_client, monkeypatch
+):
+    """A release detail fetch can 404 (e.g. a wantlist item merged into another release id,
+    or pulled from Discogs entirely) — that must not abort the whole scan and strand every
+    release already committed before it, only skip that one."""
+    from discogs2ytmusic.discogs import DiscogsError
+
+    poisoned_id = fake_discogs_client._releases[2]["release_id"]
+    real_get_release_detail = fake_discogs_client.get_release_detail
+
+    def flaky_get_release_detail(release_id: int):
+        if release_id == poisoned_id:
+            raise DiscogsError(f"Discogs API error 404 for /releases/{release_id}: not found")
+        return real_get_release_detail(release_id)
+
+    monkeypatch.setattr(fake_discogs_client, "get_release_detail", flaky_get_release_detail)
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="scan_button").click().run()
+
+    # `_run_scan`'s own st.warning/st.success calls don't survive its immediate
+    # `st.rerun()` on success (same as every other scan_button test here, which likewise
+    # only assert on the resulting cache state) — so assert on what was actually persisted.
+    assert not at.exception
+    with store.connect() as conn:
+        releases = list(store.iter_releases_with_tracks(conn))
+    assert len(releases) == 14  # every release except the poisoned one
+    assert poisoned_id not in {r["release_id"] for r, _tracks in releases}
 
 
 def test_scan_button_never_clobbers_a_manual_artist_override(isolated_cache, fake_discogs_client, monkeypatch):
@@ -2220,3 +2260,396 @@ def test_ytmusic_page_saves_a_custom_playlist_name_prefix(isolated_cache):
 
     assert not at.exception
     assert Config.load().playlist_name_prefix == "My Vinyl"
+
+
+# --- Other sources (issue #13) ---
+
+
+def test_collapsing_other_sources_hides_its_entries(isolated_cache):
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_other_sources_toggle").click().run()
+
+    assert not at.exception
+    assert not any(b.key == f"nav_othersrc_{source_id}" for b in at.button)
+    assert not any(b.key == "nav_add_source_page" for b in at.button)
+
+
+def test_add_source_page_links_to_discogs(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+
+    assert not at.exception
+    assert any("discogs.com" in m.value for m in at.main.markdown)
+
+
+def test_add_source_year_field_is_a_range_slider(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/label/999-Some-Label").run()
+
+    assert not at.exception
+    current_year = datetime.date.today().year
+    assert at.slider(key="add_source_year_range").value == (1960, current_year)
+
+
+def test_add_source_year_prefilter_only_imports_releases_in_range(
+    isolated_cache, fake_discogs_client, dummy_library, monkeypatch
+):
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+    expected_ids = {r["release_id"] for r in dummy_library if 2020 <= r["year"] <= 2025}
+    assert expected_ids
+    assert len(expected_ids) < len(dummy_library)  # sanity: the range actually narrows something
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/label/999-Some-Label").run()
+    at.slider(key="add_source_year_range").set_range(2020, 2025).run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    at.button(key="scan_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        imported_ids = {r["release_id"] for r, _t in store.iter_releases_with_tracks(conn, "label", "999")}
+    assert imported_ids == expected_ids
+
+
+def test_add_source_style_prefilter_only_imports_matching_releases(
+    isolated_cache, fake_discogs_client, dummy_library, monkeypatch
+):
+    """Point 3: pre-filtering a source by Style before it's ever scanned should mean a
+    non-matching release never gets imported under that source at all."""
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+    expected_ids = {r["release_id"] for r in dummy_library if "Acid" in r["styles"]}
+    assert expected_ids  # sanity: the fixture actually has at least one Acid release
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/label/999-Some-Label").run()
+    at.multiselect(key="add_source_styles").select("Acid").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    at.button(key="scan_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        imported_ids = {r["release_id"] for r, _t in store.iter_releases_with_tracks(conn, "label", "999")}
+    assert imported_ids == expected_ids
+
+
+def test_add_source_format_field_shows_empty_state_before_anything_is_scanned(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/label/999-Some-Label").run()
+
+    assert not at.exception
+    assert at.multiselect(key="add_source_formats").options == []
+    assert any("No formats seen yet" in c.value for c in at.main.caption)
+
+
+def test_add_source_format_field_is_populated_from_previously_scanned_releases(isolated_cache):
+    with store.connect() as conn:
+        store.record_known_formats(conn, ["Vinyl", '12"', "Album"])
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/label/999-Some-Label").run()
+
+    assert not at.exception
+    assert at.multiselect(key="add_source_formats").options == ['12"', "Album", "Vinyl"]
+
+
+def test_other_sources_section_renders_added_sources_and_navigates_to_them(isolated_cache):
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label")
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    assert at.button(key=f"nav_othersrc_{source_id}")
+
+    at = _open_other_source(at, source_id)
+
+    assert not at.exception
+    assert any("Some Label" in h.value for h in at.main.header)
+
+
+def test_other_source_page_links_back_to_the_discogs_page_it_was_imported_from(isolated_cache):
+    with store.connect() as conn:
+        label_id = store.add_other_source(conn, "label", "123", "Some Label")
+        wantlist_id = store.add_other_source(conn, "wantlist", "alice", "alice's wantlist")
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    at_label = _open_other_source(at, label_id)
+    assert not at_label.exception
+    assert any("discogs.com/label/123" in m.value for m in at_label.main.markdown)
+
+    at_wantlist = _open_other_source(AppTest.from_file(APP_PATH).run(), wantlist_id)
+    assert not at_wantlist.exception
+    assert any("discogs.com/user/alice/wantlist" in m.value for m in at_wantlist.main.markdown)
+
+
+def test_adding_a_source_via_a_pasted_label_url_creates_and_opens_a_page(
+    isolated_cache, fake_discogs_client, monkeypatch
+):
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/label/123-Some-Label").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        sources = store.list_other_sources(conn)
+    assert len(sources) == 1
+    assert sources[0]["source_type"] == "label"
+    assert sources[0]["source_key"] == "123"
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == sources[0]["id"]
+
+
+def test_adding_a_source_via_a_pasted_seller_url_creates_and_opens_a_page(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/fr/seller/adamlee1995/profile").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        sources = store.list_other_sources(conn)
+    assert len(sources) == 1
+    assert sources[0]["source_type"] == "seller"
+    assert sources[0]["source_key"] == "adamlee1995"
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == sources[0]["id"]
+
+
+def test_adding_a_source_via_the_my_wantlist_url_resolves_to_the_authenticated_username(
+    isolated_cache, fake_discogs_client, monkeypatch
+):
+    """`/mywantlist` has no username in it — it must resolve to the locally authenticated
+    Discogs username instead of being rejected as unrecognized."""
+    _mock_discogs_client(monkeypatch, fake_discogs_client, username="dummyuser")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/fr/mywantlist").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        sources = store.list_other_sources(conn)
+    assert len(sources) == 1
+    assert sources[0]["source_type"] == "wantlist"
+    assert sources[0]["source_key"] == "dummyuser"
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == sources[0]["id"]
+
+
+def test_adding_a_source_via_the_my_wantlist_url_without_credentials_shows_an_error(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/mywantlist").run()
+
+    assert not at.exception
+    assert any("Not authenticated with Discogs" in e.value for e in at.error)
+    with store.connect() as conn:
+        assert store.list_other_sources(conn) == []
+
+
+def test_adding_a_source_with_an_unrecognized_url_shows_an_error_and_creates_nothing(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("not a discogs url").run()
+
+    assert not at.exception
+    assert any("Paste a Discogs" in e.value for e in at.error)
+    with store.connect() as conn:
+        assert store.list_other_sources(conn) == []
+
+
+def test_pasting_an_already_added_source_link_warns_but_still_shows_the_filter_form(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/user/alice/wantlist").run()
+    at.button(key="add_source_submit").click().run()
+
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/user/alice/wantlist").run()
+
+    assert not at.exception
+    assert any("already added this source" in w.value for w in at.main.warning)
+    assert any(m.key == "add_source_styles" for m in at.multiselect)  # pre-filter form is still editable
+    assert at.button(key="add_source_submit").label == "Update source"
+    with store.connect() as conn:
+        assert len(store.list_other_sources(conn)) == 1
+
+
+def test_updating_the_pre_filter_on_an_already_added_source_replaces_it_without_duplicating(isolated_cache):
+    """Point 2: pasting a link that's already registered must still let its pre-filter be
+    changed — confirming replaces the existing page's filter in place, it doesn't create
+    a second page for the same source."""
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "wantlist", "alice", "alice's wantlist", {"styles": ["House"]})
+
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/user/alice/wantlist").run()
+
+    assert at.multiselect(key="add_source_styles").value == ["House"]  # prefilled from the existing filter
+
+    at.multiselect(key="add_source_styles").select("Techno").run()
+    at.button(key="add_source_submit").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == source_id
+    with store.connect() as conn:
+        sources = store.list_other_sources(conn)
+        assert len(sources) == 1
+        assert json.loads(sources[0]["filter_json"])["styles"] == ["House", "Techno"]
+
+
+def test_confirming_the_existing_source_warning_navigates_without_creating_a_duplicate(isolated_cache):
+    at = AppTest.from_file(APP_PATH).run()
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/user/alice/wantlist").run()
+    at.button(key="add_source_submit").click().run()
+    with store.connect() as conn:
+        source_id = store.get_other_source_by_key(conn, "wantlist", "alice")["id"]
+
+    at.button(key="nav_add_source_page").click().run()
+    at.text_input(key="add_source_url").input("https://www.discogs.com/user/alice/wantlist").run()
+    at.button(key="add_source_go_to_existing").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "other_source"
+    assert at.session_state["nav_other_source_id"] == source_id
+    with store.connect() as conn:
+        assert len(store.list_other_sources(conn)) == 1
+
+
+def test_collection_tab_never_shows_a_different_sources_releases(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.upsert_release(
+            conn, 999999, "Label Artist", "Label Only Title", [], [], source_type="label", source_key="123"
+        )
+        store.replace_tracks(conn, 999999, [("A1", "Label Only Track", None, None)])
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    df = _collection_table_df(at)
+    assert "Label Only Track" not in set(df["track_title"])
+
+
+def test_other_source_page_scan_populates_only_that_sources_tracks(isolated_cache, fake_discogs_client, monkeypatch):
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_other_source(at, source_id)
+    at.button(key="scan_button").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        collection_releases = list(store.iter_releases_with_tracks(conn))
+        label_releases = list(store.iter_releases_with_tracks(conn, source_type="label", source_key="123"))
+    assert collection_releases == []
+    assert len(label_releases) == len(fake_discogs_client._releases)
+
+
+def test_playlist_created_from_an_other_source_page_is_never_offered_on_the_collection_tab(
+    isolated_cache, dummy_library
+):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)  # gives the Collection tab some tracks too
+        store.add_other_source(conn, "label", "123", "Some Label")
+        store.upsert_release(conn, 1, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+        store.replace_tracks(conn, 1, [("A1", "Label Track", None, None)])
+        source = store.get_other_source_by_key(conn, "label", "123")
+    source_id = source["id"]
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_other_source(at, source_id)
+    table_key = _dataframe_key_by_prefix(at, f"othersrc_{source_id}_table_")
+    at = _select_table_rows(at, table_key, [0])
+
+    at.selectbox(key=f"othersrc_{source_id}_add_target").select("+ Create new playlist")
+    at.text_input(key=f"othersrc_{source_id}_new_playlist_name").input("Label Picks")
+    at.button(key=f"othersrc_{source_id}_add_button").click()
+    at.session_state[table_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+    at.run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        playlist = store.get_playlist_by_name(conn, "Label Picks")
+    assert playlist["source_type"] == "label"
+    assert playlist["source_key"] == "123"
+
+    at = at.button(key="nav_collection").click().run()
+    collection_table_key = _collection_table_key(at)
+    at = _select_table_rows(at, collection_table_key, [0])
+
+    assert "Label Picks" not in at.selectbox(key="collection_add_target").options
+
+
+def test_playlist_survives_switching_the_active_source(isolated_cache, dummy_library):
+    """Issue #13's own regression requirement: a playlist built from one source keeps
+    resolving correctly regardless of which source page is currently being viewed."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)  # source A: "my own collection"
+        store.add_other_source(conn, "label", "123", "Some Label")
+        store.upsert_release(conn, 999999, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+        store.replace_tracks(conn, 999999, [("A1", "Label Track", None, None)])
+
+        track_id = conn.execute(
+            "SELECT id FROM tracks WHERE release_id = ?", (dummy_library[0]["release_id"],)
+        ).fetchone()[0]
+        playlist_id = store.create_playlist(conn, "From Collection")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    with store.connect() as conn:
+        source_b = store.get_other_source_by_key(conn, "label", "123")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_other_source(at, source_b["id"])  # switch the active view to source B
+    at = _select_playlist(at, playlist_id)  # then open the playlist built from source A
+
+    assert not at.exception
+    with store.connect() as conn:
+        rows = filters.resolve_playlist_rows(conn, playlist_id)
+    assert len(rows) == 1
+    assert rows[0].track_id == track_id
+
+
+def test_removing_an_other_source_shows_a_confirmation_then_navigates_back_to_collection(isolated_cache):
+    with store.connect() as conn:
+        source_id = store.add_other_source(conn, "label", "123", "Some Label")
+        store.upsert_release(conn, 1, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_other_source(at, source_id)
+    at.button(key=f"remove_othersrc_{source_id}").click().run()
+
+    assert not at.exception
+    assert any("removes the page" in w.value for w in at.main.warning)
+    with store.connect() as conn:
+        assert store.get_other_source(conn, source_id) is not None  # not deleted yet — only warned
+
+    at.button(key=f"confirm_remove_othersrc_yes_{source_id}").click().run()
+
+    assert not at.exception
+    assert at.session_state["nav_kind"] == "collection"
+    with store.connect() as conn:
+        assert store.get_other_source(conn, source_id) is None
+        assert store.get_release(conn, 1) is not None  # cached release itself is untouched

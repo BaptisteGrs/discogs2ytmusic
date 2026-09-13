@@ -171,10 +171,20 @@ def scan(
         progress.update(task, total=len(basics), completed=len(basics))
 
         task2 = progress.add_task("Fetching tracklists...", total=len(basics))
+        failed = 0
         for item in basics:
-            scan_engine.scan_release(conn, client, item, refresh)
+            try:
+                scan_engine.scan_release(conn, client, item, refresh)
+            except DiscogsError as e:
+                # A release Discogs can't return anymore (404) — merged into another release
+                # id, or pulled from the database entirely. Skip it rather than aborting the
+                # whole scan and losing every release already committed before it.
+                failed += 1
+                console.print(f"[yellow]Skipping a release Discogs couldn't return: {e}[/yellow]")
             progress.advance(task2)
 
+    if failed:
+        console.print(f"[yellow]Skipped {failed} release(s) Discogs couldn't return.[/yellow]")
     _print_style_breakdown()
 
 

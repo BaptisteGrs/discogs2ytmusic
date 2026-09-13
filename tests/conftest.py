@@ -38,6 +38,18 @@ class FakeDiscogsClient:
                 }
             }
 
+    def iter_wantlist_basic(self, username: str):
+        """Same item shape as `iter_collection_basic` — stands in for a wantlist in tests."""
+        yield from self.iter_collection_basic(username)
+
+    def iter_label_releases(self, label_id: int):
+        """Flat items (no `basic_information`) — stands in for a label catalogue in tests."""
+        for r in self._releases:
+            yield {"id": r["release_id"], "title": r["title"], "artist": r["artist"], "year": r.get("year")}
+
+    def get_label(self, label_id: int) -> dict:
+        return {"id": label_id, "name": f"Label {label_id}"}
+
     def get_release_detail(self, release_id: int) -> ReleaseDetail:
         for r in self._releases:
             if r["release_id"] == release_id:
@@ -54,7 +66,16 @@ class FakeDiscogsClient:
                     DiscogsVideo(uri=v["uri"], title=v["title"], duration=v.get("duration"))
                     for v in r.get("videos", [])
                 ]
-                return ReleaseDetail(tracklist=tracklist, videos=videos)
+                return ReleaseDetail(
+                    tracklist=tracklist,
+                    videos=videos,
+                    artists=[r["artist"]],
+                    title=r["title"],
+                    styles=r["styles"],
+                    genres=r["genres"],
+                    year=r.get("year"),
+                    labels=r.get("labels", []),
+                )
         return ReleaseDetail(tracklist=[], videos=[])
 
 
