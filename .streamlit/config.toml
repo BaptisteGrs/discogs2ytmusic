@@ -1,8 +1,13 @@
+[server]
+enableStaticServing = true
+
 [theme]
 base = "light"
-primaryColor = "#CC785C"
-backgroundColor = "#FAF9F5"
-secondaryBackgroundColor = "#F0EEE6"
-textColor = "#1F1E1D"
-borderColor = "#E5E2D9"
-font = "sans-serif"
+baseFontSize = 17
+primaryColor = "#84BCFC"
+backgroundColor = "#F4F1E4"
+secondaryBackgroundColor = "#EAE4CE"
+textColor = "#20241F"
+borderColor = "#D9D0B0"
+font = "Source Sans 3:https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600&display=swap"
+headingFont = "Fraunces:https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap"

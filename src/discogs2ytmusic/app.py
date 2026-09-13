@@ -45,6 +45,22 @@ from discogs2ytmusic.filters import (
 
 st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 
+# `theme.font` in `.streamlit/config.toml` sets the CSS variable Streamlit's own body/widget
+# styles are supposed to read, but (as of streamlit 1.63) that variable never reaches plain
+# body text when a `theme.headingFont` source is also configured — headings pick up
+# `headingFont` correctly, everything else silently falls back to the browser default serif.
+# Setting it here directly is the reliable fix; drop this once upstream is fixed.
+st.markdown(
+    """
+    <style>
+    html, body, [data-testid="stAppViewContainer"] {
+        font-family: "Source Sans 3", sans-serif;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 COLLECTION_COLUMNS = [
     "release_title",
     "track_artist",
@@ -379,6 +395,7 @@ def _render_scan_button(source_type: str = "collection", source_key: str = "") -
         clicked = st.button(
             "Scan",
             key="scan_button",
+            type="primary",
             icon=":material/cloud_sync:",
             help="Re-fetch this source's releases and tracklists from Discogs",
         )
@@ -697,7 +714,7 @@ def _render_tag_group_filters(tag_options: list[str], key_prefix: str) -> tuple[
         if selected:
             tag_groups.append(TagGroup(tags=selected, mode=mode))
 
-    add_col, combinator_col = st.columns([1, 3])
+    add_col, combinator_col = st.columns([1.6, 2.4])
     with add_col:
         if st.button("+ Add style group", key=f"{key_prefix}_tag_group_add"):
             next_id_key = f"{key_prefix}_tag_group_next_id"
@@ -749,54 +766,61 @@ def _render_source_browser(
     corresponding Discogs page of its own), renders a link back to the exact Discogs page
     this source was imported from, right under the header.
     """
+    all_rows = _source_rows(source_type, source_key)
+
     st.markdown(_ACTION_PILL_CSS, unsafe_allow_html=True)
-    title_col, actions_col = st.columns([1, 1], vertical_alignment="center")
-    with title_col:
+    st.markdown(_HEADER_CSS, unsafe_allow_html=True)
+    with st.container(key="source_header"):
         st.header(header)
         if subtitle_link is not None:
             st.markdown(f"[View on Discogs ↗]({subtitle_link})")
-    with actions_col, st.container(horizontal=True, horizontal_alignment="right", gap="xxsmall"):
-        _render_scan_button(source_type, source_key)
-        _render_sync_matches_button(source_type, source_key)
-        if source_type == "collection":
-            _render_rematch_button()
-    if source_type == "collection" and st.session_state.get("confirm_rematch"):
-        _render_rematch_confirmation()
+        if all_rows:
+            release_count = len({r.release_id for r in all_rows})
+            matched_count = sum(1 for r in all_rows if r.matched)
+            st.caption(f"{release_count} releases · {len(all_rows)} tracks · {matched_count} matched")
+        with st.container(horizontal=True, gap="xxsmall"):
+            _render_scan_button(source_type, source_key)
+            _render_sync_matches_button(source_type, source_key)
+            if source_type == "collection":
+                _render_rematch_button()
+        if source_type == "collection" and st.session_state.get("confirm_rematch"):
+            _render_rematch_confirmation()
 
-    all_rows = _source_rows(source_type, source_key)
-    if not all_rows:
-        st.info(empty_message)
-        return
+        if not all_rows:
+            st.info(empty_message)
+            return
 
-    search = st.text_input(
-        "Search by artist, track title, or release title",
-        key=f"{key_prefix}_search",
-        placeholder="e.g. daft punk",
-    )
+        search = st.text_input(
+            "Search by artist, track title, or release title",
+            key=f"{key_prefix}_search",
+            placeholder="e.g. daft punk",
+        )
 
-    tag_options = _tag_options(all_rows)
-    label_options = _label_options(all_rows)
-    channel_options = _channel_options(all_rows)
-    year_lo, year_hi = _year_bounds(all_rows)
+        tag_options = _tag_options(all_rows)
+        label_options = _label_options(all_rows)
+        channel_options = _channel_options(all_rows)
+        year_lo, year_hi = _year_bounds(all_rows)
 
-    tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options, key_prefix)
+        tag_groups, tag_groups_mode = _render_tag_group_filters(tag_options, key_prefix)
 
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
-    with col1:
-        labels = st.multiselect("Label", label_options, key=f"{key_prefix}_labels")
-    with col2:
-        channels = st.multiselect("Channel", channel_options, key=f"{key_prefix}_channels")
-    with col3:
-        if year_lo < year_hi:
-            year_range = st.slider(
-                "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key=f"{key_prefix}_year"
+        col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.5])
+        with col1:
+            labels = st.multiselect("Label", label_options, key=f"{key_prefix}_labels")
+        with col2:
+            channels = st.multiselect("Channel", channel_options, key=f"{key_prefix}_channels")
+        with col3:
+            if year_lo < year_hi:
+                year_range = st.slider(
+                    "Year", min_value=year_lo, max_value=year_hi, value=(year_lo, year_hi), key=f"{key_prefix}_year"
+                )
+            else:
+                st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
+                year_range = (year_lo, year_hi)
+        with col4:
+            st.write("")  # vertical alignment with the widgets above
+            matched_only = st.checkbox(
+                "Matched", key=f"{key_prefix}_matched_only", help="Only show already-matched tracks"
             )
-        else:
-            st.write(f"Year: {year_lo}")  # a single distinct year — st.slider rejects min == max
-            year_range = (year_lo, year_hi)
-    with col4:
-        st.write("")  # vertical alignment with the widgets above
-        matched_only = st.checkbox("Matched only", key=f"{key_prefix}_matched_only")
 
     narrowed = bool(tag_groups or labels or channels or matched_only or year_range != (year_lo, year_hi))
     filt = (
@@ -1895,7 +1919,7 @@ _ACTION_PILL_CSS = """
     font-size: 0.85rem !important;
 }
 .st-key-delete_pill button {
-    border-color: #E5E2D9 !important;
+    border-color: #D9D0B0 !important;
     color: #AF3029 !important;
 }
 .st-key-delete_pill button:hover {
@@ -1963,7 +1987,7 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_other_sources_top button p,
 .st-key-nav_playlists button p,
 .st-key-nav_other_sources button p {
-    color: #1F1E1D;
+    color: #20241F;
     text-align: left !important;
 }
 .st-key-nav_top button p,
@@ -1993,13 +2017,13 @@ _SIDEBAR_NAV_CSS = """
 .st-key-nav_other_sources_top button:hover p,
 .st-key-nav_playlists button:hover p,
 .st-key-nav_other_sources button:hover p {
-    color: #CC785C;
+    color: #2F5D57;
 }
 [class*="st-key-nav_folder_playlists_"] {
     padding-left: 0.9rem;
 }
 .st-key-nav_selected button p {
-    color: #CC785C !important;
+    color: #2F5D57 !important;
     font-weight: 500 !important;
 }
 .st-key-nav_ytmusic {
@@ -2017,13 +2041,13 @@ _SIDEBAR_NAV_CSS = """
     justify-content: flex-start !important;
 }
 .st-key-nav_ytmusic button p {
-    color: #1F1E1D;
+    color: #20241F;
     text-align: left !important;
     font-weight: 600;
     font-size: 0.95rem;
 }
 .st-key-nav_ytmusic button:hover p {
-    color: #CC785C;
+    color: #2F5D57;
 }
 .yt-status-pill {
     display: inline-flex;
@@ -2050,15 +2074,99 @@ _SIDEBAR_NAV_CSS = """
     background: #3A8451;
 }
 .yt-status-pill.is-off {
-    background: #FFFFFF;
-    border: 1px solid #E5E2D9;
-    color: #87837A;
+    background: #FBF9EF;
+    border: 1px solid #D9D0B0;
+    color: #8A8570;
 }
 .yt-status-pill.is-off::before {
     background: transparent;
-    border: 1.4px solid #87837A;
+    border: 1.4px solid #8A8570;
     width: 4px;
     height: 4px;
+}
+.st-key-nav_top button::before,
+.st-key-nav_other_sources_top button::before,
+.st-key-nav_ytmusic button::before {
+    content: "";
+    display: inline-block;
+    width: 15px;
+    height: 15px;
+    margin-right: 6px;
+    vertical-align: -3px;
+    background-color: #6E7266;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-size: contain;
+    mask-size: contain;
+}
+.st-key-nav_collection button::before {
+    -webkit-mask-image: url("app/static/icons/collection.svg");
+    mask-image: url("app/static/icons/collection.svg");
+}
+.st-key-nav_playlists_toggle button::before {
+    -webkit-mask-image: url("app/static/icons/playlists.svg");
+    mask-image: url("app/static/icons/playlists.svg");
+}
+.st-key-nav_other_sources_toggle button::before {
+    -webkit-mask-image: url("app/static/icons/sources.svg");
+    mask-image: url("app/static/icons/sources.svg");
+}
+.st-key-nav_ytmusic button::before {
+    -webkit-mask-image: url("app/static/icons/ytmusic.svg");
+    mask-image: url("app/static/icons/ytmusic.svg");
+}
+.st-key-nav_top button:hover::before,
+.st-key-nav_other_sources_top button:hover::before,
+.st-key-nav_ytmusic button:hover::before {
+    background-color: #2F5D57;
+}
+.st-key-nav_selected button::before {
+    background-color: #2F5D57 !important;
+}
+</style>
+"""
+
+# Page-title styling (`st.header` calls only — see the docstring above `render_collection_tab`
+# for why this is scoped to `h2` rather than every heading level: `st.subheader` is used for
+# in-page section labels, not page titles, and shouldn't pick up this treatment) plus the
+# boombox artwork (`static/vectorstock_23584899.png`) as a decorative watermark next to the
+# whole title/subtitle/actions/filters block — recolored via `mask-image` (not shown at its
+# native blue) so it always renders in the fixed accent blue regardless of the rest of the
+# palette, and stretched to the block's own height (`top`/`bottom: 0` rather than a fixed
+# `height`) so it scales with however tall that block ends up being.
+_HEADER_CSS = """
+<style>
+h2 {
+    color: #1E5136 !important;
+}
+.st-key-source_header {
+    position: relative;
+    padding-right: 165px;
+}
+.st-key-source_header::before {
+    content: "";
+    position: absolute;
+    top: 0.15rem;
+    bottom: 0.15rem;
+    right: 20px;
+    width: 145px;
+    background-color: #84BCFC;
+    -webkit-mask: url("app/static/vectorstock_23584899.png") no-repeat center / contain;
+    mask: url("app/static/vectorstock_23584899.png") no-repeat center / contain;
+    opacity: 0.75;
+    pointer-events: none;
+}
+/* Tighten the header's own vertical rhythm (title/subtitle/actions/filters) so the
+   filter controls read as one compact block rather than a tall stack of full-height
+   widgets — labels stay at full size so nothing gets harder to read, just closer
+   together. */
+.st-key-source_header [data-testid="stVerticalBlock"] {
+    gap: 0.55rem;
+}
+.st-key-source_header [data-testid="stWidgetLabel"] {
+    margin-bottom: 0.1rem;
 }
 </style>
 """
