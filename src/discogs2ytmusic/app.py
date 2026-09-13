@@ -1069,7 +1069,7 @@ def _render_ytmusic_page() -> None:
             "Prefix",
             value=cfg.playlist_name_prefix,
             key="playlist_name_prefix_input",
-            help="Pushed playlists are named '<prefix> - <playlist name>'.",
+            help="Pushed playlists are named '<prefix> <playlist name>'.",
         )
         if st.button("Save prefix", key="playlist_name_prefix_save"):
             cfg.playlist_name_prefix = prefix
@@ -1262,7 +1262,7 @@ def _render_sync_confirmation(playlist: sqlite3.Row, rows: list[TrackRow]) -> No
     video_ids = [r.video_id for r in rows if r.video_id]
     confirm_key = f"confirm_sync_{playlist_id}"
     extra_confirm_key = f"confirm_sync_extra_{playlist_id}"
-    playlist_name = f"{Config.load().playlist_name_prefix} - {playlist['name']}"
+    playlist_name = f"{Config.load().playlist_name_prefix} {playlist['name']}"
     already_linked = bool(playlist["ytmusic_playlist_id"])
 
     st.warning(

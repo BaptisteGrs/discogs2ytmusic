@@ -1722,7 +1722,7 @@ def test_pushed_at_is_recorded_again_on_a_resync_of_an_already_linked_playlist(
 def test_confirming_sync_uses_the_configured_playlist_name_prefix(isolated_cache, dummy_library, monkeypatch):
     from discogs2ytmusic.config import Config
 
-    Config(playlist_name_prefix="My Vinyl").save()
+    Config(playlist_name_prefix="My Vinyl -").save()
 
     with store.connect() as conn:
         _seed(conn, dummy_library)
@@ -2163,7 +2163,7 @@ def test_clicking_the_ytmusic_nav_item_opens_the_dedicated_page(isolated_cache):
     assert at.text_input(key="ytmusic_auth_cookie_input")
     assert at.text_input(key="ytmusic_auth_authuser_input")
     assert at.button(key="ytmusic_auth_save")
-    assert at.text_input(key="playlist_name_prefix_input").value == "Discogs"
+    assert at.text_input(key="playlist_name_prefix_input").value == "Discogs -"
     assert at.button(key="playlist_name_prefix_save")
 
 

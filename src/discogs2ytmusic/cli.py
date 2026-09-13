@@ -102,7 +102,7 @@ def auth_ytmusic(
 def set_playlist_prefix(
     prefix: str = typer.Argument(..., help="Prefix used when naming playlists pushed to YT Music."),
 ) -> None:
-    """Set the prefix used when naming playlists pushed to YT Music (default: "Discogs").
+    """Set the prefix used when naming playlists pushed to YT Music (default: "Discogs -").
 
     Also available in the Streamlit app, on the YT Music connection page.
     """

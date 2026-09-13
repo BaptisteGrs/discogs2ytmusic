@@ -24,7 +24,7 @@ YTMUSIC_AUTH_FILE = CONFIG_DIR / "ytmusic_auth.json"
 CACHE_DB = CACHE_DIR / "cache.sqlite3"
 
 
-DEFAULT_PLAYLIST_NAME_PREFIX = "Discogs"
+DEFAULT_PLAYLIST_NAME_PREFIX = "Discogs -"
 
 
 @dataclass
