@@ -110,7 +110,7 @@ def test_app_lists_every_track_by_default(isolated_cache, dummy_library):
 
     assert not at.exception
     total_tracks = sum(len(r["tracklist"]) for r in dummy_library)
-    assert at.main.caption[0].value == f"{total_tracks} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{total_tracks} tracks (0 matched)"
 
 
 def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
@@ -122,7 +122,7 @@ def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
 
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "Acid" in r["styles"])
-    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{expected} tracks (0 matched)"
 
 
 def test_app_search_box_narrows_the_table_by_release_title(isolated_cache, dummy_library):
@@ -134,7 +134,7 @@ def test_app_search_box_narrows_the_table_by_release_title(isolated_cache, dummy
     at.text_input(key="collection_search").input("yoyaku").run()
 
     assert not at.exception
-    assert at.main.caption[0].value == f"{len(yoyaku_release['tracklist'])} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{len(yoyaku_release['tracklist'])} tracks (0 matched)"
 
 
 def test_app_search_box_matches_case_insensitively_and_combines_with_tag_filter(isolated_cache, dummy_library):
@@ -153,7 +153,7 @@ def test_app_search_box_matches_case_insensitively_and_combines_with_tag_filter(
     assert not at.exception
     # The search box and the structured Style filter should narrow together (AND), not
     # one overriding the other.
-    assert at.main.caption[0].value == f"{len(expected)} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{len(expected)} tracks (0 matched)"
     assert expected  # sanity: fixture actually produces a non-trivial combination, else this proves nothing
 
 
@@ -179,7 +179,7 @@ def test_select_all_checkbox_is_disabled_when_the_filter_matches_nothing(isolate
     at.checkbox(key="collection_matched_only").check().run()  # nothing matched yet -> zero rows
 
     assert not at.exception
-    assert at.main.caption[0].value == "0 tracks (0 matched)"
+    assert at.main.caption[1].value == "0 tracks (0 matched)"
     assert at.checkbox(key="collection_select_all").disabled is True
 
 
@@ -344,7 +344,7 @@ def test_app_tag_group_and_mode_requires_every_tag_in_the_group(isolated_cache, 
 
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "House" in r["styles"])
-    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{expected} tracks (0 matched)"
 
 
 def test_app_add_style_group_button_adds_a_second_independent_group(isolated_cache, dummy_library):
@@ -362,7 +362,7 @@ def test_app_add_style_group_button_adds_a_second_independent_group(isolated_cac
 
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if set(r["styles"]) & {"House", "Techno"})
-    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{expected} tracks (0 matched)"
 
 
 def test_app_combining_style_groups_with_and_requires_every_group_to_match(isolated_cache, dummy_library):
@@ -378,7 +378,7 @@ def test_app_combining_style_groups_with_and_requires_every_group_to_match(isola
     at.radio(key="collection_tag_groups_mode").set_value("and").run()
 
     assert not at.exception
-    assert at.main.caption[0].value == "0 tracks (0 matched)"
+    assert at.main.caption[1].value == "0 tracks (0 matched)"
 
 
 def test_app_removing_a_style_group_drops_its_tags_from_the_filter(isolated_cache, dummy_library):
@@ -393,7 +393,7 @@ def test_app_removing_a_style_group_drops_its_tags_from_the_filter(isolated_cach
 
     assert not at.exception
     expected = sum(len(r["tracklist"]) for r in dummy_library if "House" in r["styles"])
-    assert at.main.caption[0].value == f"{expected} tracks (0 matched)"
+    assert at.main.caption[1].value == f"{expected} tracks (0 matched)"
     assert not any(w.key == "collection_tag_group_1" for w in at.multiselect)
 
 
@@ -475,7 +475,7 @@ def test_app_matched_only_checkbox_narrows_the_table(isolated_cache, dummy_libra
     at.checkbox(key="collection_matched_only").check().run()
 
     assert not at.exception
-    assert at.main.caption[0].value == "1 tracks (1 matched)"
+    assert at.main.caption[1].value == "1 tracks (1 matched)"
 
 
 def test_app_shows_position_in_its_own_column_and_keeps_track_title_clean(isolated_cache, dummy_library):
@@ -502,7 +502,7 @@ def test_app_handles_a_collection_with_a_single_distinct_year(isolated_cache):
     at = AppTest.from_file(APP_PATH).run()
 
     assert not at.exception
-    assert at.main.caption[0].value == "1 tracks (0 matched)"
+    assert at.main.caption[1].value == "1 tracks (0 matched)"
 
 
 def test_app_shows_match_confidence(isolated_cache, dummy_library):
