@@ -51,21 +51,19 @@ st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 # `headingFont` correctly, everything else silently falls back to the browser default serif.
 # Setting it here directly is the reliable fix; drop this once upstream is fixed.
 #
-# `st.dataframe`/`st.data_editor` draw their cells onto a `<canvas>` (glide-data-grid), at a
-# font size baked into Streamlit's frontend build — it doesn't read `theme.baseFontSize` or
-# respond to any cell/text CSS, so there's no supported way to make that text bigger. `zoom`
-# (unlike `transform: scale`) changes the box's effective size *before* layout/paint, so the
-# grid measures itself as larger and redraws its canvas at that size — text comes out crisp,
-# not an upscaled/blurry bitmap. Applied here (not scoped per-table) since every dataframe in
-# the app should read the same size.
+# `st.dataframe`/`st.data_editor` draw their cells onto a `<canvas>` (glide-data-grid) sized
+# from `window.devicePixelRatio` times the canvas's own *unzoomed* CSS size — Chromium's
+# ResizeObserver, which the grid uses to measure itself, doesn't reflect an ancestor's CSS
+# `zoom`. A `zoom` rule here to enlarge the text (tried previously) makes the grid stretch an
+# already-rasterized, too-low-resolution bitmap to fill the zoomed box, which reads as blurry.
+# `theme.baseFontSize` does reach this canvas's font (`fontSizes.sm` in the grid's theme), but
+# that's global to every widget, not scoped to the dataframe — so there's no way to make just
+# this text bigger without either blur or resizing the whole app. Left at native size.
 st.markdown(
     """
     <style>
     html, body, [data-testid="stAppViewContainer"] {
         font-family: "Source Sans 3", sans-serif;
-    }
-    [data-testid="stDataFrame"] {
-        zoom: 1.3;
     }
     </style>
     """,
