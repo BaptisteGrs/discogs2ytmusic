@@ -2262,6 +2262,78 @@ def test_ytmusic_page_saves_a_custom_playlist_name_prefix(isolated_cache):
     assert Config.load().playlist_name_prefix == "My Vinyl"
 
 
+def test_reset_button_requires_confirmation(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.button(key="reset_button").click().run()
+
+    assert not at.exception
+    assert any("This will permanently delete" in w.value for w in at.warning)
+    with store.connect() as conn:
+        assert store.count_matches(conn) == 1  # untouched until confirmed
+        assert len(list(store.iter_releases_with_tracks(conn))) == len(dummy_library)
+
+
+def test_cancelling_reset_leaves_cache_untouched(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.button(key="reset_button").click().run()
+    at.button(key="confirm_reset_no").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        assert store.count_matches(conn) == 1
+        assert len(list(store.iter_releases_with_tracks(conn))) == len(dummy_library)
+
+
+def test_confirming_reset_wipes_the_cache(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        first = dummy_library[0]
+        store.save_match(conn, first["artist"], first["tracklist"][0]["title"], "vid1", "Video", "ytmusic", 90.0)
+        store.add_other_source(conn, "label", "123", "Some Label")
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.button(key="reset_button").click().run()
+    at.button(key="confirm_reset_yes").click().run()
+
+    assert not at.exception
+    with store.connect() as conn:
+        assert store.count_matches(conn) == 0
+        assert list(store.iter_releases_with_tracks(conn)) == []
+        assert store.list_other_sources(conn) == []
+
+
+def test_reset_preserves_saved_credentials(isolated_cache, dummy_library):
+    from discogs2ytmusic.config import Config
+
+    Config(discogs_token="tok", discogs_username="user", playlist_name_prefix="My Vinyl").save()
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _open_ytmusic_page(at)
+    at.button(key="reset_button").click().run()
+    at.button(key="confirm_reset_yes").click().run()
+
+    assert not at.exception
+    loaded = Config.load()
+    assert loaded.discogs_token == "tok"
+    assert loaded.discogs_username == "user"
+    assert loaded.playlist_name_prefix == "My Vinyl"
+
+
 # --- Other sources (issue #13) ---
 
 

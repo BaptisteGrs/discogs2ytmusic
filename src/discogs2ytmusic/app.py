@@ -1484,6 +1484,43 @@ def _render_ytmusic_nav_item(selected: bool) -> None:
         st.markdown(f'<span class="yt-status-pill {pill_class}">{pill_text}</span>', unsafe_allow_html=True)
 
 
+def _render_reset_button() -> None:
+    if st.session_state.get("confirm_reset"):
+        return
+    if st.button(
+        "Full reset",
+        key="reset_button",
+        icon=":material/delete_forever:",
+        help="Wipe the local cache entirely so you can rebuild from a clean scan",
+    ):
+        st.session_state["confirm_reset"] = True
+        st.rerun()
+
+
+def _render_reset_confirmation() -> None:
+    with store.connect() as conn:
+        summary = store.reset_summary(conn)
+
+    st.warning(
+        f"This will permanently delete {summary.releases} release(s), {summary.matches} cached "
+        f"match(es), {summary.playlists} playlist(s), and {summary.other_sources} Other Source(s) — "
+        "including any manual corrections. You'll need to re-add any Other Source pages afterward. "
+        "It will NOT touch your saved credentials or your real YT Music account."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, reset", key="confirm_reset_yes"):
+            store.reset_cache()
+            st.session_state["confirm_reset"] = False
+            st.session_state.pop("collection_editor", None)
+            st.success("Cache reset. Click Scan to rebuild it.")
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key="confirm_reset_no"):
+            st.session_state["confirm_reset"] = False
+            st.rerun()
+
+
 def _render_ytmusic_page() -> None:
     """Dedicated page to connect (or re-connect) a YT Music account.
 
@@ -1495,7 +1532,10 @@ def _render_ytmusic_page() -> None:
     not a replacement for the CLI command.
 
     Also hosts a minimal text input for `Config.playlist_name_prefix` — a deliberately
-    unstyled placement until a real Settings page exists (tracked separately in #46).
+    unstyled placement until a real Settings page exists (tracked separately in #46) — and
+    the confirm-gated "Full reset" button (`_render_reset_button`/`_render_reset_confirmation`)
+    that wipes the local cache, unrelated to (and never touching) the YT Music connection
+    itself.
     """
     st.subheader("YT Music")
     st.caption("Connect your account so matched tracks can sync to real playlists.")
@@ -1549,6 +1589,17 @@ def _render_ytmusic_page() -> None:
             cfg.playlist_name_prefix = prefix
             cfg.save()
             st.success("Playlist name prefix saved.")
+
+        st.divider()
+        st.markdown("**Full reset**")
+        st.caption(
+            "Wipe the local cache — releases, tracks, matches, playlists, and Other Source "
+            "definitions — so you can rebuild from a clean scan. Does not touch your saved "
+            "credentials or your real YT Music account."
+        )
+        _render_reset_button()
+        if st.session_state.get("confirm_reset"):
+            _render_reset_confirmation()
 
 
 def _relative_time(timestamp: float) -> str:

@@ -334,6 +334,38 @@ def rematch(
     sync(style=style, refresh_collection=False)
 
 
+@app.command()
+def reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (for scripting)."),
+) -> None:
+    """Wipe the local sqlite cache entirely so you can rebuild from a clean `scan`.
+
+    Deletes every release, track, cached match, playlist, playlist folder, and Other Source
+    definition — including manual corrections, which this is explicitly allowed to discard
+    (unlike `scan`/`rematch`, which must never do that silently). You'll need to re-add any
+    Other Source pages afterward, since those live in the wiped cache too.
+
+    Does NOT touch saved credentials (Discogs token, YT Music auth, playlist prefix) and does
+    NOT touch your real YT Music account — nothing is deleted there, only the local cache.
+    """
+    with store.connect() as conn:
+        summary = store.reset_summary(conn)
+
+    warning = (
+        f"[bold yellow]Warning:[/bold yellow] this will permanently delete {summary.releases} release(s), "
+        f"{summary.matches} cached match(es), {summary.playlists} playlist(s), and {summary.other_sources} "
+        "Other Source(s) — including any manual corrections. You'll need to re-add any Other Source pages "
+        "afterward. It will NOT touch your saved credentials or your real YT Music account."
+    )
+    console.print(warning)
+    if not yes and not typer.confirm("Continue?"):
+        console.print("Aborted.")
+        raise typer.Exit(0)
+
+    store.reset_cache()
+    console.print("[green]Cache reset. Run `scan` to rebuild it.[/green]")
+
+
 def _parse_video_id(value: str) -> str:
     try:
         return ytmusic_client.parse_video_id(value)

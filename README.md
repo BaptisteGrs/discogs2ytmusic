@@ -155,6 +155,21 @@ clears the cache and re-fetches the Discogs collection first, then re-matches
 everything from scratch. Manually-corrected matches (via `correct`) are
 preserved by default — pass `--include-manual` to clear those too.
 
+### Start over from a clean cache
+
+```bash
+uv run discogs2ytmusic reset
+```
+
+Wipes the local sqlite cache entirely — releases, tracks, matches, playlists,
+playlist folders, and Other Source definitions, including any manual
+corrections — so you can rebuild from a clean `scan`. Useful after a bug has
+corrupted cached data, or if you just want a fresh start. Asks for
+confirmation first (pass `--yes`/`-y` to skip it for scripting); you'll need
+to re-add any Other Source pages afterward, since those live in the wiped
+cache too. Never touches saved credentials (Discogs token, YT Music auth,
+playlist prefix) or your real YT Music account.
+
 ### Try any command against a small test collection instead of your own
 
 Every command accepts a `--library dummy` flag (before the subcommand) that
@@ -212,6 +227,14 @@ and re-adding, and push the result to a real YT Music playlist (named
 reuses the same YT Music playlist rather than duplicating it. Deleting a
 playlist here only forgets it locally; it never deletes the linked YT Music
 playlist.
+
+**YT Music** (sidebar) is the connection page — the UI equivalent of
+`auth ytmusic`, plus the pushed-playlist name prefix and a **Full reset**
+button, both settings-level and account-level rather than tied to any one
+source. Full reset is the UI equivalent of `reset` (see above): confirm-gated
+the same way as Rematch, its warning names exactly how many releases, cached
+matches, playlists, and Other Sources will be deleted before anything
+happens.
 
 ## Testing
 
