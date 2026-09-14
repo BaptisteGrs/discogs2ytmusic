@@ -51,21 +51,30 @@ st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 # `headingFont` correctly, everything else silently falls back to the browser default serif.
 # Setting it here directly is the reliable fix; drop this once upstream is fixed.
 #
-# `st.dataframe`/`st.data_editor` draw their cells onto a `<canvas>` (glide-data-grid), at a
-# font size baked into Streamlit's frontend build — it doesn't read `theme.baseFontSize` or
-# respond to any cell/text CSS, so there's no supported way to make that text bigger. `zoom`
-# (unlike `transform: scale`) changes the box's effective size *before* layout/paint, so the
-# grid measures itself as larger and redraws its canvas at that size — text comes out crisp,
-# not an upscaled/blurry bitmap. Applied here (not scoped per-table) since every dataframe in
-# the app should read the same size.
+# `st.dataframe`/`st.data_editor` draw their cells onto a `<canvas>` (glide-data-grid) sized
+# from `window.devicePixelRatio` times the canvas's own *unzoomed* CSS size — Chromium's
+# ResizeObserver, which the grid uses to measure itself, doesn't reflect an ancestor's CSS
+# `zoom`. A `zoom` rule here to enlarge the text (tried previously) makes the grid stretch an
+# already-rasterized, too-low-resolution bitmap to fill the zoomed box, which reads as blurry.
+#
+# Deliberately plain `sans-serif` below, not a custom webfont: the table also remounts under a
+# new key on every interaction that changes the visible row set (search, a filter, "Matched")
+# — see `_table_key` below. We used to load a Google-hosted body font here (`theme.font =
+# "Source Sans 3:..."`), and on a remount, applying that font to the new canvas raced the
+# font's async network fetch: lose the race and the canvas silently kept its raw default
+# (measured directly: `10px sans-serif` instead of the theme's `14px`) — a real ~30% size
+# drop plus the wrong typeface, not just a subjective difference, reproducible on basically
+# every search/filter interaction. Confirmed by isolating each redesign change in turn: font
+# *family* metrics aren't at fault (Source Sans 3 and Streamlit's bundled default measure
+# identically once actually loaded) and `theme.baseFontSize` scales this canvas's font
+# perfectly proportionally (14px * 17/16 = 14.875px, verified) — it's specifically an
+# externally-*loaded* font raced against a canvas remount. Swap in a custom body font again
+# only after confirming it survives a few rapid search/filter changes, not just first paint.
 st.markdown(
     """
     <style>
     html, body, [data-testid="stAppViewContainer"] {
-        font-family: "Source Sans 3", sans-serif;
-    }
-    [data-testid="stDataFrame"] {
-        zoom: 1.3;
+        font-family: sans-serif;
     }
     </style>
     """,
