@@ -2653,3 +2653,9 @@ def test_removing_an_other_source_shows_a_confirmation_then_navigates_back_to_co
     with store.connect() as conn:
         assert store.get_other_source(conn, source_id) is None
         assert store.get_release(conn, 1) is not None  # cached release itself is untouched
+
+    # Regression test for issue #78: removing a source untags its release, leaving it with
+    # zero release_sources rows — landing on the Collection tab right after (as this flow
+    # does) must not have _migrate_release_sources_backfill mistake that for a pre-existing
+    # cache and silently re-tag the release "collection".
+    assert any("No collection cached yet" in i.value for i in at.info)

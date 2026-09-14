@@ -289,13 +289,23 @@ def _migrate_other_sources_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _migrate_release_sources_backfill(conn: sqlite3.Connection) -> None:
-    """Tag every pre-existing release as collection-sourced.
+def _migrate_release_sources_backfill(conn: sqlite3.Connection, table_is_new: bool) -> None:
+    """Tag every pre-existing release as collection-sourced — but only the first time
+    `release_sources` itself is created for this cache file.
 
     Before this feature, the only scan path was the user's own collection — so a release
-    with no `release_sources` row yet (an upgrade from an older cache) belongs there, not
-    nowhere. Additive and idempotent: only inserts for releases missing every source tag.
+    already cached with no `release_sources` row *the moment this table first comes into
+    existence* belongs there, not nowhere. This must NOT re-run on every `connect()` once
+    the table already exists: after that point, a release with zero source tags can be the
+    legitimate result of `prune_release_source_tags` or `delete_other_source` removing that
+    release's only tag (an Other-source release that stopped matching a filter, or whose
+    source page was removed) — re-tagging it "collection" here would silently make an
+    Other-source-only release reappear in My Discogs Collection (issue #78). `table_is_new`
+    (computed by `connect()` from `sqlite_master` before `SCHEMA` creates the table) is what
+    tells the two cases apart.
     """
+    if not table_is_new:
+        return
     conn.execute(
         """INSERT OR IGNORE INTO release_sources (release_id, source_type, source_key, added_at)
            SELECT release_id, ?, ?, ? FROM releases
@@ -310,6 +320,14 @@ def connect() -> Iterator[sqlite3.Connection]:
     """Open the sqlite cache, applying schema/migrations first, and commit on clean exit."""
     ensure_dirs()
     conn = sqlite3.connect(CACHE_DB)
+    # Checked before SCHEMA's `CREATE TABLE IF NOT EXISTS` runs, so _migrate_release_sources_backfill
+    # can tell "this cache never had the table" (a real upgrade, backfill once) from "the table
+    # already exists" (every later connect — see that function's docstring for why the distinction
+    # matters).
+    release_sources_existed = (
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'release_sources'").fetchone()
+        is not None
+    )
     conn.executescript(SCHEMA)
     _migrate_matches_table(conn)
     _migrate_tracks_table(conn)
@@ -317,7 +335,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     _migrate_playlists_to_playlist_defs(conn)
     _migrate_playlists_table(conn)
     _migrate_other_sources_table(conn)
-    _migrate_release_sources_backfill(conn)
+    _migrate_release_sources_backfill(conn, table_is_new=not release_sources_existed)
     try:
         yield conn
         conn.commit()

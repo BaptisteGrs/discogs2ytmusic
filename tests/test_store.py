@@ -1042,17 +1042,33 @@ def test_other_sources_table_migrates_in_filter_json_column(isolated_cache):
 
 
 def test_release_sources_backfill_tags_pre_existing_releases_as_collection(isolated_cache):
-    """A release upserted (and thus source-tagged) before this migration existed must
-    still resolve as collection-sourced once release_sources is backfilled."""
+    """A release cached before the `release_sources` table itself existed at all must be
+    backfilled as collection-sourced the first time the table is created."""
     with store.connect() as conn:
         store.upsert_release(conn, 1, "Artist", "Title", [], [])
-        conn.execute("DELETE FROM release_sources WHERE release_id = 1")  # simulate a pre-migration cache
+        conn.execute("DROP TABLE release_sources")  # simulate a cache from before this table existed
         conn.commit()
 
-    with store.connect() as conn:  # re-opening runs the migrations again
+    with store.connect() as conn:  # re-opening re-creates the table and runs the one-time backfill
         releases = list(store.iter_releases_with_tracks(conn))
 
     assert [r[0]["release_id"] for r in releases] == [1]
+
+
+def test_release_sources_backfill_does_not_refire_once_the_table_already_exists(isolated_cache):
+    """Regression test for issue #78: once `release_sources` exists, a release left with zero
+    source tags (e.g. `delete_other_source`/`prune_release_source_tags` removing its only tag)
+    must never be silently re-tagged "collection" on a later `connect()` — that would make an
+    Other-source-only release leak into My Discogs Collection."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+        conn.execute("DELETE FROM release_sources WHERE release_id = 1")  # its only tag is gone, same as a prune
+        conn.commit()
+
+    with store.connect() as conn:  # release_sources already exists -- must not re-backfill
+        releases = list(store.iter_releases_with_tracks(conn))
+
+    assert releases == []
 
 
 def test_upsert_release_tags_the_given_source_additively(isolated_cache):
@@ -1146,6 +1162,22 @@ def test_prune_release_source_tags_never_touches_a_different_source(isolated_cac
         collection_ids = [r["release_id"] for r, _t in store.iter_releases_with_tracks(conn)]
 
     assert collection_ids == [1]  # untouched, even though the label tag for the same release was pruned
+
+
+def test_pruning_a_releases_only_source_tag_does_not_leak_it_into_collection_on_reconnect(isolated_cache):
+    """Regression test for issue #78: a release imported only from a filtered Other source,
+    then excluded by a re-scan under a narrower filter (`prune_release_source_tags` removing
+    its only tag), must stay untagged rather than reappear in My Discogs Collection the next
+    time the cache is opened."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Label Artist", "Label Title", [], [], source_type="label", source_key="123")
+        store.prune_release_source_tags(conn, "label", "123", keep_release_ids=set())
+        conn.commit()
+
+    with store.connect() as conn:  # simulates the next page load / app restart
+        collection_ids = [r["release_id"] for r, _t in store.iter_releases_with_tracks(conn)]
+
+    assert collection_ids == []
 
 
 def test_record_known_formats_dedupes_and_ignores_blanks(isolated_cache):
