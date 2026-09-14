@@ -57,17 +57,24 @@ st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 # `zoom`. A `zoom` rule here to enlarge the text (tried previously) makes the grid stretch an
 # already-rasterized, too-low-resolution bitmap to fill the zoomed box, which reads as blurry.
 #
-# Separately: `theme.baseFontSize` (as of streamlit 1.63) reaches this canvas's font inverted —
-# raising it *shrinks* the dataframe's text while every other widget grows as expected (verified
-# by bisecting three otherwise-identical runs at baseFontSize 16/17/20: 16 read closest to this
-# table's pre-redesign size, 17 and 20 both read markedly smaller). That's why `.streamlit/
-# config.toml` doesn't set `baseFontSize` — leaving it at the 16 default is what keeps this
-# table's text readable; don't reintroduce a baseFontSize override without re-checking this.
+# Deliberately plain `sans-serif` below, not a custom webfont: the table also remounts under a
+# new key on every interaction that changes the visible row set (search, a filter, "Matched")
+# — see `_table_key` below. We used to load a Google-hosted body font here (`theme.font =
+# "Source Sans 3:..."`), and on a remount, applying that font to the new canvas raced the
+# font's async network fetch: lose the race and the canvas silently kept its raw default
+# (measured directly: `10px sans-serif` instead of the theme's `14px`) — a real ~30% size
+# drop plus the wrong typeface, not just a subjective difference, reproducible on basically
+# every search/filter interaction. Confirmed by isolating each redesign change in turn: font
+# *family* metrics aren't at fault (Source Sans 3 and Streamlit's bundled default measure
+# identically once actually loaded) and `theme.baseFontSize` scales this canvas's font
+# perfectly proportionally (14px * 17/16 = 14.875px, verified) — it's specifically an
+# externally-*loaded* font raced against a canvas remount. Swap in a custom body font again
+# only after confirming it survives a few rapid search/filter changes, not just first paint.
 st.markdown(
     """
     <style>
     html, body, [data-testid="stAppViewContainer"] {
-        font-family: "Source Sans 3", sans-serif;
+        font-family: sans-serif;
     }
     </style>
     """,
