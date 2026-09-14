@@ -16,6 +16,7 @@ import sqlite3
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from .config import CACHE_DB, ensure_dirs
 
@@ -341,6 +342,45 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.commit()
     finally:
         conn.close()
+
+
+@dataclass
+class ResetSummary:
+    """Counts of what a full reset (`reset_cache`) would delete, for a confirmation prompt."""
+
+    releases: int
+    matches: int
+    playlists: int
+    other_sources: int
+
+
+def reset_summary(conn: sqlite3.Connection) -> ResetSummary:
+    """Count what `reset_cache` would delete, to show a confirmation prompt before it runs."""
+    return ResetSummary(
+        releases=conn.execute("SELECT COUNT(*) FROM releases").fetchone()[0],
+        matches=count_matches(conn),
+        playlists=conn.execute("SELECT COUNT(*) FROM playlists").fetchone()[0],
+        other_sources=conn.execute("SELECT COUNT(*) FROM other_sources").fetchone()[0],
+    )
+
+
+def reset_cache() -> None:
+    """Wipe the local sqlite cache entirely: releases, tracks, matches, playlists, playlist
+    folders, Other Source definitions, known formats — everything — so the next `connect()`
+    rebuilds an empty cache from scratch.
+
+    Deletes `CACHE_DB` on disk and lets `connect()` recreate it (schema + migrations all run
+    on an empty file, same as a brand-new install) rather than issuing `DELETE FROM` per
+    table, so this doesn't need updating as the schema grows. This is explicitly allowed to
+    discard manual corrections — that's the point of a full reset — unlike `scan`/`rematch`,
+    which must never do that silently. Never touches `config.Config` (saved credentials live
+    in a separate file) and never talks to YT Music.
+    """
+    CACHE_DB.unlink(missing_ok=True)
+    # Defensive: this app never enables WAL mode, but if that ever changes, don't leave
+    # sidecar files a stale connection could still read from.
+    for suffix in ("-wal", "-shm", "-journal"):
+        CACHE_DB.with_name(CACHE_DB.name + suffix).unlink(missing_ok=True)
 
 
 def match_key(artist: str, title: str) -> str:
