@@ -6,17 +6,9 @@
 
 Wrapper for your Discogs collection.
 Map YT Music links automatically.
-Create playlists easily and push them on your YT account.
-Dig people's collection or label catalogue.
+Create playlists easily and push them on your YT Music account.
+Dig labels records or seller catalogue.
 
-Runs entirely locally as a CLI, with an optional browsable/editable Streamlit UI.
-
-## Roadmap
-
-- [ ] Filter the Collection tab by channel (favorite a group of channels).
-- [x] Wantlist tab — superseded by the broader "Other sources" sidebar section, which also
-      covers another user's collection and a label's catalogue.
-- [ ] A dedicated filter for low-confidence matches.
 
 ## Setup
 
@@ -32,8 +24,55 @@ Get a personal access token from https://www.discogs.com/settings/developers
 ```bash
 uv run discogs2ytmusic auth discogs --token YOUR_TOKEN
 ```
+### 2. Launch the UI 
 
-### 2. Connect YouTube Music
+```bash
+uv run discogs2ytmusic ui
+```
+
+Launches a local Streamlit app (`app.py`) over the same cache the CLI uses.
+
+A sidebar drives navigation: **My Discogs Collection** at the top, then a
+**Playlists** section listing every hand-curated playlist you've created.
+
+**My Discogs Collection** is a filterable, editable table of every cached
+track: filter by style/genre, label, year, or matched-only; edit a track's
+artist inline to override the YouTube search query, or paste/clear a YouTube
+link directly — both save as the same manual corrections `fix-artist`/`correct`
+make from the CLI, and a corrected row is marked **Locked** so it survives the
+next `scan --refresh`/`rematch`. Select tracks (the leading checkbox column)
+to add them straight to a new or existing playlist.
+
+Three buttons above the table cover the rest of the CLI's scan → match → push
+loop, so the whole thing is doable without leaving the app: **Scan** re-fetches
+your collection and tracklists from Discogs (`scan --refresh`); **Sync
+matches** matches any unmatched tracks against YouTube/YT Music (`sync`) —
+it only populates the match cache, it never touches a real YT Music account;
+and **Rematch** clears cached matches and re-matches everything from scratch
+(`rematch`), preserving manual corrections unless you opt in to clearing
+those too. Rematch can take a while and is destructive to the match cache, so
+it asks for confirmation first, the same as the Playlists tab's delete/push
+buttons.
+
+**Playlists** manages hand-curated playlists — you build these track by
+track rather than one playlist per style tag: create a playlist
+from the sidebar's "+ New playlist" form, add tracks from the Collection view
+or by searching by artist/title within a playlist itself, reorder by removing
+and re-adding, and push the result to a real YT Music playlist (named
+`Discogs - <name>`) with its own confirmed Sync button — safe to re-run, it
+reuses the same YT Music playlist rather than duplicating it. Deleting a
+playlist here only forgets it locally; it never deletes the linked YT Music
+playlist.
+
+**YT Music** (sidebar) is the connection page — the UI equivalent of
+`auth ytmusic`, plus the pushed-playlist name prefix and a **Full reset**
+button, both settings-level and account-level rather than tied to any one
+source. Full reset is the UI equivalent of `reset` (see above): confirm-gated
+the same way as Rematch, its warning names exactly how many releases, cached
+matches, playlists, and Other Sources will be deleted before anything
+happens.
+
+### 3. Connect YouTube Music
 
 No Google Cloud project needed — this reuses your logged-in browser session
 by pulling two values out of a request YT Music's own web app already makes:
@@ -45,28 +84,17 @@ by pulling two values out of a request YT Music's own web app already makes:
 4. In its **Headers** panel, scroll to **Request Headers** and find the rows
    for `cookie` (a long string of `name=value;` pairs) and `x-goog-authuser`
    (usually just `0`).
-5. Run the command below and paste each value when prompted:
+5. Go to the **YT Music** page and copy both values, and click Save. 
 
-```bash
-uv run discogs2ytmusic auth ytmusic
-```
+### 4. Process 
 
-Pasting a long cookie value into a terminal prompt can be fiddly. Instead you
-can save the two values to a text file and point the command at it:
+1. Click on `Scan` to fetch your Discogs collection.
+2. Click on `Sync matches` to match tracks to their YT links.
+3. You can review and edit the Track Artist, Style or YT link if you are not convinced. These changes will be preserved from future re-scanning. You can start over by using the Reset option (in the YT Music page).
+4. Create playlists and push them to YT Music using the `Sync` button.
 
-```
-cookie: SID=...; HSID=...; ...
-x-goog-authuser: 0
-```
 
-```bash
-uv run discogs2ytmusic auth ytmusic --from-file /path/to/that/file.txt
-```
-
-The file is only read once during setup — delete it afterwards (the tool
-will remind you to).
-
-## Usage
+## CLI usage
 
 ### Scan your collection
 
@@ -188,53 +216,7 @@ full repo checkout (it reads `tests/fixtures/dummy_library.json` directly,
 it isn't packaged) — omit the flag, or pass `--library real` (the default),
 to use your actual collection.
 
-## Browsable web UI
 
-```bash
-uv run discogs2ytmusic ui
-```
-
-Launches a local Streamlit app (`app.py`) over the same cache the CLI uses.
-
-A sidebar drives navigation: **My Discogs Collection** at the top, then a
-**Playlists** section listing every hand-curated playlist you've created.
-
-**My Discogs Collection** is a filterable, editable table of every cached
-track: filter by style/genre, label, year, or matched-only; edit a track's
-artist inline to override the YouTube search query, or paste/clear a YouTube
-link directly — both save as the same manual corrections `fix-artist`/`correct`
-make from the CLI, and a corrected row is marked **Locked** so it survives the
-next `scan --refresh`/`rematch`. Select tracks (the leading checkbox column)
-to add them straight to a new or existing playlist.
-
-Three buttons above the table cover the rest of the CLI's scan → match → push
-loop, so the whole thing is doable without leaving the app: **Scan** re-fetches
-your collection and tracklists from Discogs (`scan --refresh`); **Sync
-matches** matches any unmatched tracks against YouTube/YT Music (`sync`) —
-it only populates the match cache, it never touches a real YT Music account;
-and **Rematch** clears cached matches and re-matches everything from scratch
-(`rematch`), preserving manual corrections unless you opt in to clearing
-those too. Rematch can take a while and is destructive to the match cache, so
-it asks for confirmation first, the same as the Playlists tab's delete/push
-buttons.
-
-**Playlists** manages hand-curated playlists — you build these track by
-track rather than one playlist per style tag: create a playlist
-from the sidebar's "+ New playlist" form, add tracks from the Collection view
-or by searching by artist/title within a playlist itself, reorder by removing
-and re-adding, and push the result to a real YT Music playlist (named
-`Discogs - <name>`) with its own confirmed Sync button — safe to re-run, it
-reuses the same YT Music playlist rather than duplicating it. Deleting a
-playlist here only forgets it locally; it never deletes the linked YT Music
-playlist.
-
-**YT Music** (sidebar) is the connection page — the UI equivalent of
-`auth ytmusic`, plus the pushed-playlist name prefix and a **Full reset**
-button, both settings-level and account-level rather than tied to any one
-source. Full reset is the UI equivalent of `reset` (see above): confirm-gated
-the same way as Rematch, its warning names exactly how many releases, cached
-matches, playlists, and Other Sources will be deleted before anything
-happens.
 
 ## Testing
 
