@@ -3,7 +3,6 @@ enableStaticServing = true
 
 [theme]
 base = "light"
-baseFontSize = 17
 primaryColor = "#84BCFC"
 backgroundColor = "#F4F1E4"
 secondaryBackgroundColor = "#EAE4CE"

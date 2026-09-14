@@ -56,9 +56,13 @@ st.set_page_config(page_title="Discogs -> YT Music", layout="wide")
 # ResizeObserver, which the grid uses to measure itself, doesn't reflect an ancestor's CSS
 # `zoom`. A `zoom` rule here to enlarge the text (tried previously) makes the grid stretch an
 # already-rasterized, too-low-resolution bitmap to fill the zoomed box, which reads as blurry.
-# `theme.baseFontSize` does reach this canvas's font (`fontSizes.sm` in the grid's theme), but
-# that's global to every widget, not scoped to the dataframe — so there's no way to make just
-# this text bigger without either blur or resizing the whole app. Left at native size.
+#
+# Separately: `theme.baseFontSize` (as of streamlit 1.63) reaches this canvas's font inverted —
+# raising it *shrinks* the dataframe's text while every other widget grows as expected (verified
+# by bisecting three otherwise-identical runs at baseFontSize 16/17/20: 16 read closest to this
+# table's pre-redesign size, 17 and 20 both read markedly smaller). That's why `.streamlit/
+# config.toml` doesn't set `baseFontSize` — leaving it at the 16 default is what keeps this
+# table's text readable; don't reintroduce a baseFontSize override without re-checking this.
 st.markdown(
     """
     <style>
