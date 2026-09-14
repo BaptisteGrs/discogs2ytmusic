@@ -2004,7 +2004,7 @@ _PAGE_TITLE_CSS = """
 <style>
 .st-key-playlist_title h3,
 .st-key-folder_title h3 {
-    color: #1E5136 !important;
+    color: #0E6034 !important;
 }
 </style>
 """
@@ -2207,7 +2207,7 @@ _SIDEBAR_NAV_CSS = """
 _HEADER_CSS = """
 <style>
 h2 {
-    color: #1E5136 !important;
+    color: #0E6034 !important;
 }
 .st-key-source_header {
     position: relative;
