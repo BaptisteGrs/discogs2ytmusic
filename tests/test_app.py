@@ -744,6 +744,82 @@ def test_refresh_selected_refetches_deduped_release_and_rematches_selected_non_m
     assert manual_match["source"] == "manual"  # untouched, per the locking invariant
 
 
+def test_refresh_selected_rematches_the_current_track_when_its_title_changed(
+    isolated_cache, dummy_library, fake_discogs_client, monkeypatch
+):
+    """Regression test: `store.replace_tracks` matches the old tracklist against the new one
+    by (position, title), so a track whose title actually changed on Discogs (not just a
+    newly-added embedded video) gets deleted and re-inserted under a new track_id during
+    `refresh_release`. The rematch step must pick up that new identity — not silently
+    search+save under the stale pre-refresh title, which would leave the real, renamed
+    track with no match at all."""
+    from dataclasses import replace
+
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    release_id = 534187  # single-track release ("Aloud - The 3's Up EP")
+    with store.connect() as conn:
+        release = store.get_release(conn, release_id)
+        tracks = store.get_release_tracks(conn, release_id)
+        old_track_id, old_artist, old_title = store.effective_track_queries(release, tracks)[0]
+        store.save_match(conn, old_artist, old_title, "stale-id", "Stale match", "ytmusic", 50.0)
+        conn.commit()
+
+    new_title = "A Totally Renamed Track"
+    real_get_release_detail = fake_discogs_client.get_release_detail
+
+    def renaming_get_release_detail(rid: int):
+        detail = real_get_release_detail(rid)
+        if rid == release_id:
+            renamed_track = replace(detail.tracklist[0], title=new_title)
+            detail = replace(detail, tracklist=[renamed_track])
+        return detail
+
+    monkeypatch.setattr(fake_discogs_client, "get_release_detail", renaming_get_release_detail)
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic import matcher
+    from discogs2ytmusic.matcher import MatchResult
+
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        matcher, "find_match", lambda yt, artist, title: MatchResult(f"fresh::{title}", title, "ytmusic", 90.0)
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    df = _collection_table_df(at)
+    target_position = next(i for i, rid in enumerate(df["release_id"]) if int(rid) == release_id)
+    other_position = 0 if target_position != 0 else 1
+    positions = sorted({target_position, other_position})  # >1 row, to reach the bulk action
+    at = _select_table_rows(at, table_key, positions)
+
+    at.button(key="collection_refresh_selected").click()
+    at.session_state[table_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
+    at.run()
+
+    assert not at.exception
+
+    with store.connect() as conn:
+        tracks_after = store.get_release_tracks(conn, release_id)
+        stale_query_match = store.get_match(conn, old_artist, old_title)
+        fresh_query_match = store.get_match(conn, old_artist, new_title)
+
+    assert len(tracks_after) == 1
+    assert tracks_after[0]["id"] != old_track_id  # replace_tracks inserted a new row for it
+    assert tracks_after[0]["title"] == new_title
+
+    # The renamed track's *current* query must have picked up the fresh search result...
+    assert fresh_query_match is not None
+    assert fresh_query_match["video_id"] == f"fresh::{new_title}"
+    # ...and the old, now-orphaned query must be left exactly as it was, not overwritten
+    # with a search result for a title nothing currently resolves to.
+    assert stale_query_match is not None
+    assert stale_query_match["video_id"] == "stale-id"
+
+
 def test_edit_panel_is_prefilled_with_the_selected_track(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)

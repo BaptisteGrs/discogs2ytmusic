@@ -483,6 +483,41 @@ def _render_rematch_confirmation() -> None:
             st.rerun()
 
 
+def _current_track_query(
+    release: sqlite3.Row, tracks: list[sqlite3.Row], row: TrackRow
+) -> tuple[int | None, str, str] | None:
+    """Re-derive a selected row's *current* (track_id, artist, title) query against
+    `tracks`/`release` freshly reloaded after `scan_engine.refresh_release`.
+
+    `row`'s own `track_id`/`track_artist`/`track_title` were captured *before* that
+    refresh and can go stale: `store.replace_tracks` matches the old tracklist against the
+    new one by `(position, title)`, so a track whose title actually changed on Discogs (not
+    just a newly-added embedded video — the common case, but not the only one) gets deleted
+    and re-inserted under a brand-new track_id. Passing the stale id/title straight into
+    `sync_engine.rematch_track` would then miss it in the freshly-computed Discogs-video
+    candidates (keyed by the new track_id) and search+save under the old, now-orphaned
+    title text instead — leaving the actually-renamed track with no match at all. `position`
+    is the only key that still reliably identifies "the same track" across that.
+
+    Returns:
+        `None` if no track at `row.position` survived the refresh (e.g. the tracklist
+        shrank) — nothing sensible to rematch. Otherwise the current (track_id, artist,
+        title), with `track_id=None` for the legitimate no-tracklist-at-all case (mirroring
+        `row.track_id is None`), unaffected by any of the above since there's no per-track
+        row to go stale.
+    """
+    if row.track_id is None:
+        return store.effective_track_queries(release, [])[0]
+    queries_by_track_id = {
+        tid: (artist, title) for tid, artist, title in store.effective_track_queries(release, tracks)
+    }
+    current_track = next((t for t in tracks if t["position"] == row.position), None)
+    if current_track is None or current_track["id"] not in queries_by_track_id:
+        return None
+    artist, title = queries_by_track_id[current_track["id"]]
+    return current_track["id"], artist, title
+
+
 def _run_refresh_selected(selected_rows: list[TrackRow], source_type: str = "collection", source_key: str = "") -> bool:
     """Re-fetch just the selected tracks' underlying release(s) from Discogs and re-resolve
     their cached matches — a scoped counterpart to Scan+Rematch (`_run_rematch`), for when
@@ -494,19 +529,25 @@ def _run_refresh_selected(selected_rows: list[TrackRow], source_type: str = "col
     multi-track selection often spans one release (e.g. a whole re-ripped side) — each
     distinct release is fetched once, not once per track. Manual per-track corrections
     (search-artist overrides, styles/genres overrides) survive the refetch exactly as they
-    would a normal `scan --refresh` (see CLAUDE.md's "Manual corrections and locking").
+    would a normal `scan --refresh` (see CLAUDE.md's "Manual corrections and locking"). A
+    release Discogs can't return anymore (404 — merged/removed) is skipped rather than
+    aborting the whole action, same as `_run_scan`; its selected tracks are left untouched.
 
-    Then, for every selected track whose cached match isn't itself a manual correction
-    (`source == 'manual'` — same default `rematch` follows), the stale match is dropped
-    and re-resolved via `sync_engine.rematch_track`, checking the freshly refreshed
-    Discogs-embedded videos first, same resolution order as any other match. Tracks that
-    share the same effective (artist, title) query — and so the same cached match row,
-    since `matches.query_key` isn't scoped by release — are only re-resolved once.
+    Then, for every selected track whose *current* (post-refresh) cached match isn't itself
+    a manual correction (`source == 'manual'` — same default `rematch` follows), the stale
+    match is dropped and re-resolved via `sync_engine.rematch_track`, checking the freshly
+    refreshed Discogs-embedded videos first, same resolution order as any other match. Each
+    row's current identity is re-derived from the refreshed tracks via
+    `_current_track_query` rather than trusting the pre-refresh `TrackRow` fields directly
+    (see its docstring for why), and looked up fresh in the match cache too — a pre-refresh
+    "this looked manual" snapshot would otherwise misapply once a title change orphans that
+    match. Tracks that resolve to the same current (artist, title) query — and so the same
+    cached match row, since `matches.query_key` isn't scoped by release — are only
+    re-resolved once.
 
     Returns:
-        True if it ran (even if every selected match turned out to be manual and nothing
-        was actually re-searched), False if there were no Discogs credentials to refresh
-        with, or a release fetch failed.
+        True if it ran (even if nothing ended up needing a fresh search), False if there
+        were no Discogs credentials to refresh with.
     """
     creds = _load_discogs_client()
     if creds is None:
@@ -518,15 +559,14 @@ def _run_refresh_selected(selected_rows: list[TrackRow], source_type: str = "col
     total_steps = len(release_ids) + len(selected_rows)
     progress = st.progress(0.0, text=f"Refreshing {len(release_ids)} release(s)...")
     step = 0
+    failed_release_ids: set[int] = set()
 
     with store.connect() as conn:
         for release_id in release_ids:
             try:
                 scan_engine.refresh_release(conn, client, release_id, source_type=source_type, source_key=source_key)
-            except DiscogsError as e:
-                progress.empty()
-                st.error(f"Could not refresh release {release_id}: {e}")
-                return False
+            except DiscogsError:
+                failed_release_ids.add(release_id)
             step += 1
             progress.progress(step / total_steps, text=f"Refreshing releases... ({step}/{len(release_ids)})")
 
@@ -534,32 +574,53 @@ def _run_refresh_selected(selected_rows: list[TrackRow], source_type: str = "col
         release_cache: dict[int, tuple[sqlite3.Row, list[sqlite3.Row]]] = {}
         rematched_queries: set[tuple[str, str]] = set()
         n_skipped_manual = 0
+        n_skipped_failed = 0
+        n_skipped_missing = 0
         for i, row in enumerate(selected_rows, start=1):
-            if row.video_overridden:
-                n_skipped_manual += 1
-            elif (row.track_artist, row.track_title) not in rematched_queries:
-                rematched_queries.add((row.track_artist, row.track_title))
+            if row.release_id in failed_release_ids:
+                n_skipped_failed += 1
+            else:
                 if row.release_id not in release_cache:
                     release = store.get_release(conn, row.release_id)
-                    assert release is not None  # just refreshed above
+                    assert release is not None  # already cached, or just refreshed above
                     release_cache[row.release_id] = (release, store.get_release_tracks(conn, row.release_id))
                 release, tracks = release_cache[row.release_id]
-                if row.match_id is not None:
-                    store.delete_match(conn, row.match_id)
-                sync_engine.rematch_track(conn, yt, release, tracks, row.track_id, row.track_artist, row.track_title)
+
+                current = _current_track_query(release, tracks, row)
+                if current is None:
+                    n_skipped_missing += 1
+                else:
+                    track_id, artist, title = current
+                    current_match = store.get_match(conn, artist, title)
+                    if current_match is not None and current_match["source"] == "manual":
+                        n_skipped_manual += 1
+                    elif (artist, title) not in rematched_queries:
+                        rematched_queries.add((artist, title))
+                        if current_match is not None:
+                            store.delete_match(conn, current_match["id"])
+                        sync_engine.rematch_track(conn, yt, release, tracks, track_id, artist, title)
             step += 1
             progress.progress(step / total_steps, text=f"Rematching tracks... ({i}/{len(selected_rows)})")
     progress.empty()
 
-    msg = f"Refreshed {len(release_ids)} release(s) and rematched {len(rematched_queries)} track(s)."
+    if failed_release_ids:
+        st.warning(
+            f"Skipped {len(failed_release_ids)} release(s) Discogs couldn't return (removed or merged listings)."
+        )
+
+    n_refreshed = len(release_ids) - len(failed_release_ids)
+    msg = f"Refreshed {n_refreshed} release(s) and rematched {len(rematched_queries)} track(s)."
     if n_skipped_manual:
         msg += f" Kept {n_skipped_manual} manually-corrected match(es) untouched."
-    n_non_manual_selected = len(selected_rows) - n_skipped_manual
-    if len(rematched_queries) < n_non_manual_selected:
+    if n_skipped_missing:
+        msg += f" {n_skipped_missing} selected track(s) no longer exist after the refresh."
+    attempted = len(selected_rows) - n_skipped_manual - n_skipped_failed - n_skipped_missing
+    if len(rematched_queries) < attempted:
         msg += (
-            " Some of the selected tracks share the same artist/title (and so the same cached "
-            "match) as each other — or possibly as a track outside this selection, since matches "
-            "aren't scoped by release."
+            " Some selected tracks resolve to the same artist/title as another selected track, "
+            "so fewer distinct matches were rematched than tracks selected — and since matches "
+            "aren't scoped by release, an unselected track elsewhere in the cache sharing that "
+            "same artist/title may have been refreshed too (not checked here)."
         )
     st.success(msg)
     return True
