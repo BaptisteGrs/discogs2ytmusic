@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import store
-from .discogs import DiscogsClient
+from .discogs import DiscogsClient, ReleaseDetail
 
 
 def _clean_artist_names(names: list[str]) -> str | None:
@@ -107,6 +107,70 @@ def _format_tokens(formats: list[dict[str, Any]]) -> list[str]:
     return parts
 
 
+def refresh_release(
+    conn: sqlite3.Connection,
+    client: DiscogsClient,
+    release_id: int,
+    source_type: str = store.DEFAULT_SOURCE_TYPE,
+    source_key: str = store.DEFAULT_SOURCE_KEY,
+    detail: ReleaseDetail | None = None,
+) -> None:
+    """Re-fetch one release's full detail from Discogs and refresh its cached tracklist +
+    embedded videos.
+
+    Factored out of `scan_label_release`'s refresh branch, which now calls this too (as
+    does `scan_release`'s own refresh branch) — both did exactly this fetch-detail ->
+    `store.replace_tracks` -> `store.upsert_release` sequence, and
+    `client.get_release_detail` already returns everything needed (artist/title/styles/
+    genres/year/labels/tracklist/videos) with no `basic_information` payload required.
+    Also used by the UI's "Refresh selected" bulk action (`app.py`) to refresh just a
+    chosen handful of releases instead of a whole source.
+
+    `store.replace_tracks` preserves manual per-track corrections (it matches existing
+    tracks by (position, title)) and `store.upsert_release` never touches
+    artist/title/styles/genres overrides — see CLAUDE.md's "Manual corrections and
+    locking" section — so this is exactly as safe as any other refresh path here.
+
+    Args:
+        conn: Open sqlite connection.
+        client: An authenticated Discogs client.
+        release_id: The Discogs release id to re-fetch.
+        source_type: Which Discogs source to (re-)tag this release under — additive
+            (`store.record_release_source`), so it never removes an existing tag from
+            another source.
+        source_key: The source's own key, paired with `source_type`.
+        detail: A `ReleaseDetail` already fetched by the caller (e.g.
+            `scan_label_release`, which needs it early anyway to re-check its
+            `ImportFilter`), to avoid a redundant `get_release_detail` call. Fetched
+            here when omitted.
+
+    Commits immediately, matching every other cache-write helper in this module.
+    """
+    if detail is None:
+        detail = client.get_release_detail(release_id)
+    store.replace_tracks(
+        conn,
+        release_id,
+        [(t.position, t.title, t.duration, _clean_artist_names(t.artists)) for t in detail.tracklist],
+    )
+    videos = [{"uri": v.uri, "title": v.title, "duration": v.duration} for v in detail.videos]
+    artist = _clean_artist_names(detail.artists) or ""
+    store.upsert_release(
+        conn,
+        release_id,
+        artist,
+        detail.title,
+        detail.styles,
+        detail.genres,
+        year=detail.year,
+        labels=detail.labels,
+        videos=videos,
+        source_type=source_type,
+        source_key=source_key,
+    )
+    conn.commit()
+
+
 def scan_release(
     conn: sqlite3.Connection,
     client: DiscogsClient,
@@ -161,15 +225,13 @@ def scan_release(
     ):
         return False
 
-    videos = None  # None means "don't touch whatever's already cached" (see store.upsert_release)
     if refresh or not store.has_tracks(conn, release_id):
-        detail = client.get_release_detail(release_id)
-        store.replace_tracks(
-            conn,
-            release_id,
-            [(t.position, t.title, t.duration, _clean_artist_names(t.artists)) for t in detail.tracklist],
-        )
-        videos = [{"uri": v.uri, "title": v.title, "duration": v.duration} for v in detail.videos]
+        # Refreshes tracks/videos (and, transiently, the release's detail-sourced fields
+        # too) via one get_release_detail call; the upsert_release below immediately
+        # overwrites those release fields with this item's own basic_information-sourced
+        # values (the ones scan_release has always preferred) while leaving videos=None
+        # so the ones refresh_release just cached survive untouched.
+        refresh_release(conn, client, release_id, source_type=source_type, source_key=source_key)
 
     store.upsert_release(
         conn,
@@ -180,7 +242,7 @@ def scan_release(
         genres,
         year=year,
         labels=labels,
-        videos=videos,
+        videos=None,
         source_type=source_type,
         source_key=source_key,
     )
@@ -258,25 +320,5 @@ def scan_label_release(
     ):
         return False  # format/year passed, but the release's actual style doesn't
 
-    store.replace_tracks(
-        conn,
-        release_id,
-        [(t.position, t.title, t.duration, _clean_artist_names(t.artists)) for t in detail.tracklist],
-    )
-    videos = [{"uri": v.uri, "title": v.title, "duration": v.duration} for v in detail.videos]
-    artist = _clean_artist_names(detail.artists) or ""
-    store.upsert_release(
-        conn,
-        release_id,
-        artist,
-        detail.title,
-        detail.styles,
-        detail.genres,
-        year=detail.year,
-        labels=detail.labels,
-        videos=videos,
-        source_type=source_type,
-        source_key=source_key,
-    )
-    conn.commit()
+    refresh_release(conn, client, release_id, source_type=source_type, source_key=source_key, detail=detail)
     return True
