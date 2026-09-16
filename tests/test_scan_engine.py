@@ -130,6 +130,78 @@ def test_scan_label_release_skips_the_detail_fetch_once_cached_but_still_tags_th
         assert releases_456[0][0]["release_id"] == 1
 
 
+# --- refresh_release ---
+
+
+def test_refresh_release_replaces_tracklist_and_release_fields_from_full_detail(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Old Artist", "Old Title", ["Old Style"], ["Old Genre"])
+        store.replace_tracks(conn, 1, [("A1", "Old Track", None, None)])
+
+        scan_engine.refresh_release(conn, _FakeLabelClient(), 1, source_type="label", source_key="123")
+
+        release, tracks = next(store.iter_releases_with_tracks(conn, source_type="label", source_key="123"))
+
+    assert release["artist"] == "Rush"  # disambiguation suffix stripped, from the fetched detail
+    assert release["title"] == "Moving Pictures"
+    assert release["styles"] == '["Rock"]'
+    assert release["year"] == 1981
+    assert [t["title"] for t in tracks] == ["Track One"]
+
+
+def test_refresh_release_preserves_a_manual_per_track_correction(isolated_cache):
+    """Regression guard for the CLAUDE.md locking invariant: refreshing a release must not
+    wipe out a manual `search_artist` correction on one of its tracks — `store.replace_tracks`
+    keeps it by matching the refreshed tracklist back to the existing track by (position, title)."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Artist", "Title", [], [])
+        store.replace_tracks(conn, 1, [("A1", "Track One", None, None)])
+        track_id = store.get_release_tracks(conn, 1)[0]["id"]
+        store.set_track_search_artist(conn, track_id, "My Override")
+
+        scan_engine.refresh_release(conn, _FakeLabelClient(), 1)
+
+        track = store.get_track(conn, track_id)
+
+    assert track["search_artist"] == "My Override"
+
+
+def test_refresh_release_defaults_to_the_collection_source(isolated_cache):
+    with store.connect() as conn:
+        scan_engine.refresh_release(conn, _FakeLabelClient(), 1)
+
+        assert list(store.iter_releases_with_tracks(conn))[0][0]["release_id"] == 1
+
+
+def test_refresh_release_uses_a_prefetched_detail_instead_of_fetching_again(isolated_cache):
+    """`scan_label_release` already has to fetch a release's detail early (to re-check its
+    `ImportFilter`) — passing that same detail through avoids a second, redundant API call."""
+    from discogs2ytmusic.discogs import ReleaseDetail, Track
+
+    class _BlowUpClient:
+        def get_release_detail(self, release_id: int):
+            raise AssertionError("should not fetch detail again when one was already given")
+
+    prefetched = ReleaseDetail(
+        tracklist=[Track(position="A1", title="Track One", duration=None, artists=[])],
+        videos=[],
+        artists=["Rush (2)"],
+        title="Moving Pictures",
+        styles=["Rock"],
+        genres=[],
+        year=1981,
+        labels=["Some Label"],
+    )
+
+    with store.connect() as conn:
+        scan_engine.refresh_release(conn, _BlowUpClient(), 1, detail=prefetched)
+
+        release, tracks = next(store.iter_releases_with_tracks(conn))
+
+    assert release["artist"] == "Rush"
+    assert [t["title"] for t in tracks] == ["Track One"]
+
+
 # --- ImportFilter ---
 
 
