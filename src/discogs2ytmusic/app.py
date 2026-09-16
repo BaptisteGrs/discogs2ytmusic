@@ -483,6 +483,88 @@ def _render_rematch_confirmation() -> None:
             st.rerun()
 
 
+def _run_refresh_selected(selected_rows: list[TrackRow], source_type: str = "collection", source_key: str = "") -> bool:
+    """Re-fetch just the selected tracks' underlying release(s) from Discogs and re-resolve
+    their cached matches — a scoped counterpart to Scan+Rematch (`_run_rematch`), for when
+    only a handful of tracks need a fresh look (#84). E.g.: a user adds a Discogs-embedded
+    video after the fact; this lets them pick it up without re-scanning/re-matching the
+    whole collection.
+
+    Deduplicates by `release_id` before fetching (`scan_engine.refresh_release`), since a
+    multi-track selection often spans one release (e.g. a whole re-ripped side) — each
+    distinct release is fetched once, not once per track. Manual per-track corrections
+    (search-artist overrides, styles/genres overrides) survive the refetch exactly as they
+    would a normal `scan --refresh` (see CLAUDE.md's "Manual corrections and locking").
+
+    Then, for every selected track whose cached match isn't itself a manual correction
+    (`source == 'manual'` — same default `rematch` follows), the stale match is dropped
+    and re-resolved via `sync_engine.rematch_track`, checking the freshly refreshed
+    Discogs-embedded videos first, same resolution order as any other match. Tracks that
+    share the same effective (artist, title) query — and so the same cached match row,
+    since `matches.query_key` isn't scoped by release — are only re-resolved once.
+
+    Returns:
+        True if it ran (even if every selected match turned out to be manual and nothing
+        was actually re-searched), False if there were no Discogs credentials to refresh
+        with, or a release fetch failed.
+    """
+    creds = _load_discogs_client()
+    if creds is None:
+        st.error("Not authenticated with Discogs. Run `discogs2ytmusic auth discogs` first.")
+        return False
+    client, _username = creds
+
+    release_ids = sorted({row.release_id for row in selected_rows})
+    total_steps = len(release_ids) + len(selected_rows)
+    progress = st.progress(0.0, text=f"Refreshing {len(release_ids)} release(s)...")
+    step = 0
+
+    with store.connect() as conn:
+        for release_id in release_ids:
+            try:
+                scan_engine.refresh_release(conn, client, release_id, source_type=source_type, source_key=source_key)
+            except DiscogsError as e:
+                progress.empty()
+                st.error(f"Could not refresh release {release_id}: {e}")
+                return False
+            step += 1
+            progress.progress(step / total_steps, text=f"Refreshing releases... ({step}/{len(release_ids)})")
+
+        yt = ytmusic_client.get_client(authenticated=False)
+        release_cache: dict[int, tuple[sqlite3.Row, list[sqlite3.Row]]] = {}
+        rematched_queries: set[tuple[str, str]] = set()
+        n_skipped_manual = 0
+        for i, row in enumerate(selected_rows, start=1):
+            if row.video_overridden:
+                n_skipped_manual += 1
+            elif (row.track_artist, row.track_title) not in rematched_queries:
+                rematched_queries.add((row.track_artist, row.track_title))
+                if row.release_id not in release_cache:
+                    release = store.get_release(conn, row.release_id)
+                    assert release is not None  # just refreshed above
+                    release_cache[row.release_id] = (release, store.get_release_tracks(conn, row.release_id))
+                release, tracks = release_cache[row.release_id]
+                if row.match_id is not None:
+                    store.delete_match(conn, row.match_id)
+                sync_engine.rematch_track(conn, yt, release, tracks, row.track_id, row.track_artist, row.track_title)
+            step += 1
+            progress.progress(step / total_steps, text=f"Rematching tracks... ({i}/{len(selected_rows)})")
+    progress.empty()
+
+    msg = f"Refreshed {len(release_ids)} release(s) and rematched {len(rematched_queries)} track(s)."
+    if n_skipped_manual:
+        msg += f" Kept {n_skipped_manual} manually-corrected match(es) untouched."
+    n_non_manual_selected = len(selected_rows) - n_skipped_manual
+    if len(rematched_queries) < n_non_manual_selected:
+        msg += (
+            " Some of the selected tracks share the same artist/title (and so the same cached "
+            "match) as each other — or possibly as a track outside this selection, since matches "
+            "aren't scoped by release."
+        )
+    st.success(msg)
+    return True
+
+
 def _row_digest(rows: list[TrackRow]) -> str:
     """Short digest identifying a row set by track_id.
 
@@ -510,18 +592,28 @@ def _table_key(prefix: str, rows: list[TrackRow]) -> str:
     return f"{prefix}_{_row_digest(rows)}"
 
 
-def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collection") -> None:
-    """Edit artist/styles/genres/YouTube match for exactly one currently-selected track.
+def _render_edit_panel(
+    selected_rows: list[TrackRow],
+    key_prefix: str = "collection",
+    source_type: str = "collection",
+    source_key: str = "",
+) -> None:
+    """Edit artist/styles/genres/YouTube match for exactly one currently-selected track, or
+    (#84) bulk-refresh a multi-row selection's underlying release(s) + cached matches.
 
     Corrections moved here (out of inline cell-editing) once the main table switched to
     `st.dataframe` for real shift-click range selection (#57) — `st.dataframe` itself is
-    read-only, so it can't host in-place editing the way `st.data_editor` did. Scoped to
-    a single selected row: artist and YouTube-link corrections are inherently per-track,
-    so there's no obviously correct bulk semantic once more than one row is selected.
+    read-only, so it can't host in-place editing the way `st.data_editor` did. Editing
+    stays scoped to a single selected row: artist and YouTube-link corrections are
+    inherently per-track, so there's no obviously correct bulk semantic for those. A
+    multi-row selection instead gets the "Refresh selected" bulk action
+    (`_run_refresh_selected`) — re-fetch + re-resolve, not a manual edit.
 
     `key_prefix` namespaces the underlying widget/session-state keys so the Collection tab
     and a given playlist's detail view — either of which can render this panel in the same
-    session — never collide (#60).
+    session — never collide (#60). `source_type`/`source_key` are this table's own Discogs
+    source (defaults to "my own collection"), passed through to `_run_refresh_selected` so
+    a refreshed release gets (re-)tagged under the right source.
 
     Each field also gets a "Reset" button (enabled only once that field actually carries a
     correction — see `TrackRow.artist_overridden`/`styles_overridden`/`genres_overridden`/
@@ -535,7 +627,26 @@ def _render_edit_panel(selected_rows: list[TrackRow], key_prefix: str = "collect
     """
     if len(selected_rows) != 1:
         if selected_rows:
-            st.caption(f"{len(selected_rows)} tracks selected. Select exactly one to edit its details.")
+            n_release = len({row.release_id for row in selected_rows})
+            release_word = "release" if n_release == 1 else "releases"
+            caption_col, button_col = st.columns([4, 1.4], vertical_alignment="center")
+            with caption_col:
+                st.caption(
+                    f"{len(selected_rows)} tracks selected across {n_release} {release_word}. "
+                    "Select exactly one to edit its details, or refresh all selected tracks."
+                )
+            with button_col:
+                refresh_clicked = st.button(
+                    "Refresh selected",
+                    key=f"{key_prefix}_refresh_selected",
+                    icon=":material/cloud_sync:",
+                    help="Re-fetch these tracks' release(s) from Discogs and re-resolve their cached matches "
+                    "(preserves manual corrections)",
+                    width="stretch",
+                )
+            if refresh_clicked and _run_refresh_selected(selected_rows, source_type=source_type, source_key=source_key):
+                st.session_state.pop("collection_editor", None)
+                st.rerun()
         else:
             st.caption("Select a track above to edit its artist, styles, genres, or YouTube match.")
         return
@@ -903,7 +1014,7 @@ def _render_source_browser(
     )
     selected_rows = [rows[i] for i in event.selection.rows]
 
-    _render_edit_panel(selected_rows, key_prefix=key_prefix)
+    _render_edit_panel(selected_rows, key_prefix=key_prefix, source_type=source_type, source_key=source_key)
 
     # "Select all" overrides whatever's highlighted in the table rather than merely
     # pre-selecting it, so the table's own selection can't be used to carve out
@@ -1713,7 +1824,12 @@ def _render_playlist_detail(playlist: sqlite3.Row) -> None:
         )
         selected_rows = [rows[i] for i in event.selection.rows]
 
-        _render_edit_panel(selected_rows, key_prefix=f"playlist_{playlist_id}")
+        _render_edit_panel(
+            selected_rows,
+            key_prefix=f"playlist_{playlist_id}",
+            source_type=playlist["source_type"],
+            source_key=playlist["source_key"],
+        )
 
         to_remove = [r.track_id for r in selected_rows if r.track_id is not None]
         if st.button(f"Remove {len(to_remove)} selected", key=f"remove_button_{playlist_id}", disabled=not to_remove):

@@ -645,6 +645,105 @@ def test_edit_panel_prompts_to_narrow_the_selection_when_multiple_rows_are_selec
     assert not any((ti.key or "").startswith("collection_edit_") for ti in at.main.text_input)
 
 
+def test_refresh_selected_button_is_offered_for_a_multi_row_selection(isolated_cache, dummy_library):
+    """The bulk "Refresh selected" action (#84) is the multi-row counterpart to the
+    single-row edit panel — offered exactly where the "select exactly one" caption used to
+    be the whole story."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0, 1])
+
+    assert not at.exception
+    assert at.button(key="collection_refresh_selected").label == "Refresh selected"
+
+
+def test_refresh_selected_button_not_offered_for_a_single_row_selection(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    at = _select_table_rows(at, table_key, [0])
+
+    assert not at.exception
+    assert not any((b.key or "") == "collection_refresh_selected" for b in at.main.button)
+
+
+def test_refresh_selected_refetches_deduped_release_and_rematches_selected_non_manual_tracks(
+    isolated_cache, dummy_library, fake_discogs_client, monkeypatch
+):
+    """The full round trip for #84: re-fetch just the selected tracks' underlying
+    release(s) — deduped by release_id, so 2 selected tracks from the same release only
+    cost one Discogs API call — then drop and re-resolve each selected track's cached
+    match, except a manually-corrected one, which must survive untouched (same default
+    `rematch` follows for the CLAUDE.md locking invariant)."""
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+
+    # This release has 4 tracks in the fixture, so 2 selected rows can share one release.
+    multi_track_release_id = 34365844
+
+    with store.connect() as conn:
+        release = store.get_release(conn, multi_track_release_id)
+        tracks = store.get_release_tracks(conn, multi_track_release_id)
+        # The Collection table sorts globally by (track_artist, track_title) (see
+        # `filters.resolve_rows`), so within one release the first two rows selected below
+        # will be these two, in this order — not necessarily tracklist order.
+        queries = sorted(store.effective_track_queries(release, tracks), key=lambda q: (q[1], q[2]))
+        stale_track_id, stale_artist, stale_title = queries[0]
+        manual_track_id, manual_artist, manual_title = queries[1]
+        store.save_match(conn, stale_artist, stale_title, "stale-id", "Stale match", "ytmusic", 50.0)
+        store.save_match(conn, manual_artist, manual_title, "manual-id", "Manual pick", "manual", None)
+        conn.commit()
+
+    fetch_calls: list[int] = []
+    real_get_release_detail = fake_discogs_client.get_release_detail
+
+    def counting_get_release_detail(release_id: int):
+        fetch_calls.append(release_id)
+        return real_get_release_detail(release_id)
+
+    monkeypatch.setattr(fake_discogs_client, "get_release_detail", counting_get_release_detail)
+    _mock_discogs_client(monkeypatch, fake_discogs_client)
+
+    import discogs2ytmusic.app as app_module
+    from discogs2ytmusic import matcher
+    from discogs2ytmusic.matcher import MatchResult
+
+    monkeypatch.setattr(app_module.ytmusic_client, "get_client", lambda authenticated=True: object())
+    monkeypatch.setattr(
+        matcher, "find_match", lambda yt, artist, title: MatchResult(f"fresh::{title}", title, "ytmusic", 90.0)
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    table_key = _collection_table_key(at)
+    df = _collection_table_df(at)
+    positions = [i for i, rid in enumerate(df["release_id"]) if int(rid) == multi_track_release_id][:2]
+    assert len(positions) == 2
+    at = _select_table_rows(at, table_key, positions)
+
+    at.button(key="collection_refresh_selected").click()
+    at.session_state[table_key] = {"selection": {"rows": positions, "columns": [], "cells": []}}
+    at.run()
+
+    assert not at.exception
+    assert fetch_calls.count(multi_track_release_id) == 1  # deduped despite 2 selected rows
+
+    with store.connect() as conn:
+        stale_match = store.get_match(conn, stale_artist, stale_title)
+        manual_match = store.get_match(conn, manual_artist, manual_title)
+
+    assert stale_match is not None
+    assert stale_match["video_id"] == f"fresh::{stale_title}"
+    assert stale_match["source"] == "ytmusic"
+    assert manual_match is not None
+    assert manual_match["video_id"] == "manual-id"
+    assert manual_match["source"] == "manual"  # untouched, per the locking invariant
+
+
 def test_edit_panel_is_prefilled_with_the_selected_track(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)
