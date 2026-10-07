@@ -31,6 +31,19 @@ def test_scan_populates_cache_from_dummy_library(isolated_cache, fake_discogs_cl
     assert sum(len(tracks) for _release, tracks in releases) == 18
 
 
+def test_scan_stores_the_earliest_copys_date_added(isolated_cache, fake_discogs_client, dummy_library, monkeypatch):
+    first = dummy_library[0]
+    later_copy = {**first, "date_added": "2099-01-01T00:00:00-08:00"}
+    fake_discogs_client._releases = [*dummy_library, later_copy]  # a second copy, scanned after the original
+    monkeypatch.setattr(cli, "_load_discogs_client", lambda: (fake_discogs_client, "dummyuser"))
+
+    result = runner.invoke(cli.app, ["scan"])
+
+    assert result.exit_code == 0, result.output
+    with store.connect() as conn:
+        assert store.get_dates_added(conn, "collection", "")[first["release_id"]] == first["date_added"]
+
+
 def test_scan_skips_a_release_discogs_cant_return_instead_of_aborting(isolated_cache, fake_discogs_client, monkeypatch):
     """A release detail fetch can 404 (e.g. a wantlist item merged into another release id,
     or pulled from Discogs entirely) — that must not abort the whole scan and strand every

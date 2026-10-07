@@ -260,6 +260,7 @@ def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[Tr
     playlist = store.get_playlist(conn, playlist_id)
     if playlist is None:
         return rows
+    dates_added = store.get_dates_added(conn, playlist["source_type"], playlist["source_key"])
     for track_id in store.list_playlist_track_ids(conn, playlist_id):
         track = store.get_track(conn, track_id)
         if track is None:
@@ -268,8 +269,5 @@ def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[Tr
         if release is None:
             continue
         [(_, artist, title)] = store.effective_track_queries(release, [track])
-        date_added = store.get_release_date_added(
-            conn, release["release_id"], playlist["source_type"], playlist["source_key"]
-        )
-        rows.append(_build_track_row(conn, release, track, artist, title, date_added))
+        rows.append(_build_track_row(conn, release, track, artist, title, dates_added.get(release["release_id"])))
     return rows

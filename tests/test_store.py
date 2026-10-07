@@ -1283,7 +1283,7 @@ def test_release_sources_table_migrates_in_date_added_column(isolated_cache):
         assert tuple(row) == (1700000000.0, None)
 
         store.record_release_source(conn, 1, "collection", "", date_added="2021-05-01T10:00:00-07:00")
-        assert store.get_release_date_added(conn, 1, "collection", "") == "2021-05-01T10:00:00-07:00"
+        assert store.get_dates_added(conn, "collection", "").get(1) == "2021-05-01T10:00:00-07:00"
 
 
 def test_record_release_source_updates_date_added_without_touching_added_at(isolated_cache):
@@ -1304,7 +1304,7 @@ def test_record_release_source_without_a_date_keeps_the_stored_one(isolated_cach
         store.upsert_release(conn, 1, "Artist", "Title", [], [], date_added="2020-01-01T00:00:00-08:00")
         store.upsert_release(conn, 1, "Artist", "Title", [], [])
 
-        assert store.get_release_date_added(conn, 1, "collection", "") == "2020-01-01T00:00:00-08:00"
+        assert store.get_dates_added(conn, "collection", "").get(1) == "2020-01-01T00:00:00-08:00"
 
 
 def test_date_added_is_stored_per_source(isolated_cache):
@@ -1312,8 +1312,8 @@ def test_date_added_is_stored_per_source(isolated_cache):
         store.upsert_release(conn, 1, "Artist", "Title", [], [], date_added="2020-01-01T00:00:00-08:00")
         store.record_release_source(conn, 1, "wantlist", "alice", date_added="2018-03-03T03:03:03-08:00")
 
-        assert store.get_release_date_added(conn, 1, "collection", "") == "2020-01-01T00:00:00-08:00"
-        assert store.get_release_date_added(conn, 1, "wantlist", "alice") == "2018-03-03T03:03:03-08:00"
-        assert store.get_release_date_added(conn, 1, "label", "123") is None
+        assert store.get_dates_added(conn, "collection", "").get(1) == "2020-01-01T00:00:00-08:00"
+        assert store.get_dates_added(conn, "wantlist", "alice").get(1) == "2018-03-03T03:03:03-08:00"
+        assert store.get_dates_added(conn, "label", "123").get(1) is None
         [(release, _)] = store.iter_releases_with_tracks(conn, source_type="wantlist", source_key="alice")
         assert release["date_added"] == "2018-03-03T03:03:03-08:00"

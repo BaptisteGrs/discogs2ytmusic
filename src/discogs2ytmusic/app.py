@@ -122,7 +122,10 @@ SHARED_COLUMN_CONFIG: dict[str, Any] = {
     "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
     "date_added": st.column_config.DateColumn(
         "Date Added",
-        help="When this release was added to your Discogs collection/wantlist (blank for labels/sellers)",
+        help=(
+            "When this release was added to your Discogs collection/wantlist. Blank for labels/sellers, "
+            "and for releases cached before this column existed until the next Scan fills it in."
+        ),
         format="YYYY-MM-DD",
     ),
     "matched": st.column_config.CheckboxColumn("Matched"),
@@ -313,6 +316,8 @@ def _run_scan(refresh: bool, source_type: str = "collection", source_key: str = 
     except DiscogsError as e:
         st.error(f"Could not fetch from Discogs: {e}")
         return False
+    if source_type in ("collection", "user_collection", "wantlist"):
+        items = scan_engine.collapse_copies(items)
 
     total = len(items)
     progress = st.progress(0.0, text=f"Fetching tracklists... (0/{total})")

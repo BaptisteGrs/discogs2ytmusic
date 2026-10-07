@@ -170,6 +170,7 @@ def scan(
             basics.append(item)
             progress.update(task, description=f"Fetching collection... ({len(basics)} releases)")
         progress.update(task, total=len(basics), completed=len(basics))
+        basics = scan_engine.collapse_copies(basics)
 
         task2 = progress.add_task("Fetching tracklists...", total=len(basics))
         failed = 0

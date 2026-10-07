@@ -438,13 +438,15 @@ def record_release_source(
     )
 
 
-def get_release_date_added(conn: sqlite3.Connection, release_id: int, source_type: str, source_key: str) -> str | None:
-    """Discogs' own `date_added` for a release under one source, or None if unknown/untagged."""
-    row = conn.execute(
-        "SELECT date_added FROM release_sources WHERE release_id = ? AND source_type = ? AND source_key = ?",
-        (release_id, source_type, source_key),
-    ).fetchone()
-    return row[0] if row is not None else None
+def get_dates_added(conn: sqlite3.Connection, source_type: str, source_key: str) -> dict[int, str]:
+    """Discogs' own `date_added` for every release tagged under one source that has one, by release id."""
+    return dict(
+        conn.execute(
+            """SELECT release_id, date_added FROM release_sources
+               WHERE source_type = ? AND source_key = ? AND date_added IS NOT NULL""",
+            (source_type, source_key),
+        ).fetchall()
+    )
 
 
 def prune_release_source_tags(
