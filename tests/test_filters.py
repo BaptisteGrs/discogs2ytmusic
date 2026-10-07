@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
-from discogs2ytmusic import filters, store
+from discogs2ytmusic import filters, scan_engine, store
 
 
 def _seed(conn, dummy_library):
@@ -533,3 +534,60 @@ def test_resolve_rows_defaults_to_the_collection_source_and_excludes_others(isol
 
     assert [r.track_title for r in collection_rows] == ["Collection Track"]
     assert [r.track_title for r in label_rows] == ["Label Track"]
+
+
+# --- date_added ---
+
+
+def _scan_fixture(conn, fake_discogs_client):
+    for item in fake_discogs_client.iter_collection_basic("me"):
+        scan_engine.scan_release(conn, fake_discogs_client, item, refresh=False)
+
+
+def test_resolve_rows_surfaces_discogs_date_added(isolated_cache, fake_discogs_client, dummy_library):
+    with store.connect() as conn:
+        _scan_fixture(conn, fake_discogs_client)
+        rows = filters.resolve_rows(conn)
+
+    expected = {r["release_id"]: datetime.fromisoformat(r["date_added"]) for r in dummy_library}
+    assert rows
+    for row in rows:
+        assert row.date_added == expected[row.release_id]
+        assert row.date_added.tzinfo is not None
+
+
+def test_resolve_rows_date_added_is_none_when_unknown_or_malformed(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)  # no date_added passed, like a cache not yet re-scanned
+        store.record_release_source(conn, dummy_library[0]["release_id"], "collection", "", date_added="not a date")
+        rows = filters.resolve_rows(conn)
+
+    assert rows
+    assert all(r.date_added is None for r in rows)
+
+
+def test_resolve_rows_uses_the_browsed_sources_own_date_added(isolated_cache, dummy_library):
+    first = dummy_library[0]
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        store.record_release_source(conn, first["release_id"], "wantlist", "alice", "2010-01-01T00:00:00-08:00")
+        rows = filters.resolve_rows(conn, source_type="wantlist", source_key="alice")
+
+    assert rows
+    assert all(r.date_added == datetime.fromisoformat("2010-01-01T00:00:00-08:00") for r in rows)
+
+
+def test_resolve_playlist_rows_surfaces_date_added_from_the_playlists_source(
+    isolated_cache, fake_discogs_client, dummy_library
+):
+    first = dummy_library[0]
+    with store.connect() as conn:
+        _scan_fixture(conn, fake_discogs_client)
+        track_id = conn.execute("SELECT id FROM tracks WHERE release_id = ?", (first["release_id"],)).fetchone()[0]
+        playlist_id = store.create_playlist(conn, "My Playlist")
+        store.add_tracks_to_playlist(conn, playlist_id, [track_id])
+
+    with store.connect() as conn:
+        [row] = filters.resolve_playlist_rows(conn, playlist_id)
+
+    assert row.date_added == datetime.fromisoformat(first["date_added"])

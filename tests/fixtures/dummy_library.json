@@ -7,6 +7,7 @@
       "styles": ["House"],
       "genres": ["Electronic"],
       "year": 1999,
+      "date_added": "2019-03-14T10:22:05-07:00",
       "labels": ["Distance"],
       "tracklist": [
         {"position": "A", "title": "Sex & Sun Part III", "duration": "6:42"}
@@ -19,6 +20,7 @@
       "styles": ["House"],
       "genres": ["Electronic"],
       "year": 1998,
+      "date_added": "2019-06-02T18:41:30-07:00",
       "labels": ["Eternal"],
       "tracklist": [
         {"position": "B3", "title": "This Is It (Miami Heat Mix)", "duration": null}
@@ -31,6 +33,7 @@
       "styles": ["House"],
       "genres": ["Electronic"],
       "year": 2021,
+      "date_added": "2020-01-11T09:05:12-08:00",
       "labels": ["Freak n Chic"],
       "tracklist": [
         {"position": "A", "title": "Sydney 23", "duration": null}
@@ -43,6 +46,7 @@
       "styles": ["Techno"],
       "genres": ["Electronic"],
       "year": 2023,
+      "date_added": "2020-04-27T21:13:48-07:00",
       "labels": ["Self-released"],
       "tracklist": [
         {"position": "B1", "title": "Foolish Human", "duration": null}
@@ -55,6 +59,7 @@
       "styles": ["Techno"],
       "genres": ["Electronic"],
       "year": 2011,
+      "date_added": "2020-09-08T14:56:01-07:00",
       "labels": ["Senso Sounds"],
       "tracklist": [
         {"position": "B2", "title": "Disco Tech (Original Mix)", "duration": null}
@@ -67,6 +72,7 @@
       "styles": ["Techno"],
       "genres": ["Electronic"],
       "year": 2020,
+      "date_added": "2021-02-19T08:30:44-08:00",
       "labels": ["Correspondant"],
       "tracklist": [
         {"position": "C2", "title": "Sunday Circles", "duration": "4:04"}
@@ -79,6 +85,7 @@
       "styles": ["Deep House"],
       "genres": ["Electronic"],
       "year": 2022,
+      "date_added": "2021-07-03T16:12:27-07:00",
       "labels": ["Toy Tonics"],
       "tracklist": [
         {"position": "B3", "title": "Woorabinda Reserve", "duration": null}
@@ -91,6 +98,7 @@
       "styles": ["Deep House"],
       "genres": ["Electronic"],
       "year": 2025,
+      "date_added": "2022-11-25T12:00:00-08:00",
       "labels": ["Yoyaku"],
       "tracklist": [
         {"position": "A1", "title": "It's a Dream", "duration": null, "discogs_artist": "HOSTOM"},
@@ -106,6 +114,7 @@
       "styles": ["Acid"],
       "genres": ["Electronic"],
       "year": 2019,
+      "date_added": "2023-01-30T19:47:09-08:00",
       "labels": ["Tasty Recordings"],
       "tracklist": [
         {"position": "A2", "title": "Initial Commit", "duration": "5:09"}
@@ -118,6 +127,7 @@
       "styles": ["Acid"],
       "genres": ["Electronic"],
       "year": 1993,
+      "date_added": "2023-05-16T07:25:33-07:00",
       "labels": ["Djax-Up-Beats"],
       "tracklist": [
         {"position": "B3", "title": "Energize (Captain's Log Mix)", "duration": "8:00"}
@@ -130,6 +140,7 @@
       "styles": ["Acid"],
       "genres": ["Electronic"],
       "year": 2021,
+      "date_added": "2023-12-01T22:58:16-08:00",
       "labels": ["Skryption"],
       "tracklist": [
         {"position": "B2", "title": "Loosing Their Minds", "duration": null}
@@ -142,6 +153,7 @@
       "styles": ["Breakbeat"],
       "genres": ["Electronic"],
       "year": 1993,
+      "date_added": "2024-03-09T11:11:11-08:00",
       "labels": ["Low Spirit"],
       "tracklist": [
         {"position": "A1", "title": "Born To Bang (Sharam Remix)", "duration": null}
@@ -154,6 +166,7 @@
       "styles": ["Breakbeat"],
       "genres": ["Electronic"],
       "year": 2020,
+      "date_added": "2024-08-21T15:34:50-07:00",
       "labels": ["Emotional Response"],
       "tracklist": [
         {"position": "A", "title": "Lookout (Tha Luv Bomb Mix)", "duration": null}
@@ -166,6 +179,7 @@
       "styles": ["Trance"],
       "genres": ["Electronic"],
       "year": 1998,
+      "date_added": "2025-02-14T20:02:02-08:00",
       "labels": ["Platipus"],
       "tracklist": [
         {"position": "B1", "title": "Hi-Q (House Of Usher / Non Eric Mix)", "duration": "5:22"}
@@ -178,6 +192,7 @@
       "styles": ["Trance"],
       "genres": ["Electronic"],
       "year": 2021,
+      "date_added": "2025-06-30T09:45:00-07:00",
       "labels": ["Involve Records"],
       "tracklist": [
         {"position": "A2", "title": "Eternal Flower", "duration": null}

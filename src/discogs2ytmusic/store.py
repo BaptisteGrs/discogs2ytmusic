@@ -139,7 +139,11 @@ CREATE TABLE IF NOT EXISTS release_sources (
     release_id INTEGER NOT NULL,
     source_type TEXT NOT NULL,
     source_key TEXT NOT NULL DEFAULT '',
-    added_at REAL NOT NULL,
+    added_at REAL NOT NULL,   -- local time this app first tagged the release, NOT Discogs' own date
+    -- Discogs' own ISO 8601 `date_added` for this collection/wantlist membership, verbatim.
+    -- NULL for sources whose listing carries no such date (label/seller) or until the
+    -- next scan of a cache created before this column existed.
+    date_added TEXT,
     PRIMARY KEY (release_id, source_type, source_key),
     FOREIGN KEY (release_id) REFERENCES releases(release_id)
 );
@@ -290,6 +294,21 @@ def _migrate_other_sources_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_release_sources_table(conn: sqlite3.Connection) -> None:
+    """One-time upgrade for `release_sources` rows created before `date_added` existed.
+
+    Existing rows are left NULL rather than backfilled from `added_at` — that's the local
+    time this app first saw the release, not when it was added on Discogs, and the real
+    value arrives on the next scan anyway (see `record_release_source`).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(release_sources)")}
+    if not cols:
+        return
+    if "date_added" not in cols:
+        conn.execute("ALTER TABLE release_sources ADD COLUMN date_added TEXT")
+    conn.commit()
+
+
 def _migrate_release_sources_backfill(conn: sqlite3.Connection, table_is_new: bool) -> None:
     """Tag every pre-existing release as collection-sourced — but only the first time
     `release_sources` itself is created for this cache file.
@@ -336,6 +355,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     _migrate_playlists_to_playlist_defs(conn)
     _migrate_playlists_table(conn)
     _migrate_other_sources_table(conn)
+    _migrate_release_sources_table(conn)
     _migrate_release_sources_backfill(conn, table_is_new=not release_sources_existed)
     try:
         yield conn
@@ -388,14 +408,44 @@ def match_key(artist: str, title: str) -> str:
     return f"{artist.strip().lower()}||{title.strip().lower()}"
 
 
-def record_release_source(conn: sqlite3.Connection, release_id: int, source_type: str, source_key: str) -> None:
+def record_release_source(
+    conn: sqlite3.Connection,
+    release_id: int,
+    source_type: str,
+    source_key: str,
+    date_added: str | None = None,
+) -> None:
     """Tag a release as belonging to a given source (many-to-many — see `release_sources`).
 
-    A no-op if the release is already tagged with this exact (source_type, source_key).
+    Args:
+        conn: Open sqlite connection.
+        release_id: The Discogs release id to tag.
+        source_type: Which Discogs source the release came from.
+        source_key: The source's own key, paired with `source_type`.
+        date_added: Discogs' own ISO 8601 `date_added` for this membership, when the
+            source's listing carries one (collection/wantlist items do). Refreshed on an
+            already-tagged release so an existing cache picks it up on its next scan;
+            `None` leaves whatever's stored untouched, since several callers (label/
+            seller scans, `scan_engine.refresh_release`) re-tag without knowing it.
+            `added_at` is never touched on an existing tag.
     """
     conn.execute(
-        "INSERT OR IGNORE INTO release_sources (release_id, source_type, source_key, added_at) VALUES (?, ?, ?, ?)",
-        (release_id, source_type, source_key, time.time()),
+        """INSERT INTO release_sources (release_id, source_type, source_key, added_at, date_added)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(release_id, source_type, source_key) DO UPDATE SET
+             date_added=COALESCE(excluded.date_added, date_added)""",
+        (release_id, source_type, source_key, time.time(), date_added),
+    )
+
+
+def get_dates_added(conn: sqlite3.Connection, source_type: str, source_key: str) -> dict[int, str]:
+    """Discogs' own `date_added` for every release tagged under one source that has one, by release id."""
+    return dict(
+        conn.execute(
+            """SELECT release_id, date_added FROM release_sources
+               WHERE source_type = ? AND source_key = ? AND date_added IS NOT NULL""",
+            (source_type, source_key),
+        ).fetchall()
     )
 
 
@@ -459,6 +509,7 @@ def upsert_release(
     videos: list[dict] | None = None,
     source_type: str = DEFAULT_SOURCE_TYPE,
     source_key: str = DEFAULT_SOURCE_KEY,
+    date_added: str | None = None,
 ) -> None:
     """Insert or refresh a release's Discogs-sourced fields, and tag it with the given source.
 
@@ -474,7 +525,8 @@ def upsert_release(
     (a plain collection scan) keeps tagging releases exactly as before. Scanning a label
     catalogue, another user's collection, or a wantlist passes its own source_type/key;
     the tag is additive (`record_release_source`), so a release already known from one
-    source doesn't lose that tag by also turning up in another.
+    source doesn't lose that tag by also turning up in another. `date_added` is Discogs'
+    own date for that membership, passed straight through to `record_release_source`.
 
     Deliberately does not touch artist_override/title_override/styles_override/
     genres_override — a re-scan (e.g. `scan --refresh`) must not wipe out manual
@@ -502,7 +554,7 @@ def upsert_release(
             videos_json,
         ),
     )
-    record_release_source(conn, release_id, source_type, source_key)
+    record_release_source(conn, release_id, source_type, source_key, date_added)
 
 
 def set_release_artist_override(conn: sqlite3.Connection, release_id: int, artist: str | None) -> None:
@@ -1120,11 +1172,13 @@ def iter_releases_with_tracks(
 
     Defaults to "my own collection", matching every call site that existed before the
     "Other sources" feature — pass a different source_type/source_key (an other_sources
-    row's own) to browse a label/wantlist/other user's collection instead.
+    row's own) to browse a label/wantlist/other user's collection instead. Each release
+    row also carries that source's `date_added` (see `release_sources`), since it's a
+    property of the membership rather than of the release itself.
     """
     conn.row_factory = sqlite3.Row
     releases = conn.execute(
-        """SELECT r.* FROM releases r
+        """SELECT r.*, rs.date_added FROM releases r
            JOIN release_sources rs ON rs.release_id = r.release_id
            WHERE rs.source_type = ? AND rs.source_key = ?
            ORDER BY r.release_id""",

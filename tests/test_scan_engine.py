@@ -335,3 +335,84 @@ def test_scan_label_release_checks_cached_style_for_an_already_known_release(iso
 
         assert kept is False
         assert list(store.iter_releases_with_tracks(conn, source_type="label", source_key="123")) == []
+
+
+def test_scan_release_stores_discogs_date_added(isolated_cache):
+    item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2021-02-19T08:30:44-08:00"}
+
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+
+        assert store.get_dates_added(conn, "collection", "").get(1) == "2021-02-19T08:30:44-08:00"
+
+
+def test_scan_release_updates_date_added_on_rescan(isolated_cache):
+    """A re-scan without --refresh must still pick up the date, so an existing cache (whose
+    rows predate the column, or whose record was removed and re-added on Discogs) gets it."""
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), _basic_item(1, "Some Artist", "Some EP"), refresh=False)
+        assert store.get_dates_added(conn, "collection", "").get(1) is None
+
+        item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2023-05-16T07:25:33-07:00"}
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+
+        assert store.get_dates_added(conn, "collection", "").get(1) == "2023-05-16T07:25:33-07:00"
+
+
+def test_scan_release_stores_date_added_under_a_wantlist_source(isolated_cache):
+    item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2022-11-25T12:00:00-08:00"}
+
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False, source_type="wantlist", source_key="alice")
+
+        assert store.get_dates_added(conn, "wantlist", "alice").get(1) == "2022-11-25T12:00:00-08:00"
+
+
+def test_refresh_release_keeps_a_stored_date_added(isolated_cache):
+    item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2022-11-25T12:00:00-08:00"}
+
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+        scan_engine.refresh_release(conn, _FakeLabelClient(), 1)
+
+        assert store.get_dates_added(conn, "collection", "").get(1) == "2022-11-25T12:00:00-08:00"
+
+
+def _copy(release_id: int, date_added: str | None) -> dict:
+    return {**_basic_item(release_id, "Some Artist", "Some EP"), "date_added": date_added}
+
+
+def test_collapse_copies_keeps_the_earliest_copy_regardless_of_order(isolated_cache):
+    early, late = "2019-03-14T10:22:05-07:00", "2024-08-21T15:34:50-07:00"
+
+    for items in ([_copy(1, early), _copy(1, late)], [_copy(1, late), _copy(1, early)]):
+        collapsed = scan_engine.collapse_copies([*items, _copy(2, late)])
+
+        assert [(i["basic_information"]["id"], i["date_added"]) for i in collapsed] == [(1, early), (2, late)]
+        with store.connect() as conn:
+            for item in collapsed:
+                scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+            assert store.get_dates_added(conn, "collection", "") == {1: early, 2: late}
+
+
+def test_collapse_copies_compares_dates_not_strings_and_ignores_missing_or_malformed():
+    # 01:00 at -08:00 is 09:00 UTC, i.e. later than 08:00 UTC, though it sorts first as text.
+    later_text_first = _copy(1, "2020-01-01T01:00:00-08:00")
+    earlier = _copy(1, "2020-01-01T08:00:00+00:00")
+    assert scan_engine.collapse_copies([later_text_first, earlier]) == [earlier]
+
+    dated = _copy(1, "2020-01-01T00:00:00-08:00")
+    assert scan_engine.collapse_copies([_copy(1, None), dated]) == [dated]
+    assert scan_engine.collapse_copies([dated, _copy(1, None), _copy(1, "garbage")]) == [dated]
+
+
+def test_a_removed_earlier_copy_stops_deciding_the_date_on_the_next_scan(isolated_cache):
+    early, late = "2019-03-14T10:22:05-07:00", "2024-08-21T15:34:50-07:00"
+
+    with store.connect() as conn:
+        for item in scan_engine.collapse_copies([_copy(1, early), _copy(1, late)]):
+            scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+        for item in scan_engine.collapse_copies([_copy(1, late)]):  # the early copy was removed on Discogs
+            scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+
+        assert store.get_dates_added(conn, "collection", "") == {1: late}

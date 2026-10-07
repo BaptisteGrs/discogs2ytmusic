@@ -12,6 +12,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from . import store
@@ -171,6 +172,41 @@ def refresh_release(
     conn.commit()
 
 
+def _is_earlier(candidate: str | None, current: str | None) -> bool:
+    if candidate is None:
+        return False
+    if current is None:
+        return True
+    try:
+        return datetime.fromisoformat(candidate) < datetime.fromisoformat(current)
+    except (ValueError, TypeError):  # malformed, or naive vs aware — keep what we have
+        return False
+
+
+def collapse_copies(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce collection/wantlist items to one per release, keeping each release's earliest copy.
+
+    Discogs lists one item per *copy* in a collection, each with its own `date_added`, and
+    the endpoint takes no sort order we rely on — so without this, whichever copy happened
+    to be scanned last would decide the stored date. Collapsing per scan (rather than
+    keeping the earliest date ever seen in the cache) means a copy since removed on Discogs
+    stops counting on the next scan. Also spares a duplicate `scan_release` per extra copy.
+
+    Args:
+        items: Items as yielded by `DiscogsClient.iter_collection_basic`/`iter_wantlist_basic`.
+
+    Returns:
+        One item per release id, in first-seen order.
+    """
+    by_release: dict[int, dict[str, Any]] = {}
+    for item in items:
+        release_id = item["basic_information"]["id"]
+        kept = by_release.get(release_id)
+        if kept is None or _is_earlier(item.get("date_added"), kept.get("date_added")):
+            by_release[release_id] = item
+    return list(by_release.values())
+
+
 def scan_release(
     conn: sqlite3.Connection,
     client: DiscogsClient,
@@ -245,6 +281,8 @@ def scan_release(
         videos=None,
         source_type=source_type,
         source_key=source_key,
+        # A sibling of `basic_information`, not inside it — absent from label/seller listings.
+        date_added=item.get("date_added"),
     )
     conn.commit()
     return True
