@@ -113,6 +113,20 @@ def test_app_lists_every_track_by_default(isolated_cache, dummy_library):
     assert at.main.caption[1].value == f"{total_tracks} tracks (0 matched)"
 
 
+def test_app_collection_table_shows_discogs_date_added(isolated_cache, dummy_library):
+    with store.connect() as conn:
+        _seed(conn, dummy_library)
+        for r in dummy_library:
+            store.record_release_source(conn, r["release_id"], "collection", "", date_added=r["date_added"])
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert not at.exception
+    df = _collection_table_df(at)
+    expected = {r["release_id"]: datetime.datetime.fromisoformat(r["date_added"]).date() for r in dummy_library}
+    assert {rid: pd.Timestamp(d).date() for rid, d in zip(df["release_id"], df["date_added"], strict=True)} == expected
+
+
 def test_app_tag_filter_narrows_the_table(isolated_cache, dummy_library):
     with store.connect() as conn:
         _seed(conn, dummy_library)

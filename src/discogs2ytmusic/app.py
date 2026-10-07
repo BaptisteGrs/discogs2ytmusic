@@ -88,6 +88,7 @@ COLLECTION_COLUMNS = [
     "track_title",
     "labels",
     "year",
+    "date_added",
     "matched",
     "discogs_url",
     "youtube_url",
@@ -119,6 +120,11 @@ SHARED_COLUMN_CONFIG: dict[str, Any] = {
         display_text="Open",
     ),
     "discogs_url": st.column_config.LinkColumn("Discogs", display_text="Open"),
+    "date_added": st.column_config.DateColumn(
+        "Date Added",
+        help="When this release was added to your Discogs collection/wantlist (blank for labels/sellers)",
+        format="YYYY-MM-DD",
+    ),
     "matched": st.column_config.CheckboxColumn("Matched"),
     "channel": st.column_config.TextColumn("Channel", help="Uploader/channel of the matched YouTube video"),
     "styles": st.column_config.TextColumn(
@@ -204,6 +210,7 @@ _TRACK_ROW_COLUMNS = [
     "genres",
     "labels",
     "year",
+    "date_added",
     "matched",
     "confidence",
     "youtube_url",
@@ -229,6 +236,8 @@ def _rows_to_dataframe(rows: list[TrackRow]) -> pd.DataFrame:
             "genres": ", ".join(r.genres),
             "labels": ", ".join(r.labels),
             "year": r.year,
+            # Date only, in Discogs' own timezone — what the Discogs site itself shows.
+            "date_added": r.date_added.date() if r.date_added is not None else None,
             "matched": r.matched,
             "confidence": r.score,
             "youtube_url": r.youtube_url,

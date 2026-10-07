@@ -23,6 +23,20 @@ def test_library_dummy_scan_seeds_from_bundled_fixture(isolated_cache):
         assert style in result.output
 
 
+def test_library_dummy_scan_stores_date_added(isolated_cache):
+    result = runner.invoke(cli.app, ["--library", "dummy", "scan"])
+    assert result.exit_code == 0, result.output
+
+    conn = sqlite3.connect(isolated_cache.parent / "dummy_cache.sqlite3")
+    try:
+        missing = conn.execute("SELECT COUNT(*) FROM release_sources WHERE date_added IS NULL").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM release_sources").fetchone()[0]
+    finally:
+        conn.close()
+    assert total == 15
+    assert missing == 0
+
+
 def test_library_dummy_scan_does_not_touch_the_real_cache(isolated_cache):
     result = runner.invoke(cli.app, ["--library", "dummy", "scan"])
     assert result.exit_code == 0, result.output

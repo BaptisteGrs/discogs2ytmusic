@@ -113,6 +113,9 @@ class TrackRow:
     genres: list[str]
     labels: list[str]
     year: int | None
+    # When this release was added to the browsed Discogs source (collection/wantlist) per
+    # Discogs itself; None for sources without one (label/seller) or not yet re-scanned.
+    date_added: datetime | None
     discogs_url: str
     match_id: int | None
     matched: bool
@@ -136,12 +139,23 @@ class TrackRow:
     video_overridden: bool
 
 
+def _parse_date_added(value: str | None) -> datetime | None:
+    # Stored verbatim from Discogs, so don't let one malformed value break the whole table.
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def _build_track_row(
     conn: sqlite3.Connection,
     release: sqlite3.Row,
     track: sqlite3.Row | None,
     artist: str,
     title: str,
+    date_added: str | None,
 ) -> TrackRow:
     track_id = track["id"] if track is not None else None
     position = track["position"] if track is not None else None
@@ -167,6 +181,7 @@ def _build_track_row(
         genres=store.effective_track_genres(track, release),
         labels=json.loads(release["labels"]) or [],
         year=release["year"],
+        date_added=_parse_date_added(date_added),
         discogs_url=release_url(release["release_id"]),
         match_id=match["id"] if match is not None else None,
         matched=bool(video_id),
@@ -209,7 +224,7 @@ def resolve_rows(
         tracks_by_id = {t["id"]: t for t in tracks}
         for track_id, artist, title in store.effective_track_queries(release, tracks):
             track = tracks_by_id.get(track_id) if track_id is not None else None
-            row = _build_track_row(conn, release, track, artist, title)
+            row = _build_track_row(conn, release, track, artist, title, release["date_added"])
             if filt is not None and filt.matched_only and not row.video_id:
                 continue
             if filt is not None and filt.channels and row.channel not in filt.channels:
@@ -239,8 +254,12 @@ def filter_rows_by_query(rows: list[TrackRow], query: str) -> list[TrackRow]:
 
 def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[TrackRow]:
     """TrackRows for one curated playlist's tracks, in playlist order (unlike `resolve_rows`,
-    this is not re-sorted — playlist order is meaningful)."""
+    this is not re-sorted — playlist order is meaningful). Each row's `date_added` is the
+    one from the playlist's own source, since that's the only source its tracks can come from."""
     rows: list[TrackRow] = []
+    playlist = store.get_playlist(conn, playlist_id)
+    if playlist is None:
+        return rows
     for track_id in store.list_playlist_track_ids(conn, playlist_id):
         track = store.get_track(conn, track_id)
         if track is None:
@@ -249,5 +268,8 @@ def resolve_playlist_rows(conn: sqlite3.Connection, playlist_id: int) -> list[Tr
         if release is None:
             continue
         [(_, artist, title)] = store.effective_track_queries(release, [track])
-        rows.append(_build_track_row(conn, release, track, artist, title))
+        date_added = store.get_release_date_added(
+            conn, release["release_id"], playlist["source_type"], playlist["source_key"]
+        )
+        rows.append(_build_track_row(conn, release, track, artist, title, date_added))
     return rows

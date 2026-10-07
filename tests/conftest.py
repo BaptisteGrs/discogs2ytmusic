@@ -27,6 +27,7 @@ class FakeDiscogsClient:
     def iter_collection_basic(self, username: str):
         for r in self._releases:
             yield {
+                "date_added": r.get("date_added"),
                 "basic_information": {
                     "id": r["release_id"],
                     "artists": [{"name": r["artist"]}],
@@ -35,7 +36,7 @@ class FakeDiscogsClient:
                     "genres": r["genres"],
                     "year": r.get("year"),
                     "labels": [{"name": name} for name in r.get("labels", [])],
-                }
+                },
             }
 
     def iter_wantlist_basic(self, username: str):

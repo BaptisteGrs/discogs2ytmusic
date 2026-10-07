@@ -139,6 +139,7 @@ def _scan_dummy() -> None:
                 year=r.get("year"),
                 labels=r.get("labels", []),
                 videos=r.get("videos", []),
+                date_added=r.get("date_added"),
             )
             store.replace_tracks(
                 conn,

@@ -335,3 +335,44 @@ def test_scan_label_release_checks_cached_style_for_an_already_known_release(iso
 
         assert kept is False
         assert list(store.iter_releases_with_tracks(conn, source_type="label", source_key="123")) == []
+
+
+def test_scan_release_stores_discogs_date_added(isolated_cache):
+    item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2021-02-19T08:30:44-08:00"}
+
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+
+        assert store.get_release_date_added(conn, 1, "collection", "") == "2021-02-19T08:30:44-08:00"
+
+
+def test_scan_release_updates_date_added_on_rescan(isolated_cache):
+    """A re-scan without --refresh must still pick up the date, so an existing cache (whose
+    rows predate the column, or whose record was removed and re-added on Discogs) gets it."""
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), _basic_item(1, "Some Artist", "Some EP"), refresh=False)
+        assert store.get_release_date_added(conn, 1, "collection", "") is None
+
+        item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2023-05-16T07:25:33-07:00"}
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+
+        assert store.get_release_date_added(conn, 1, "collection", "") == "2023-05-16T07:25:33-07:00"
+
+
+def test_scan_release_stores_date_added_under_a_wantlist_source(isolated_cache):
+    item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2022-11-25T12:00:00-08:00"}
+
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False, source_type="wantlist", source_key="alice")
+
+        assert store.get_release_date_added(conn, 1, "wantlist", "alice") == "2022-11-25T12:00:00-08:00"
+
+
+def test_refresh_release_keeps_a_stored_date_added(isolated_cache):
+    item = {**_basic_item(1, "Some Artist", "Some EP"), "date_added": "2022-11-25T12:00:00-08:00"}
+
+    with store.connect() as conn:
+        scan_engine.scan_release(conn, _FakeClient(), item, refresh=False)
+        scan_engine.refresh_release(conn, _FakeLabelClient(), 1)
+
+        assert store.get_release_date_added(conn, 1, "collection", "") == "2022-11-25T12:00:00-08:00"

@@ -245,6 +245,8 @@ def scan_release(
         videos=None,
         source_type=source_type,
         source_key=source_key,
+        # A sibling of `basic_information`, not inside it — absent from label/seller listings.
+        date_added=item.get("date_added"),
     )
     conn.commit()
     return True

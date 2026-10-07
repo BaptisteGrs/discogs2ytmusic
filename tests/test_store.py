@@ -1259,3 +1259,61 @@ def test_add_tracks_to_playlist_drops_a_track_from_a_different_source(isolated_c
 
     assert added == 1  # only the collection-sourced track was actually added
     assert ordered_ids == [collection_track_id]
+
+
+def test_release_sources_table_migrates_in_date_added_column(isolated_cache):
+    """A release_sources table from before `date_added` existed must upgrade in place, keeping
+    its rows (and their local `added_at`) with the new column left NULL until the next scan."""
+    conn = sqlite3.connect(isolated_cache)
+    conn.execute(
+        """CREATE TABLE release_sources (
+            release_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            source_key TEXT NOT NULL DEFAULT '',
+            added_at REAL NOT NULL,
+            PRIMARY KEY (release_id, source_type, source_key)
+        )"""
+    )
+    conn.execute("INSERT INTO release_sources VALUES (1, 'collection', '', 1700000000.0)")
+    conn.commit()
+    conn.close()
+
+    with store.connect() as conn:
+        row = conn.execute("SELECT added_at, date_added FROM release_sources WHERE release_id = 1").fetchone()
+        assert tuple(row) == (1700000000.0, None)
+
+        store.record_release_source(conn, 1, "collection", "", date_added="2021-05-01T10:00:00-07:00")
+        assert store.get_release_date_added(conn, 1, "collection", "") == "2021-05-01T10:00:00-07:00"
+
+
+def test_record_release_source_updates_date_added_without_touching_added_at(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Artist", "Title", [], [], date_added="2020-01-01T00:00:00-08:00")
+        added_at = conn.execute("SELECT added_at FROM release_sources WHERE release_id = 1").fetchone()[0]
+
+        store.record_release_source(conn, 1, "collection", "", date_added="2024-06-01T12:00:00-07:00")
+
+        row = conn.execute("SELECT added_at, date_added FROM release_sources WHERE release_id = 1").fetchone()
+    assert tuple(row) == (added_at, "2024-06-01T12:00:00-07:00")
+
+
+def test_record_release_source_without_a_date_keeps_the_stored_one(isolated_cache):
+    """Label/seller scans and `refresh_release` re-tag without knowing Discogs' date — that
+    must not wipe a date a collection scan already stored."""
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Artist", "Title", [], [], date_added="2020-01-01T00:00:00-08:00")
+        store.upsert_release(conn, 1, "Artist", "Title", [], [])
+
+        assert store.get_release_date_added(conn, 1, "collection", "") == "2020-01-01T00:00:00-08:00"
+
+
+def test_date_added_is_stored_per_source(isolated_cache):
+    with store.connect() as conn:
+        store.upsert_release(conn, 1, "Artist", "Title", [], [], date_added="2020-01-01T00:00:00-08:00")
+        store.record_release_source(conn, 1, "wantlist", "alice", date_added="2018-03-03T03:03:03-08:00")
+
+        assert store.get_release_date_added(conn, 1, "collection", "") == "2020-01-01T00:00:00-08:00"
+        assert store.get_release_date_added(conn, 1, "wantlist", "alice") == "2018-03-03T03:03:03-08:00"
+        assert store.get_release_date_added(conn, 1, "label", "123") is None
+        [(release, _)] = store.iter_releases_with_tracks(conn, source_type="wantlist", source_key="alice")
+        assert release["date_added"] == "2018-03-03T03:03:03-08:00"
